@@ -1,0 +1,434 @@
+# 05. 주요 결정 로그 (Decision Log)
+
+설계상 의미 있는 선택을 결정·근거·대안 형태로 기록한다.
+새 결정이 생기면 이 목록 끝에 추가한다.
+
+---
+
+### D1. 앱 셸로 Tauri v2 채택
+- **결정**: Electron이 아닌 **Tauri v2**(Rust + 시스템 WebView2)로 데스크톱 앱 구성.
+- **근거**: 가벼운 번들/메모리, OS 프로세스·파일 제어를 Rust로 안전하게 수행,
+  Windows 네이티브 동작(실행파일 해석·프로세스 실행)이 핵심이므로 Rust 백엔드가 적합.
+- **영향**: Rust 빌드에 MSVC 툴체인 필요 → [06-build-and-environment.md](06-build-and-environment.md).
+
+### D2. 탐지 로직을 "처음부터 설계"하지 않고 Open Design 데몬을 Rust로 포팅
+- **결정**: Open Design `apps/daemon/src/runtimes/`의 검증된 동작을 Rust로 재구현.
+- **근거**: 실행파일 해석/shim 처리/모델 파싱은 엣지케이스가 많고 이미 검증됨.
+  바닥부터 재발명하지 않고 사양을 그대로 옮기는 편이 안전.
+- **영향**: 함수/상수 이름과 동작을 원본과 1:1 대응시켜 추적성을 유지(코드 주석에 원본 위치 명시).
+
+### D3. 실행파일 해석에 PATH + 잘 알려진 툴체인 디렉터리 + PATHEXT
+- **결정**: PATH만 믿지 않고 npm 전역/scoop/bun/cargo/deno/volta/fnm/`~/.opencode/bin`을
+  명시 보강하고, `PATHEXT`(+확장자 없음)로 후보를 확장.
+- **근거**: GUI/패키징 앱은 stripped PATH로 뜨는 경우가 많아 설치돼 있어도 못 찾는 문제 발생.
+- **대안 기각**: "PATH만 검색" → 실사용 환경에서 미탐지 빈번.
+
+### D4. `.cmd`/`.bat` shim은 `cmd.exe /d /s /c`로 실행
+- **결정**: shim 실행 시 직접 spawn하지 않고 `cmd.exe`로 감싼다.
+- **근거**: Rust 표준 라이브러리의 BatBadBut 완화책이 `.bat/.cmd` 인자 전달을 거부함.
+  실제 `.exe`인 `cmd.exe`를 거치면 우회 가능.
+- **세부 규칙**: 공백 경로 따옴표가 `/s` 규칙에 먹히지 않도록 **항상 인자 ≥ 1개**로 호출.
+  (자세히: [03-agent-detection.md](03-agent-detection.md))
+
+### D5. 프로브는 타임아웃 + 콘솔 비표시 + 파이프 드레인
+- **결정**: `--version` 3초 / `models` 15초 타임아웃, `CREATE_NO_WINDOW`,
+  stdout/stderr를 스레드로 끝까지 읽기.
+- **근거**: UI 멈춤·콘솔 깜빡임·대용량 출력 파이프 데드락을 방지.
+
+### D6. `models` 실패 시 정적 fallback 카탈로그 제공
+- **결정**: live 목록을 못 얻으면 고정 모델 목록을 보여주고 `fallback`로 표기.
+- **근거**: 오프라인/오류 상황에서도 UI가 의미 있는 선택지를 제공. 출처를 명확히 구분.
+
+### D7. 탐지 커맨드는 async + spawn_blocking
+- **결정**: `detect_opencode`를 `async`로 두되 실제 작업은 블로킹 스레드에서 수행.
+- **근거**: 최대 15초까지 걸릴 수 있는 `models` 프로브가 UI/IPC 스레드를 막지 않도록.
+
+### D8. 사용자 지정 경로를 `settings.json`에 영구화 (`OPENCODE_BIN` 등가물)
+- **결정**: 자동 탐지 보완 수단으로 사용자 지정 경로를 앱 config 디렉터리에 저장.
+- **근거**: 사내망/비표준 설치 환경에서 자동 탐지가 실패할 수 있음.
+  환경변수 `OPENCODE_BIN`과 동일한 의미로 제공해 일관성 확보.
+
+### D9. 디자인 시스템은 Open Design 토큰을 Tailwind v4 `@theme`로 매핑
+- **결정**: CSS 변수 토큰을 단일 출처로 두고 Tailwind 유틸리티에 inline 매핑.
+- **근거**: 라이트/다크 자동 전환, 토큰만 바꾸면 전역 테마 변경, 의미 기반 클래스로 일관성.
+  (자세히: [04-ui-and-design-system.md](04-ui-and-design-system.md))
+
+### D10. 프론트 타입은 백엔드 serde 구조체의 수동 미러
+- **결정**: 코드 생성 도구 없이 `lib/types.ts`로 수동 미러링, 직렬화는 `camelCase`.
+- **근거**: v0.1 규모에서 도구 도입 비용이 과함. 대신 "한쪽 변경 시 양쪽 동기화" 규칙으로 관리.
+- **재검토 조건**: 커맨드/모델이 늘어 동기화 부담이 커지면 `ts-rs` 등 자동화 검토.
+
+### D11. 다중 에이전트를 "정의(def) + 레지스트리"로 일반화
+- **결정**: OpenCode 전용 하드코딩을 걷어내고, `agents.rs`의 정적 `AGENT_DEFS`(opencode,
+  claude, codex, gemini, antigravity)와 `detect_agent_blocking(def, custom)` 공통 파이프라인으로 전환.
+  커맨드도 `list_agents`/`detect_agent`/`set_agent_bin`으로 일반화.
+- **근거**: Open Design의 검증된 "def + 공통 probe" 구조를 그대로 따름. 새 에이전트 추가 비용이
+  "레지스트리 항목 1개(+필요 시 파서)"로 최소화되고 프론트는 자동 반영.
+- **세부**: `AgentDef`는 `static`(const 아님)으로 두어 `&'static AgentDef`를 `spawn_blocking`
+  스레드로 그대로 넘긴다. version args는 5개 모두 `--version`이라 def 필드로 두지 않고 하드코딩.
+
+### D12. claude/gemini/antigravity는 정적 fallback 모델 전용
+- **결정**: 이 세 에이전트는 줄/JSON 기반 모델 나열 명령이 없어 `models_probe = None` → 항상 fallback.
+  특히 claude는 Open Design에서 **MMS 라우트 fetch**로 라이브 목록을 얻지만, 이는 자체 프록시
+  인프라 의존이라 이 로컬 탐지 앱에서는 **포팅하지 않는다**.
+- **근거**: 로컬 단독 탐지 도구에는 해당 인프라가 없음. 오프라인에서도 의미 있는 선택지를 제공하고
+  출처를 `fallback`으로 명확히 표기.
+- **재검토 조건**: 각 CLI가 로컬에서 모델을 나열하는 안정적 명령을 제공하면 `models_probe` 추가.
+
+### D13. codex 모델은 `debug models` JSON 파서로 처리
+- **결정**: codex는 `debug models`가 JSON(`{models:[…]}`)을 내므로 `parse_codex_debug_models`
+  (serde_json) 추가. `visibility=="hidden"` 스킵, id=`slug`||`id`, label=`display_name`||`name`||id,
+  중복 제거, 유효 0개면 fallback. 파서 시그니처는 `fn(&str)->Option<Vec<ModelOption>>`로 통일.
+- **근거**: 에이전트마다 모델 출력 형식이 달라(line vs JSON) 파서를 def에 주입하는 편이 깔끔.
+  `serde_json`은 이미 의존성이라 추가 비용 없음.
+
+### D14. 설정은 에이전트별 경로 맵 + 레거시 마이그레이션
+- **결정**: `Settings`를 `{ agents: HashMap<id, { customBin }> }`로 변경. v0.1의 단일
+  `opencodeBin`은 `skip_serializing` 레거시 필드로 받아 load 시 `agents.opencode`로 흡수(다음 save에서 제거).
+- **근거**: N개 에이전트의 사용자 지정 경로를 보관해야 함. 마이그레이션으로 기존 테스터의 경로 보존(self-healing).
+
+### D15. antigravity에 `ANTIGRAVITY_BIN` env override 추가 (upstream 편차)
+- **결정**: Open Design은 antigravity(`agy`)에 env override를 매핑하지 않지만, 다른 에이전트와
+  일관성을 위해 `ANTIGRAVITY_BIN`을 추가.
+- **근거**: 무해하고 일관적. 사용자 지정 경로(settings)가 1차 수단이며 env는 보조 수단.
+
+### D16. 에이전트별 검색 디렉터리는 슬라이스, IPC id는 검증
+- **결정**: def별 추가 검색 경로를 `extra_search_subdirs: &[&str]`(없으면 `[]`)로 두고, 기존
+  하드코딩 `.opencode\bin`을 opencode def로 이전. `detect_agent`/`set_agent_bin`은 알 수 없는
+  `agentId`를 unwrap하지 않고 에러로 반환.
+- **근거**: 공통 툴체인 경로는 공유하되 에이전트 고유 설치 위치는 def로 확장 가능. IPC는 임의
+  문자열이 들어올 수 있어 방어적 검증이 필요.
+
+### D17. 사내 도구 AI Pro는 빌트인 def로 추가 (런타임 프로필 로더 미포팅)
+- **결정**: 사내 CLI 도구 **AI Pro**(`aipro`, Gemini CLI 호환)를 `AGENT_DEFS`에 6번째 빌트인
+  `AgentDef`로 추가. Open Design에서는 `~/.open-design/agents.local.json`의 `baseAgent: "gemini"`
+  로컬 프로필이었지만, **런타임 JSON 프로필 로더는 포팅하지 않는다**(사용자 선택: 최소 변경).
+- **근거**: 현 시점 요구는 "AI Pro 1종 등록"뿐이라 정적 def 추가(약 10줄)가 가장 단순하고
+  기존 5개와 동일 경로로 검증됨. gemini 호환이라 `models_probe = None`(fallback 전용),
+  fallback = `glm-5.1`/`qwen3.6-27b`/`gpt-oss-120b`. 프로필의 `env`
+  (`GEMINI_CLI_TRUST_WORKSPACE`)는 **에이전트 실행 시점** spawn env라 탐지 범위와 무관 → 미반영.
+  `AIPRO_BIN`은 다른 에이전트와의 `*_BIN` 일관성용 보조 override로 추가.
+- **재검토 조건**: 사내 에이전트가 늘거나 재빌드 없이 추가/수정해야 하면, Open Design의
+  `readLocalAgentProfileDefs`(`agents.local.json` + `baseAgent` 상속)를 포팅하고 레지스트리를
+  동적(`OnceLock<Vec<AgentDef>>` 등)으로 전환한다. 그때 AI Pro도 프로필로 이전 가능.
+
+---
+
+### D18. 실행(run) 엔진은 SSE 데몬이 아닌 네이티브 Tauri `Channel`
+- **결정**: Open Design 데몬의 run/stream 절반(`runs.ts`/`defs/claude.ts`/`claude-stream.ts`)을
+  `run.rs`로 포팅하되, HTTP+SSE 전송을 걷어내고 **`tauri::ipc::Channel<RunEvent>`**로 스트리밍.
+  `run_agent`는 워커 스레드에서 자식 프로세스를 spawn하고 `runId`를 즉시 반환, `cancel_run`으로 취소.
+  취소용 인메모리 `RunRegistry`(`Mutex<HashMap>`)를 managed state로 둔다. (상세: [07](07-workspace-and-runs.md).)
+- **근거**: 로컬 단독 데스크톱 앱에는 장수 HTTP 서버가 불필요. Channel이 웹뷰로의 1:1 스트리밍에
+  가장 관용적이며, **새 Cargo 의존성 0**(std 프로세스 + reader 스레드는 `exec.rs`와 동일 패턴).
+- **세부**: `.cmd`/`.bat` shim 래핑 + `CREATE_NO_WINDOW`는 `exec.rs::command_for`로 추출해
+  탐지(run_capture)와 실행(run.rs)이 공유.
+
+### D19. Claude Code 1급 지원 + 나머지는 plain 폴백
+- **결정**: 이번 증분은 **Claude Code**만 완전한 `stream-json` 파서(text/thinking/tool-call)로
+  구동하고, 나머지 5종은 `RunSpec::plain()`(=`-p "<prompt>"` + 원시 stdout)로 best-effort 실행.
+- **근거**: Claude는 구조화 스트림이 가장 풍부하고 open-design 레퍼런스가 있어 검증 용이. 모든
+  에이전트의 파서(codex JSON, gemini/opencode json-event-stream 등)를 한 번에 포팅하는 비용은 과함.
+- **한계**: plain 폴백은 `.cmd` shim + cmd 메타문자(`&|><`) 조합에서 취약할 수 있음(문서화된 제약).
+- **재검토 조건**: 각 CLI를 실사용하게 되면 `StreamFormat`을 넓히고 전용 파서를 `run.rs`에 추가.
+
+### D20. 세션 재개는 capture-style (uuid 크레이트 없이)
+- **결정**: Claude의 `system/init`이 내는 `session_id`를 `status` 이벤트로 프론트가 캡처·보관하고,
+  다음 턴에 `RunArgs.sessionId` → `--resume <id>`로 이어간다(첫 턴은 `--session-id` 미지정).
+- **근거**: Open Design은 첫 턴에 UUID를 mint해 `--session-id`로 주입하지만, capture 방식이면
+  `uuid` 의존성이 필요 없고 로컬 앱에 충분. codex의 capture-style과 같은 접근.
+
+### D21. 캔버스 파일 접근은 `fs` 플러그인 대신 커스텀 커맨드
+- **결정**: 파일 뷰어에 필요한 read-only 두 작업만 `files.rs`의 `list_dir`/`read_file` 커맨드로 제공
+  (`fs` 플러그인 + capability 표면 미도입). `read_file`은 2 MiB 상한.
+- **근거**: 필요한 표면이 극소이고, 플러그인 권한/스코프 설정 비용을 피함. HTML 미리보기는
+  클라이언트에서 샌드박스 iframe(`allow-scripts`, same-origin 없음)로 렌더.
+
+### D22. 증분 1 = HOME 런처 + 워크스페이스 셸 + 최소 파일 뷰어 캔버스
+- **결정**: 임포트한 디자인(`Operation Wizard.dc.html`)의 HOME 런처(프롬프트 + 4 카테고리 + 최근)와
+  좌 대화 / 우 캔버스 워크스페이스 셸을 충실히 구현하고 대화를 **실제 에이전트에 연결**하되,
+  캔버스는 **작업 폴더 파일 트리 + 뷰어 + HTML 미리보기**로 최소 구현한다. 디자인의 5개 아티팩트
+  탭(저장소 분석/영향도/계획서/변경 가이드/문서)과 스크립트형 요구사항 명확화 플로우는 **후속 증분**.
+- **근거**: "핵심부터 차례대로"(사용자 선택). 아티팩트 탭은 아티팩트를 생성하는 에이전트
+  오케스트레이션 파이프라인이 선행되어야 하므로 셸+연결을 먼저 세운다.
+- **재검토 조건**: 에이전트가 구조화된 산출물(분석/계획/diff)을 낼 수 있게 되면, 캔버스를 파일
+  뷰어에서 5탭 아티팩트 워크스페이스로 확장하고 `step` 진행 모델을 도입.
+
+---
+
+### D23. codex·gemini·aipro 1급 실행 (json-event-stream 파서 포팅)
+- **결정**: 증분 1의 plain 폴백(`-p "<prompt>"`)이 codex에선 `--profile`과 충돌하고 aipro에선
+  모델 미전달로 실패하는 문제를 해결하기 위해, Open Design `defs/{codex,gemini}.ts` +
+  `json-event-stream.ts`를 포팅해 세 에이전트를 1급 지원한다. codex=`exec [resume] --json`
+  +프롬프트 stdin +`--model` +Windows 샌드박스, gemini/aipro=`--output-format stream-json --yolo`
+  +프롬프트 stdin +`--model` +env `GEMINI_CLI_TRUST_WORKSPACE=true`. `StreamFormat`에 `CodexJson`/
+  `GeminiJson`, `RunSpec`에 `prompt_format`/`env` 추가. 파서는 `run.rs`의 `parse_codex_event_line`/
+  `parse_gemini_event_line`(단위 테스트).
+- **근거**: 두 CLI 모두 `stream-json`/`--json` 출력이라 raw로 흘리면 JSON 노이즈가 되고, codex의
+  세션 이어가기(D25)에는 스트림의 `thread_id` 캡처가 필요하다. plain으로는 두 문제를 못 푼다.
+- **세부**: aipro는 모델 미지정/`default`면 사내 모델 `glm-5.1`을 강제로 `--model`에 넣어
+  "Model not found"를 방지한다. opencode·antigravity는 이번 범위 밖(계속 `Plain`).
+- **재검토 조건**: aipro가 `--output-format stream-json`을 지원하지 않으면 aipro만 텍스트 모드로 조정.
+
+### D24. Windows 취소는 프로세스 트리 종료(`taskkill /T /F`)
+- **결정**: `cancel_run`이 자식만 `kill`하지 않고, 자식 pid로 `taskkill /PID <pid> /T /F`를 실행해
+  프로세스 트리 전체를 종료한다(실패 대비 `child.kill()` 병행).
+- **근거**: 에이전트는 npm `.cmd` shim → `cmd.exe` → node 손자 구조라, 직접 자식(cmd.exe)만 kill하면
+  실제 에이전트(node)가 살아남아 "정지"가 동작하지 않는다. Open Design도 Windows에선 트리 종료를
+  하지 않아(직접 kill만) 동일 누수가 있으며, 이 앱에서 보강한 편차다.
+
+### D25. Claude 세션은 capture가 아니라 client-mint (D20 갱신)
+- **결정**: Claude 세션 id를 스트림에서 캡처하지 않고, 프론트가 대화 시작 시 `crypto.randomUUID()`로
+  **미리 mint**해 첫 턴 `--session-id`, 이후 `--resume`으로 넘긴다.
+- **근거**: 정지(취소) 요구(#4) 때문. capture 방식은 취소가 `system/init` 전에 일어나면 세션 id를
+  못 얻어 이어가기가 실패한다. mint면 취소 시점과 무관하게 항상 재개 가능. `uuid` 크레이트는
+  여전히 불필요(웹뷰 `crypto.randomUUID`). codex는 여전히 capture(`thread_id`), gemini/aipro는
+  세션 미지원이라 transcript 재전송.
+
+---
+
+### D26. 대화 영속화 = 파일 기반, 프로젝트=작업 폴더 (`projects.rs`) — **D32로 대체됨**
+> ⚠️ 프로젝트=작업 폴더(결정적 id) 부분은 **D32로 대체**되었다. 파일 기반 영속화·데이터 모델·새 의존성 0
+> 원칙은 유지된다. 아래는 최초 결정의 기록이다.
+
+- **결정**: 인메모리 대화를 디스크에 저장한다. 루트 `~/.operation-wizard/projects/<projectId>/`,
+  대화는 `sessions/<sessionId>/session.json`. **프로젝트 = 작업 폴더(workdir)**이며 `projectId`는
+  workdir 경로에서 **결정적으로**(정규화 후 `<basename>-<fnv1a8>`) 생성한다. 홈 루트는 앱이 이미
+  쓰는 `std::env::var("USERPROFILE")` 패턴을 재사용(Windows). 첫 질문 시 폴더가 생성되고 매 턴
+  `end`마다 재저장된다. 데이터 모델은 `Project`/`SessionMeta`/`StoredSession`(serde `camelCase`).
+- **근거**: "프로젝트별 세션 기록 열람/이어가기" 요구를 자연스럽게 만족(workdir 스코프). 결정적 id는
+  조회/매핑 파일을 없애 `ensure_project`를 idempotent하게 한다. **새 Cargo 의존성 0** — id는 프론트
+  `crypto.randomUUID()`, 타임스탬프는 `SystemTime`, 메시지는 `serde_json::Value`로 보관해 백엔드가
+  프론트 `ChatMessage` 형태에 결합되지 않는다. 핵심 fn은 `root: &Path`(=`settings.rs` 스타일)로 두어
+  temp root 단위 테스트.
+- **대안 기각**: "홈 진입마다 새 프로젝트" → 같은 폴더의 기록이 파편화됨. "projectId 클라이언트 mint +
+  매핑 파일" → 조회 로직·상태가 늘어 결정적 id보다 복잡.
+- **재검토 조건**: 프로젝트가 여러 폴더/원격을 아우르거나 전문 검색·대량 기록이 필요해지면 SQLite +
+  프로젝트 목록 화면으로 승격.
+
+### D27. "새 세션"은 ChatPanel 리마운트로 초기화
+- **결정**: 새 세션 버튼은 `WorkspaceView`의 remount 키(`sessionNonce`)를 올려 `ChatPanel`을 통째로
+  리마운트한다(워크스페이스·작업 폴더는 유지). 이로써 `messages`/`agentId`/`sessionIdRef`/
+  `resumeRef`/`seededRef`/`persistIdRef` 등 모든 state·ref가 한 번에 초기화되고, `started=false`가
+  되어 **에이전트 select가 다시 활성화**된다. 기록 열기도 같은 경로로 `initialSession`을 주입해 remount.
+- **근거**: 대화 상태가 전부 `ChatPanel` 지역 state라 키 remount가 가장 단순·확실한 리셋. 수동으로
+  각 ref를 되돌리는 것보다 누락 위험이 없다.
+
+### D28. codex TLS 오류(BadSignature)는 앱 밖 환경 이슈 — 안내+새 세션 복구만
+- **결정**: codex의 `Reconnecting… (invalid peer certificate: BadSignature)`는 **codex CLI 자체**의
+  rustls TLS 검증 실패(사내 TLS 검사 프록시의 재서명 인증서를 불신)로 결론. 앱은 해당 문자열을
+  `RunEvent::Error`로 중계할 뿐이며(자체 재시도 없음), (a) `errorHint`로 한글 안내를 덧붙이고 (b)
+  **새 세션**으로 회복하도록 한다. **환경변수/CA 번들 주입은 이번 범위에서 도입하지 않는다**(사용자 선택).
+- **근거**: 근본 원인이 앱 로직이 아니라 OS/네트워크 신뢰 저장소라 앱 코드로 "고칠" 수 없다. 새 세션은
+  codex의 `resume` 루프(깨진 thread로 계속 실패)에서 벗어나게 해 실질적 회복 경로가 된다.
+- **재검토 조건**: 사내에서 codex가 존중하는 CA/proxy 주입 방식이 확인되면, 에이전트 실행 env에
+  `SSL_CERT_FILE`/`HTTPS_PROXY` 등을 설정으로 주입하는 기능을 추가한다.
+
+### D29. 홈 최근목록은 전역 프로젝트 단위 (열기 = 작업 폴더 전환 + 마지막 세션) — **D33로 개정됨**
+> ⚠️ "열기 = 전역 workdir 전환(`setWorkdir`)" 부분은 **D33로 개정**되었다(열기는 그 프로젝트의 id +
+> 저장된 workdir로 워크스페이스에 진입하며 전역 workdir을 바꾸지 않는다). 프로젝트 단위 최근목록·
+> `ProjectSummary` 롤업은 유지된다.
+
+- **결정**: 홈 "최근 작업"을 세션 단위(`listSessions(workdir)`)에서 **프로젝트 단위**(`list_projects`,
+  모든 작업 폴더 전역)로 바꾼다. 각 항목은 프로젝트 제목 + 활동 롤업(`ProjectSummary`)을 보여주고,
+  클릭하면 앱 작업 폴더를 그 프로젝트로 **전환**(`setWorkdir`)한 뒤 **가장 마지막 세션**을 연다.
+  ChatPanel 헤더의 **기록** 팝오버는 그대로 *현재 프로젝트의 세션 목록*(프로젝트 내 세션 전환)으로 둔다.
+- **근거**: 프로젝트=작업 폴더 모델(D26)에서 "여러 프로젝트를 오가며 재개"하려면 홈이 폴더 경계를 넘는
+  진입점이어야 한다. 세션 단위 목록은 현재 폴더 1개로 스코프되어 폴더 전환 수단이 없었다. 이어쓰기·캔버스가
+  올바른 폴더에서 동작하도록 열기 시 workdir 전환은 필수. `ProjectSummary`는 기존 `list_sessions_at`
+  롤업으로 계산해 새 상태/의존성이 없다.
+- **홈↔워크스페이스 역할 분담**: 홈=프로젝트 간 이동(폴더 전환), ChatPanel 기록=프로젝트 내 세션 이동.
+
+### D30. 요구사항 명확화는 전용 도구 채널 없이 프롬프트 주입 + 텍스트 블록 파싱
+- **결정**: `plan` 카테고리 **첫 턴**에 프롬프트 앞에 `CLARIFY_INSTRUCTION`을 붙여(사용자에겐 안 보임)
+  에이전트가 ` ```clarify ` 펜스 JSON 블록으로 명확화 질문을 먼저 내도록 유도하고, 스트림 `end` 시 그
+  블록을 **클라이언트에서 파싱**(`parseClarify`, `src/lib/clarify.ts`)한다. 파싱 성공 시 블록을 채팅에서
+  제거(`CLARIFY_NOTE`로 대체)하고 질문을 캔버스 폼으로 올린다. **파싱 실패/취소 시 일반 chat으로 폴백**.
+- **근거**: 로컬 CLI 에이전트 스트림에는 우리가 제어하는 커스텀 tool-call 채널이 없다. 모든 에이전트
+  (claude/codex/gemini/aipro)가 낼 수 있는 유일한 이식 가능 프로토콜은 **텍스트 내 약속된 블록**이다.
+  2단 파서(clarify 우선 → 임의 펜스 JSON)와 관대한 질문 검증 + 완전 폴백으로 형식 미준수에 견딘다.
+- **대안 기각**: 백엔드 tool 채널/전용 커맨드 — 로컬 CLI 스트림에 표준 도구 프로토콜이 없어 이식 불가.
+- **재검토 조건**: 특정 에이전트가 구조화 출력을 안정 지원하면 그 경로로 승격.
+
+### D31. 명확화 질문은 캔버스 폼 + WorkspaceView로 상태 리프트, pending은 v1 transient
+- **결정**: 질문은 우측 **캔버스 '요구사항' 탭**에 폼(단일/복수/자유입력)으로 렌더한다. 대화(생성)↔캔버스
+  (렌더/답변) 매개 상태(`clarify`/`canvasTab`/`answerSubmission`/`streaming`)는 `WorkspaceView`가 소유
+  한다. 폼 제출 → `formatClarifyAnswers`로 만든 답변을 `ChatPanel.send`가 다음 턴으로 전송(세션형 resume /
+  세션리스 transcript). 주입은 **첫 plan 턴에만**(`clarifyArmedRef`), 답변 턴엔 재주입 없음. **대기(미답변)
+  질문은 v1에서 transient**(영속화 안 함) — 저장 세션 재오픈 시 안내문만 보이고 재주입 없음.
+- **근거**: 사용자 요구가 "캔버스에서 질문". 상태를 부모로 올리면 두 패널이 형제인 채로 왕복 가능. transient는
+  스키마/백엔드 변경 0으로 최소 정확. (후속: `ChatMessage.clarify?` 임베드로 자동 영속·복원 가능 — 범위 밖.)
+
+---
+
+### D32. 프로젝트를 workdir에서 분리 — projectId는 클라이언트 mint (D26 대체)
+- **결정**: 프로젝트 id를 workdir에서 **결정적으로 파생하지 않고**, 프론트가 `crypto.randomUUID()`로
+  **mint**한다. 새 대화/카테고리 시작 = 새 프로젝트(새 id). 백엔드 커맨드는 모두 **projectId-keyed**로
+  전환: `ensure_project(projectId, workdir, title, category)`, `save_session(projectId, session)`,
+  `list_sessions(projectId)`, `load_session(projectId, sessionId)`. `ensure_project`가 workdir를
+  **resolve**한다 — 외부 폴더가 주어지면 그대로, 없으면 프로젝트 전용 `projects/<id>/workspace/`
+  하위폴더(생성 후 그 경로 반환). 프론트는 반환된 `workdir`을 실행 cwd + 캔버스 루트로 쓴다.
+  `save_session`은 더 이상 manifest를 만들지 않는다(첫 저장 전 `ensure_project` 선행이 불변식).
+  외부 폴더는 **홈에서 프로젝트별로 지정**한다(R1; 초기엔 전역 `settings.workdir`이었으나 D33 R1에서
+  폐기·삭제). `Project`에 `category` 추가(`#[serde(default)]`로 구 manifest 하위호환).
+- **근거**: 사용자 요구 — "어떤 질문이든 같은 프로젝트가 열리는" 문제(D26의 workdir=프로젝트 결정성)를
+  해소하려면 프로젝트를 폴더에서 분리해야 한다. 폴더명=projectId라서 **기존 결정적-id 폴더도 그대로 열림**
+  (마이그레이션 불필요). 기본 cwd를 프로젝트 자체 폴더로 두면 사용자가 폴더를 고르지 않아도 격리된
+  작업 공간이 생긴다. **새 Cargo 의존성 0**(id=프론트 mint). `workspace/` 하위폴더는 `project.json`/
+  `sessions/`를 캔버스 트리에서 분리한다(`files.rs::list_dir`의 스킵 목록이 이들을 못 거르므로).
+- **대안 기각**: flat `projects/<id>/`(캔버스에 영속화 노이즈 노출); `settings.workdir` 재정의 없이
+  프로젝트마다 폴더 강제 선택(사용자 마찰).
+- **재검토 조건**: 한 프로젝트가 여러 폴더/원격을 아우르면 workdir 목록 모델로 승격.
+
+### D33. 프로젝트 열기 = 워크스페이스 진입(그 프로젝트 id+workdir), 전역 workdir 미변경 (D29 개정)
+> ⚠️ **R1 개정**: 전역 `settings.workdir`(상단바 picker)을 **폐기**했다(`set_workdir`/`Settings.workdir`
+> 삭제). 폴더 선택은 **홈 프롬프트 아래의 작업 폴더 지정 버튼**으로 프로젝트별·transient(미지정=자동)로
+> 이동했고, 상단바의 작업 폴더 표시도 제거했다. 아래 결정의 나머지(프로젝트별 workdir·지연 생성·빈
+> 프로젝트 숨김)는 유지된다.
+
+- **결정**: 홈 최근목록에서 프로젝트를 열 때 그 프로젝트의 **id + 저장된 workdir**를 워크스페이스로 넘겨
+  진입한다(`HomeArea`가 `activeProject{id,workdir}` 소유, `WorkspaceView`가 `resolvedWorkdir` 소유해 D27
+  remount에도 유지). 새 프로젝트는 홈 진입 시 새 id를 mint하고, 홈에서 폴더를 지정하면 그 폴더를, 아니면
+  첫 send에서 `ensure_project`로 **지연 생성**(프로젝트 전용 `workspace/`)한다. 빈 프로젝트(세션 0)는 홈
+  목록에서 숨긴다.
+- **근거**: D32에서 workdir이 프로젝트별 값이 되었으므로 전역 workdir 전환/표시는 부적절. 지연 생성은
+  D26의 "첫 질문 시 폴더 생성" 불변식을 유지해 워크스페이스 입·퇴장만으로 빈 폴더가 생기지 않게 한다.
+  폴더 선택을 홈으로 옮겨 "새 대화 = 새 프로젝트(기본 자동 폴더, 선택 시 지정 폴더)" 모델을 명확히 했다.
+- **ensure 규약(R1)**: 프레시 채팅은 첫 send에서 **항상 1회 `ensure_project` 호출**(지정 폴더가 미리
+  알려져 있어도) — 매니페스트를 반드시 기록해 최근목록 누락을 막는다(`ChatPanel.ensuredRef`).
+- **표시기**: 활성 프로젝트 폴더는 캔버스 툴바 폴더 칩이 표시한다(상단바는 폴더를 표시하지 않음).
+
+### D34. 카테고리 워크플로우 = 클라이언트 단계 오케스트레이터 (D30/D31 일반화)
+- **결정**: clarify 1회성 기계(D30/D31)를 **단계 오케스트레이터**(`src/lib/workflow.ts`)로 일반화한다.
+  `Step{id,kind,instruction,progress?,file?}` + `WORKFLOWS: Record<Category, Step[]>`. `plan`은 대표
+  플로우 `[clarify → search → document(docs/plan.md) → chat]`로 완전 구현, 나머지 카테고리는 턴1에만
+  방향을 잡는 유도 서문(`chat` 단계 1개)으로 기반만 마련(단계 추가는 배열 확장). `ChatPanel`은 단계 커서
+  (`stepIndexRef`/`stepArmedRef`/`inflightStepRef`)로 매 턴 지시문을 주입하고 `end`에서 `step.kind`로
+  분기한다 — **상호작용 단계(clarify)는 확인 지점에서 멈추고**(사용자 폼 답변이 다음 단계를 발사),
+  **생성형 단계(search/document)는 자동 진행**(nonce+effect로 다음 턴 자동 발사, stale 클로저 회피).
+  document 단계는 에이전트가 **실제 파일**을 쓰게 하고 캔버스에서 연다(기존 `onOpenFile`+파일 뷰어 재사용).
+  search 단계는 스트리밍되는 `toolUse`/`toolResult`(에이전트의 Grep/Read)를 그대로 활용. 단계 커서는
+  **transient**(D31 확장; 로드 세션은 끝으로 시작해 일반 대화). **백엔드 도구 채널은 여전히 없음(D30 재확인)**.
+- **근거**: 로컬 CLI 스트림에 표준 도구 프로토콜이 없어 클라이언트 오케스트레이션이 유일한 이식 경로.
+  파일 뷰어·도구 이벤트를 재사용해 신규 백엔드 0, 신규 캔버스 렌더 최소(트리 새로고침 nonce 1개).
+- **안전장치**: 단조 증가 커서 + 1회성 arm + `succeeded`에만 자동발사 + 종단 `chat` + 상한으로 무한
+  진행 방지. 취소/실패는 자동진행 중단→일반 대화. 파싱 실패는 일반 대화 폴백(대화 안 깨짐).
+- **한계**: 세션리스(gemini/aipro)는 transcript 재전송이라 지시문 lossy·크기 증가; plain(opencode/
+  antigravity)은 도구 스트림/파일쓰기 보장이 약해 degrade. plan은 claude/codex/gemini에서 가장 풍부.
+- **재검토 조건**: 카테고리별 고유 단계가 늘면 `Step.kind`/캔버스 렌더를 확장(예: 소스 목록 전용 탭).
+
+### D35. 요구사항 폼은 accent 카드 그리드 (options는 string[] 유지)
+- **결정**: `RequirementsForm`의 single/multi를 세로 버튼 행에서 **반응형 카드 그리드**(2열, hover lift,
+  선택 시 accent 테두리+틴트+체크 배지)로 재디자인한다. `text`/`required`/스트리밍 비활성/제출 흐름은
+  유지. `ClarifyQuestion.options`는 **`string[]` 그대로**(옵션별 설명 미지원) 두어 프로토콜 무변경.
+- **근거**: 사용자 요구 — 콤보박스형보다 카드 버튼. 앱 전역 선택색(accent) 관례를 따르고 미사용 blue
+  토큰은 도입하지 않아 토큰 변경 0. 옵션 설명 지원은 clarify 프로토콜(스키마·파서·포맷)을 건드려 별도
+  증분으로 연기.
+- **재검토 조건**: 카드에 부제/설명이 필요해지면 `options`를 `(string | {value,label,description})[]`로
+  확장하고 `coerceQuestions`·`CLARIFY_INSTRUCTION`·`formatClarifyAnswers`를 함께 갱신.
+
+---
+
+### D36. 카테고리 시작 = 고정 선택지 우선 + 프롬프트 자동채움 (D30/D34 확장)
+- **결정**: 카테고리 진입 시 **프롬프트가 아니라 고정 선택지(옵션) 폼을 먼저** 보여준다. 옵션은
+  카테고리별 정적 카탈로그(`src/lib/options.ts`의 `CATEGORY_OPTIONS: Record<Category, ClarifyQuestion[]>`)로
+  앱에 정의하고, 진입 즉시(에이전트 대기 없이) 캔버스 '요구사항' 폼으로 렌더한다. 홈 프롬프트로 시작했으면
+  숨김 **프리필 턴**을 격리 실행해(세션 id/resume 미사용, 영속화·스텝커서 불변) `prefillInstruction`으로
+  에이전트가 요청에서 **확신 가능한 항목만** ` ```prefill ` JSON으로 채우게 하고, `parsePrefill`로 검증해
+  폼을 미리 채운다(미확인 항목만 사용자에게). 폼 제출이 **첫 작업 턴**을 발사(스킬+워크플로우 1단계+답변+
+  원요청 주입). plan의 기존 `clarify`(에이전트 생성 질문) 단계는 이 옵션 프리플로우로 대체 →
+  `WORKFLOWS.plan = [search, document, chat]`.
+- **근거**: 사용자 요구 — "선택지부터 결정하고 시작, 프롬프트에서 아는 값은 자동 채움". 고정 카탈로그는
+  즉시성·결정성이 높고(open-design `od.inputs` 대응), 기존 `ClarifyQuestion`/`RequirementsForm`/캔버스 탭을
+  그대로 재사용해 신규 렌더 0. 프리필은 clarify와 대칭인 fenced-block 파서라 **새 백엔드/IPC 0**.
+- **대안 기각**: 에이전트가 매번 질문 생성(동적 clarify) — 첫 폼까지 왕복 발생, 결정성 낮음. 클라이언트
+  휴리스틱 자동채움 — 한국어 자유문 매핑이 불안정.
+- **재검토 조건**: 옵션에 부제/설명·조건부 표시가 필요하면 `ClarifyQuestion` 스키마와 프리필 프로토콜을 확장.
+
+### D37. 시스템 스킬 = 앱 번들 + 카테고리별 매핑 (open-design SKILL.md 최소 이식)
+- **결정**: 이 시스템이 제공하는 "스킬"(CLI 자체 스킬과 무관)을 **앱에 번들**(`src/lib/skills.ts`의
+  `SKILLS: Record<string, Skill{id,name,body}>`)하고 **카테고리별로 매핑**(`CATEGORY_SKILL` + `skillFor`)한다.
+  `body`(마크다운 지시문)는 `ChatPanel.send()`가 **첫 작업 턴에 1회** 프롬프트 앞에 주입한다(스텝 지시문 위).
+  open-design은 `composeSystemPrompt`가 `SKILL.md` 본문을 `## Active skill`로 시스템 프롬프트에 주입하지만,
+  이 앱은 시스템 프롬프트가 없으므로 **wire 프롬프트 주입**으로 최소 이식한다.
+- **근거**: 사용자 선택(앱 번들·카테고리 매핑). 현재 요구는 카테고리별 페르소나/방법 고정이라 정적 상수가
+  가장 단순하고 배포·검증이 쉽다. 기존 지시문 주입 패턴과 동일해 신규 인프라 0. 디스크 로더(런타임 SKILL.md)는
+  재빌드 없는 추가가 필요해질 때로 연기.
+- **한계**: 세션형(claude/codex)은 스킬이 세션에 유지되나 세션리스(gemini/aipro)는 첫 턴에만 보여 lossy.
+- **재검토 조건**: 재빌드 없이 스킬을 추가/수정해야 하면 open-design `skills.ts`식 디스크 로더
+  (`~/.operation-wizard/skills/*/SKILL.md`)로 승격하고 `SKILLS`를 동적 로딩으로 전환.
+
+### D38. Settings 뷰 폐지 → Agents 카드에 경로 설정 통합
+- **결정**: NavRail의 별도 **Settings 뷰를 제거**(`View = "home" | "agents"`)하고, 커스텀 바이너리 경로
+  설정(입력/Browse/Save & detect/Clear/`*_BIN` 안내)을 **Agents 카드 하단의 접이식 섹션**으로 통합한다.
+  `AgentCard`가 `settings`+`onSave`를 받아 표시(탐지)와 편집(경로)을 한 카드에서 처리한다. 백엔드
+  `set_agent_bin`/`get_settings`와 `App.handleSave`/`detectOne`는 무변경. `SettingsView.tsx` 삭제,
+  `DIAGNOSTIC_HINT`의 "Set a custom path in Settings" 문구를 카드 기준으로 수정.
+- **근거**: 사용자 지적 — 채팅 패널의 에이전트 선택과 Settings의 에이전트 목록이 중복으로 보인다. 실제
+  진짜 중복은 Agents(탐지 표시)와 Settings(경로 편집)이며, 둘 다 6개 에이전트를 카드/행으로 나열한다. 한
+  카드에서 상태 확인 + 경로 override를 하면 화면 중복이 사라지고 진단 힌트("경로를 설정하세요")도 같은 곳을
+  가리킨다. 채팅 셀렉터(실행 선택)는 `agents`+`detected`만 소비하므로 무영향.
+- **재검토 조건**: 에이전트별 설정 항목이 늘면 카드 내 설정 섹션을 별도 패널/모달로 승격.
+
+---
+
+### D39. 워크플로우 단계·스킬 사용자 설정화 = settings.json 확장 + 필드별 커맨드 (D37 개정)
+- **결정**: 카테고리별 워크플로우 단계와 스킬 레지스트리를 **사용자가 설정 화면(Flows 뷰)에서 등록**할 수
+  있게 하고, `settings.json`에 영속화한다. `Settings`에 `skills: Option<Vec<SkillDef>>`(전체 교체형 레지스트리)와
+  `workflows: HashMap<category, Vec<StepDef>>`(카테고리별 override)를 추가하고, 커맨드 `set_skills`/`set_workflow`를
+  `set_agent_bin` 패턴(검증→load→mutate→save→전체 `Settings` 반환)으로 추가한다. `None`/`null` 전달 = 해당
+  override 삭제(기본값 복원). **코드 내 기본값(`DEFAULT_SKILLS`/`DEFAULT_WORKFLOWS`) = 폴백 = 편집 가능한 샘플
+  콘텐츠**로, settings에 값이 없으면 항상 기본값이 적용되고 Flows 뷰는 기본값을 초기 편집값으로 보여준다.
+- **세부**: `StepDef.kind`는 Rust에서 **enum이 아니라 String**이다 — `settings::load`가 파싱 실패 시
+  `unwrap_or_default()`로 전체 파일을 버리므로, 알 수 없는 kind 1건이 설정 전체를 지우는 사고를 막는다.
+  저장 시 `validate_steps`(≥1개·id 유일·kind 유효·**마지막 단계는 `chat`**)/`validate_skills`(id 유일·이름 필수)로
+  검증하고, 런타임은 `coerceSteps`(프론트)로 한 번 더 방어(잘못된 항목 드롭 + 종단 chat 자동 보강). 카테고리
+  id 상수 `settings::CATEGORIES`는 프론트 `workspace.ts`의 `Category` 유니온과 동기화한다. dangling
+  `skillIds`(참조된 스킬이 삭제됨)는 저장 시 허용하고 런타임이 무시한다(편집기는 경고 표시).
+- **근거**: 사용자 요구 — "설정 화면에서 단계·스킬 등록". D37의 재검토 조건(재빌드 없는 스킬 추가/수정)은
+  디스크 SKILL.md 로더가 아니라 **설정 화면**으로 해소한다 — 편집 표면이 하나면 충분하고, settings.json은
+  기존 로드/저장·마이그레이션 인프라를 그대로 쓴다(새 Cargo 의존성 0).
+- **대안 기각**: `~/.operation-wizard/skills/*/SKILL.md` 디스크 로더 — 설정 화면과 파일 편집 두 표면이 중복.
+  별도 flows.json — 설정 루트가 둘로 갈라짐(현 데이터 규모에서 이득 없음).
+- **재검토 조건**: 스킬/단계가 수십 개로 늘거나 팀 공유가 필요하면 별도 파일·내보내기/가져오기로 승격.
+
+### D40. 스킬 주입: 카테고리당 1회 → 단계별 skillIds (D34/D37 갱신)
+- **결정**: `CATEGORY_SKILL`/`skillFor`(카테고리당 스킬 1개, 첫 작업 턴 1회 주입)를 **폐지**하고, 스킬을
+  `StepDef.skillIds`로 **단계에 귀속**시킨다. 단계가 armed된 턴에 그 단계의 스킬 body들을 지시문 위에 주입한다.
+  guide/query/change는 단일 `chat` 단계에 기존 카테고리 스킬을 붙여 동작 동등성을 유지한다. **세션형**(claude/
+  codex)은 같은 스킬을 대화당 1회만 주입(`injectedSkillIdsRef` dedupe; 전송 실패 시 되감기), **세션리스**(gemini/
+  aipro)는 transcript 재전송으로 자연 재노출되므로 dedupe하지 않는다. `Step.progress` 하드코딩 문자열은
+  삭제하고 `StepDef.name`에서 진행 노트를 **파생**한다(`progressLabel` = "N/M단계 · <이름> 중…").
+- **근거**: 사용자 요구 — "각 단계에 스킬들을 등록해 해당 단계에서 주입". 단계 수가 사용자 정의로 가변이
+  되면서 고정 progress 문자열·카테고리 단일 스킬 모델이 모두 파탄 — 단계 귀속 + 파생이 유일하게 일관적.
+- **샘플(기본값)**: plan 카테고리를 6단계로 개편 — 소스코드 분석(document, `docs/source-analysis.md`,
+  mermaid 다이어그램 스킬) → 컨플루언스 탐색(search, 접근 수단 없으면 로컬 docs/ 폴백 스킬) → 계획 생성
+  (document, `docs/plan.md`) → 변경영향분석서 생성(document, `docs/impact-analysis.md`) → 테스트 계획서 생성
+  (document, `docs/test-plan.md`) → 마무리 대화(chat). 스킬 8개(신규: source-analysis/confluence-search/
+  impact-analysis/test-plan).
+- **한계**: 세션리스는 transcript 크기 증가. 5개 생성형 단계 연쇄는 자동 진행되므로 중간 개입은 정지(취소)
+  → 일반 대화 폴백 경로를 쓴다(D34 안전장치 그대로).
+
+### D41. 요구사항 폼 pending 중 채팅 차단 + '요구사항' 탭 조건부 렌더
+- **결정**: 카테고리 옵션 폼이 사용자 답변을 기다리는 동안(`clarify` 비어있지 않음) **채팅 컴포저를 비활성**
+  (textarea/전송 버튼 disabled + 안내 placeholder)하고 `ChatPanel.send()`도 가드한다. 단, **숨김 프리필 턴과
+  자동전진 턴(system)은 예외**로 계속 실행되고, **정지(Stop) 버튼은 차단하지 않는다**(프리필 스트리밍 취소
+  가능해야 함). 캔버스의 '요구사항' 탭 pill은 **폼이 대기 중일 때만 렌더**하고, 제출/초기화로 `clarify`가
+  비워지면 탭 자체가 사라진다(`effectiveTab` 파생으로 pill 없는 requirements 상태가 렌더될 수 없게 방어).
+  빈 폼 placeholder 화면은 삭제.
+- **근거**: 사용자 요구 — "선택지 입력 중에는 채팅이 막혀야 하고, 완료되면 탭이 없어져야 한다". 폼 제출
+  시 `setAnswerSubmission`+`setClarify(null)`이 같은 커밋에 배치되어 첫 작업 턴은 차단에 걸리지 않는다.
+  로드 세션은 부트를 건너뛰어(`onClarify` 미호출) 게이팅이 없다.
+
+### D42. 캔버스 마크다운+mermaid 미리보기 (react-markdown + remark-gfm + mermaid)
+- **결정**: `FileViewer`에 `.md` **미리보기/소스 토글**을 추가한다(기본 미리보기). 렌더는
+  `react-markdown`+`remark-gfm`(표), ` ```mermaid ` 펜스는 `mermaid`로 실제 다이어그램 렌더
+  (`src/components/Markdown.tsx`). mermaid는 **dynamic import**로 코드 스플릿(~1.5MB, 첫 다이어그램에서 로드),
+  `securityLevel: "strict"` 초기화(스크립트/클릭 비활성, 자체 DOMPurify 소독). 렌더 실패 시 원본 코드블록 +
+  실패 노트로 폴백(뷰어 안 깨짐). 타이포는 토큰 기반 `.markdown-body`(global.css)로 직접 정의
+  (`@tailwindcss/typography`는 토큰 팔레트와 충돌해 미사용). `FileViewer`에 `refreshNonce`를 전달해 이미 열린
+  파일을 후속 단계가 재작성하면 재로드한다.
+- **근거**: plan 워크플로우 산출물(분석서·계획서)이 표/다이어그램을 담으므로 텍스트 뷰로는 실효성이 낮다.
+  전부 npm 번들(CDN 없음)이라 사내망/오프라인에서 동작하고 CSP는 `null` 유지.
+- **한계**: mermaid 지연 청크가 커서 Vite 청크 경고가 남는다(수용). 다크 테마에서 mermaid `neutral` 테마가
+  완전히 토큰을 따르진 않는다(후속 조정 가능).

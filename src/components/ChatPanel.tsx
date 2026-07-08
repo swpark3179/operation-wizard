@@ -1,0 +1,804 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronLeft, ArrowUp, Square, ClipboardList, FilePlus2, History } from "lucide-react";
+import { AssistantMessage } from "./AssistantMessage";
+import { categoryLabel, sessionTime, type Category, type ChatMessage } from "./workspace";
+import {
+  Channel,
+  cancelRun,
+  ensureProject,
+  listSessions,
+  loadSession,
+  runAgent,
+  saveSession,
+} from "../lib/api";
+import { useAutoGrow } from "../lib/useAutoGrow";
+import {
+  prefillInstruction,
+  parsePrefill,
+  type ClarifyQuestion,
+} from "../lib/clarify";
+import { optionsFor } from "../lib/options";
+import { resolveSkills } from "../lib/skills";
+import { progressLabel, workflowFor } from "../lib/workflow";
+import type {
+  AgentInfo,
+  DetectedAgent,
+  RunEvent,
+  SessionMeta,
+  Settings,
+  StoredSession,
+} from "../lib/types";
+
+/** Agents that keep a CLI session across turns (claude mints a UUID, codex
+ * captures its own thread id). Others are sessionless → we re-send the
+ * transcript each turn. */
+const SESSION_AGENTS = ["claude", "codex"];
+
+/** Pick the default agent: prefer an available Claude Code, else the first
+ * available detected agent, else the first known agent. */
+function defaultAgentId(agents: AgentInfo[], detected: Record<string, DetectedAgent>): string {
+  if (detected.claude?.available) return "claude";
+  const firstAvailable = agents.find((a) => detected[a.id]?.available);
+  return firstAvailable?.id ?? agents[0]?.id ?? "claude";
+}
+
+/** Flatten the conversation into a plain transcript for sessionless agents. */
+function buildTranscript(prev: ChatMessage[], latest: string): string {
+  const lines: string[] = [];
+  for (const m of prev) {
+    if (m.system) continue; // skip workflow progress notes
+    if (m.role === "user") lines.push(`사용자: ${m.content}`);
+    else if (m.content) lines.push(`어시스턴트: ${m.content}`);
+  }
+  lines.push(`사용자: ${latest}`);
+  return lines.join("\n\n");
+}
+
+/** Join a Windows workdir with a relative file path (for opening produced files). */
+function joinPath(dir: string, rel: string): string {
+  return `${dir.replace(/[\\/]+$/, "")}\\${rel.replace(/\//g, "\\")}`;
+}
+
+export function ChatPanel({
+  projectId,
+  onResolveWorkdir,
+  category,
+  seedPrompt,
+  agents,
+  detected,
+  settings,
+  workdir,
+  initialSession,
+  answerSubmission,
+  formPending,
+  onHome,
+  onNewSession,
+  onOpenSession,
+  onOpenFile,
+  onClarify,
+  onPrefill,
+  onStreamingChange,
+}: {
+  /** The active project id (folder key for persistence). */
+  projectId: string;
+  /** Lift the resolved workdir up after the first send creates the project. */
+  onResolveWorkdir: (workdir: string) => void;
+  category: Category;
+  seedPrompt: string;
+  agents: AgentInfo[];
+  detected: Record<string, DetectedAgent>;
+  /** App settings: user-defined workflows/skills override the built-in
+   * defaults (null while loading → defaults). Frozen per mount. */
+  settings: Settings | null;
+  /** The project's resolved workdir (cwd), or null until the first send. */
+  workdir: string | null;
+  /** A saved session to rehydrate (view + continue), or null for a fresh chat. */
+  initialSession: StoredSession | null;
+  /** Requirements-form answers to send as the next turn (nonce-guarded). */
+  answerSubmission: { wire: string; display: string; nonce: number } | null;
+  /** True while the requirements form awaits the user — manual chat input is
+   * blocked until the form is submitted (hidden prefill / auto turns still run). */
+  formPending: boolean;
+  onHome: () => void;
+  /** Start a fresh session (clears the chat, re-enables agent selection). */
+  onNewSession: () => void;
+  /** Open a saved session (parent remounts this panel with it). */
+  onOpenSession: (s: StoredSession) => void;
+  onOpenFile: (path: string) => void;
+  /** The category's fixed option questions → canvas form (shown on entry). */
+  onClarify: (questions: ClarifyQuestion[]) => void;
+  /** Option answers inferred from the launcher prompt (prefill pass) → form. */
+  onPrefill: (answers: Record<string, string | string[]>) => void;
+  /** Mirror streaming state up (canvas form disables while streaming). */
+  onStreamingChange: (streaming: boolean) => void;
+}) {
+  void onOpenFile; // reserved for future produced-file chips
+  const [messages, setMessages] = useState<ChatMessage[]>(
+    () => (initialSession?.messages as ChatMessage[] | undefined) ?? [],
+  );
+  const [input, setInput] = useState("");
+  const inputRef = useAutoGrow(input, 160);
+  const [streaming, setStreaming] = useState(false);
+  const [agentId, setAgentId] = useState<string>(
+    () => initialSession?.agentId ?? defaultAgentId(agents, detected),
+  );
+  const [model, setModel] = useState<string>(() => initialSession?.model ?? "default");
+
+  const runIdRef = useRef<string | null>(null);
+  const sessionIdRef = useRef<string | null>(initialSession?.cliSessionId ?? null);
+  const resumeRef = useRef(!!initialSession?.cliSessionId);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const seededRef = useRef(!!initialSession); // loaded sessions never auto-send a seed
+  // The resolved project workdir (cwd). For a fresh auto project it's null until
+  // the first send resolves it; for a chosen-folder / loaded project it's known
+  // up front. Set once and reused for every turn.
+  const resolvedWorkdirRef = useRef<string | null>(workdir);
+  // Whether the project folder + manifest have been created. A loaded session's
+  // project already exists; a fresh chat ensures once on the first send (even
+  // when the workdir is already known, so the manifest is always written).
+  const ensuredRef = useRef(!!initialSession);
+
+  // Persistence: our own session-folder id (distinct from the CLI session id),
+  // the conversation's creation time, and a live mirror of `messages` so we can
+  // save the full turn from inside the streaming `end` handler.
+  const persistIdRef = useRef<string | null>(initialSession?.id ?? null);
+  const createdAtRef = useRef<number>(initialSession?.createdAt ?? 0);
+  const messagesRef = useRef<ChatMessage[]>(messages);
+  // Skip the agent-change reset on the initial mount when a saved session was
+  // loaded, so its cli session id / resume state survive.
+  const loadedRef = useRef(!!initialSession);
+
+  // Category workflow orchestration (generalizes the clarify one-shot). `WF` is
+  // the category's ordered steps (user-configured via settings, else the
+  // built-in default — frozen per mount; the sessionNonce remount resets it);
+  // `stepIndexRef` is the current step, `armed` once per step to inject its
+  // skills + instruction; `inflightStepRef` marks the step whose result we
+  // parse on `end`. A loaded session starts past the end (plain chat, no
+  // re-injection — transient like clarify). The agent-change reset effect
+  // intentionally does not touch these.
+  const WF = useRef(workflowFor(category, settings)).current;
+  const stepIndexRef = useRef(initialSession ? WF.length : 0);
+  const stepArmedRef = useRef(!initialSession && WF.length > 0);
+  const inflightStepRef = useRef<number | null>(null);
+  const lastAnswerNonceRef = useRef(answerSubmission?.nonce ?? 0);
+  // Option-first entry (D36) + per-step skills (D40). The category's fixed
+  // option catalog is shown on entry (not a workflow step); each step's skills
+  // are injected on the turn that runs it (session agents get each skill once —
+  // deduped via `injectedSkillIdsRef` — sessionless agents re-see them in the
+  // transcript). A hidden "prefill" turn fills known options from the prompt.
+  const optionQuestions = useMemo(() => optionsFor(category), [category]);
+  const skillMapRef = useRef(resolveSkills(settings));
+  const injectedSkillIdsRef = useRef(new Set<string>());
+  const seedPromptRef = useRef(seedPrompt); // original launcher prompt (folded into the first work turn)
+  const prefillInflightRef = useRef(false); // this turn is the hidden prefill pass
+  const bootedRef = useRef(false); // options/prefill/seed boot runs once
+  // Auto-advance: a generative step queues the next step's turn here; a
+  // nonce-guarded effect fires it once (never call send() from the stream
+  // handler's closure — it would capture stale `messages`).
+  const [autoTurn, setAutoTurn] = useState<{ display: string; nonce: number } | null>(null);
+  const lastAutoNonceRef = useRef(0);
+
+  const started = messages.length > 0;
+  const sessionCapable = SESSION_AGENTS.includes(agentId);
+
+  // History popover.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<SessionMeta[]>([]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    onStreamingChange(streaming);
+  }, [streaming, onStreamingChange]);
+
+  // Cancel any in-flight run when this panel unmounts (new session, open a saved
+  // session, or leave home) so we don't leak a background agent process.
+  useEffect(() => {
+    return () => {
+      if (runIdRef.current) cancelRun(runIdRef.current).catch(() => {});
+    };
+  }, []);
+
+  // Keep the default agent in sync as detection results arrive (until the
+  // conversation starts — after that the agent is locked).
+  useEffect(() => {
+    if (!started) setAgentId(defaultAgentId(agents, detected));
+  }, [agents, detected, started]);
+
+  // Reset session state whenever the (pre-conversation) agent changes: claude
+  // mints its own session id up front (so cancel-then-continue still resumes);
+  // codex starts null and captures its thread id from the stream. Skipped once
+  // on mount for a loaded session (keeps its resume state).
+  useEffect(() => {
+    if (loadedRef.current) {
+      loadedRef.current = false;
+      return;
+    }
+    sessionIdRef.current = agentId === "claude" ? crypto.randomUUID() : null;
+    resumeRef.current = false;
+  }, [agentId]);
+
+  const models = detected[agentId]?.models ?? [];
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+  }, [messages]);
+
+  const updateLastAssistant = (fn: (m: ChatMessage) => ChatMessage) => {
+    setMessages((prev) => {
+      const next = [...prev];
+      for (let i = next.length - 1; i >= 0; i--) {
+        if (next[i].role === "assistant") {
+          next[i] = fn(next[i]);
+          break;
+        }
+      }
+      return next;
+    });
+  };
+
+  /** Persist the conversation to disk (creates project/session folders on first
+   * save). Called on the first turn and after every completed turn. */
+  const persist = (msgs: ChatMessage[] = messagesRef.current) => {
+    if (!projectId || msgs.length === 0) return;
+    if (!persistIdRef.current) persistIdRef.current = crypto.randomUUID();
+    if (createdAtRef.current === 0) createdAtRef.current = Date.now();
+    const firstUser = msgs.find((m) => m.role === "user");
+    const title = (firstUser?.content ?? "").trim().slice(0, 60) || "새 대화";
+    // Never persist a mid-stream flag — a reloaded session must not look live.
+    const clean = msgs.map((m) => (m.streaming ? { ...m, streaming: false } : m));
+    const session: StoredSession = {
+      id: persistIdRef.current,
+      title,
+      agentId,
+      model,
+      category,
+      cliSessionId: sessionIdRef.current,
+      createdAt: createdAtRef.current,
+      updatedAt: 0, // stamped by the backend
+      messageCount: clean.length,
+      messages: clean as unknown[],
+    };
+    void saveSession(projectId, session).catch(() => {});
+  };
+
+  const handleEvent = (ev: RunEvent) => {
+    switch (ev.type) {
+      case "status":
+        // claude echoes the minted id; codex/gemini surface their own here.
+        // Ignore during a prefill turn — it runs isolated and must not hijack
+        // the real conversation's session id.
+        if (ev.sessionId && !prefillInflightRef.current) sessionIdRef.current = ev.sessionId;
+        break;
+      case "textDelta":
+        updateLastAssistant((m) => ({ ...m, content: m.content + ev.delta }));
+        break;
+      case "stdout":
+        updateLastAssistant((m) => ({ ...m, content: m.content + ev.chunk }));
+        break;
+      case "thinkingDelta":
+        updateLastAssistant((m) => ({ ...m, thinking: m.thinking + ev.delta }));
+        break;
+      case "toolUse":
+        updateLastAssistant((m) => ({
+          ...m,
+          events: [...m.events, { kind: "toolUse", id: ev.id, name: ev.name, input: ev.input }],
+        }));
+        break;
+      case "toolResult":
+        updateLastAssistant((m) => ({
+          ...m,
+          events: [
+            ...m.events,
+            { kind: "toolResult", toolUseId: ev.toolUseId, content: ev.content, isError: ev.isError },
+          ],
+        }));
+        break;
+      case "usage":
+        updateLastAssistant((m) => ({
+          ...m,
+          events: [
+            ...m.events,
+            { kind: "usage", inputTokens: ev.inputTokens, outputTokens: ev.outputTokens },
+          ],
+        }));
+        break;
+      case "error":
+        updateLastAssistant((m) => ({ ...m, error: ev.message }));
+        break;
+      case "end": {
+        setStreaming(false);
+        runIdRef.current = null;
+
+        // Prefill turn (hidden analysis): parse the option answers, lift them to
+        // the form, and drop the turn's messages entirely — it is not part of the
+        // conversation. Never touches the step cursor or persistence.
+        if (prefillInflightRef.current) {
+          prefillInflightRef.current = false;
+          const msgs = messagesRef.current;
+          if (ev.status === "succeeded") {
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i].role === "assistant") {
+                const answers = parsePrefill(msgs[i].content, optionQuestions);
+                if (Object.keys(answers).length) onPrefill(answers);
+                break;
+              }
+            }
+          }
+          setMessages([]); // the prefill pair was the only content on a fresh chat
+          break;
+        }
+
+        const stepIdx = inflightStepRef.current;
+        inflightStepRef.current = null;
+
+        // Clear the mid-stream flag on the whole list (matches persist()).
+        let next = messagesRef.current.map((m) => (m.streaming ? { ...m, streaming: false } : m));
+
+        if (stepIdx != null && ev.status === "succeeded") {
+          const step = WF[stepIdx];
+          if (step.kind === "search" || step.kind === "document") {
+            // Generative step: open the produced file (if any), then AUTO-ADVANCE
+            // to the next generative step; stop before a terminal chat step.
+            if (step.file && resolvedWorkdirRef.current) {
+              onOpenFile(joinPath(resolvedWorkdirRef.current, step.file));
+            }
+            const nextIdx = stepIdx + 1;
+            stepIndexRef.current = nextIdx;
+            const nextStep = WF[nextIdx];
+            if (nextStep && (nextStep.kind === "search" || nextStep.kind === "document")) {
+              stepArmedRef.current = true;
+              setAutoTurn((s) => ({
+                display: progressLabel(nextIdx, WF),
+                nonce: (s?.nonce ?? 0) + 1,
+              }));
+            } else {
+              stepArmedRef.current = false; // terminal chat → wait for the user
+            }
+          }
+          // chat kind: terminal — nothing to advance.
+        } else if (stepIdx != null) {
+          // Canceled/failed mid-workflow → halt auto-progress, drop to plain chat.
+          stepIndexRef.current = WF.length;
+          stepArmedRef.current = false;
+        }
+
+        setMessages(next);
+        persist(next); // save the completed turn (incl. captured cli session id)
+        break;
+      }
+    }
+  };
+
+  // Re-arm the in-flight step (a spawn/ensure failure) so the next message
+  // retries it instead of silently skipping ahead.
+  const rearmStep = () => {
+    if (inflightStepRef.current != null) {
+      stepIndexRef.current = inflightStepRef.current;
+      stepArmedRef.current = true;
+      inflightStepRef.current = null;
+    }
+  };
+
+  const send = async (
+    text: string,
+    opts?: { display?: string; system?: boolean; prefill?: boolean },
+  ) => {
+    const prompt = text.trim();
+    if (streaming) return;
+    // While the requirements form awaits the user, block manual sends — only
+    // the hidden prefill pass and auto-advance turns (system) may run.
+    if (formPending && !opts?.system && !opts?.prefill) return;
+    // Block an empty manual send before consuming the step arm; auto-advance /
+    // prefill turns (system) legitimately carry no user text (the wire is built
+    // from the injected instruction).
+    if (!prompt && !opts?.system) return;
+
+    const isPrefill = !!opts?.prefill;
+    prefillInflightRef.current = isPrefill;
+
+    // This turn's workflow step + its skills (both skipped for a prefill turn,
+    // which is isolated analysis). If armed, prepend the step's skill bodies +
+    // instruction to the wire (never shown/stored) and mark the step so we
+    // parse its result on `end`. Session agents get each skill once across the
+    // whole conversation (the session context retains it); sessionless agents
+    // re-see past injections in the transcript. Unknown skill ids are skipped.
+    const step = isPrefill ? undefined : WF[stepIndexRef.current];
+    const stepInject = !!step && stepArmedRef.current;
+    if (!isPrefill) stepArmedRef.current = false;
+    inflightStepRef.current = stepInject ? stepIndexRef.current : null;
+
+    const skillBodies: string[] = [];
+    const injectedNow: string[] = [];
+    if (stepInject) {
+      for (const id of step!.skillIds) {
+        const s = skillMapRef.current[id];
+        if (!s || !s.body.trim()) continue;
+        if (sessionCapable) {
+          if (injectedSkillIdsRef.current.has(s.id)) continue;
+          injectedSkillIdsRef.current.add(s.id);
+          injectedNow.push(s.id);
+        }
+        skillBodies.push(s.body);
+      }
+    }
+    // A failed send never reached the agent — forget this turn's skill marks so
+    // the retry (rearmStep) injects them again.
+    const unwindSkills = () => {
+      for (const id of injectedNow) injectedSkillIdsRef.current.delete(id);
+    };
+
+    const wire = isPrefill
+      ? prefillInstruction(optionQuestions, seedPromptRef.current)
+      : [...skillBodies, stepInject ? step!.instruction : "", prompt]
+          .filter(Boolean)
+          .join("\n\n");
+    if (!wire.trim()) {
+      inflightStepRef.current = null;
+      prefillInflightRef.current = false;
+      return; // nothing to send (empty input, no injected instruction)
+    }
+    if (!opts?.system) setInput("");
+
+    // Sessionless agents need the whole conversation each turn; capture it from
+    // the pre-append messages before we add the new pair.
+    const transcript = buildTranscript(messages, wire);
+
+    // The chat shows the display text (clean prompt / compact summary / step
+    // note), not the instruction-wrapped or answer-wire text. Auto-advance turns
+    // render as a subtle centered line (system) instead of a user bubble.
+    const user: ChatMessage = {
+      role: "user",
+      content: opts?.display ?? prompt,
+      thinking: "",
+      events: [],
+      system: opts?.system,
+    };
+    const assistant: ChatMessage = {
+      role: "assistant",
+      content: "",
+      thinking: "",
+      events: [],
+      streaming: true,
+    };
+    const nextMessages = [...messages, user, assistant];
+    setMessages(nextMessages);
+
+    // Create the project folder + manifest once (on the first send of a fresh
+    // chat). Passes the chosen folder if known, else "" → the project's own
+    // workspace/ subfolder. Always runs even when the workdir is pre-known, so
+    // the manifest is written (else the project is missing from the recent list).
+    let cwd = resolvedWorkdirRef.current;
+    if (!ensuredRef.current) {
+      try {
+        // Title the project by the user's actual request (known even during a
+        // prefill turn), not the answer/instruction wire.
+        const title = seedPromptRef.current.trim().slice(0, 60) || categoryLabel(category);
+        const project = await ensureProject(projectId, cwd ?? "", title, category);
+        cwd = project.workdir;
+        resolvedWorkdirRef.current = cwd;
+        ensuredRef.current = true;
+        onResolveWorkdir(cwd);
+      } catch (e) {
+        rearmStep();
+        unwindSkills();
+        prefillInflightRef.current = false;
+        updateLastAssistant((m) => ({ ...m, streaming: false, error: String(e) }));
+        return;
+      }
+    }
+    if (!cwd) {
+      rearmStep();
+      unwindSkills();
+      prefillInflightRef.current = false;
+      updateLastAssistant((m) => ({ ...m, streaming: false, error: "작업 폴더를 확인할 수 없습니다." }));
+      return;
+    }
+
+    // Create the session folder as soon as the first question is asked (never
+    // for the hidden prefill turn — it is not a saved conversation).
+    if (!isPrefill) persist(nextMessages);
+
+    setStreaming(true);
+    const channel = new Channel<RunEvent>();
+    channel.onmessage = handleEvent;
+    // A prefill turn runs isolated (no session id / resume) so it never pollutes
+    // the real conversation's session; only work turns continue the session.
+    const useSession = sessionCapable && !isPrefill;
+    try {
+      const runId = await runAgent(
+        {
+          agentId,
+          prompt: useSession || isPrefill ? wire : transcript,
+          cwd,
+          model: model === "default" ? null : model,
+          sessionId: useSession ? sessionIdRef.current : null,
+          resume: useSession ? resumeRef.current : false,
+        },
+        channel,
+      );
+      runIdRef.current = runId;
+      // From the next turn on, continue the same session.
+      if (useSession) resumeRef.current = true;
+    } catch (e) {
+      rearmStep();
+      unwindSkills();
+      prefillInflightRef.current = false;
+      updateLastAssistant((m) => ({ ...m, streaming: false, error: String(e) }));
+      setStreaming(false);
+      if (!isPrefill) persist();
+    }
+  };
+
+  const stop = () => {
+    if (runIdRef.current) cancelRun(runIdRef.current).catch(() => {});
+  };
+
+  const openHistory = async () => {
+    if (historyOpen) {
+      setHistoryOpen(false);
+      return;
+    }
+    if (projectId) {
+      try {
+        setHistory(await listSessions(projectId));
+      } catch {
+        setHistory([]);
+      }
+    } else {
+      setHistory([]);
+    }
+    setHistoryOpen(true);
+  };
+
+  const chooseSession = async (id: string) => {
+    setHistoryOpen(false);
+    if (!projectId) return;
+    try {
+      onOpenSession(await loadSession(projectId, id));
+    } catch {
+      /* ignore load failure */
+    }
+  };
+
+  // Boot once (fresh chat): show the category's fixed option form immediately
+  // (no agent turn); if the launcher carried a prompt, run a hidden prefill pass
+  // to auto-fill the options it can infer. Categories without an option catalog
+  // fall back to auto-sending the seed as the first work turn. A loaded session
+  // (seededRef true) skips all of this → plain chat.
+  useEffect(() => {
+    if (bootedRef.current || seededRef.current) return;
+    bootedRef.current = true;
+    seededRef.current = true;
+    if (optionQuestions.length > 0) {
+      onClarify(optionQuestions);
+      if (seedPromptRef.current.trim()) {
+        void send("", {
+          system: true,
+          prefill: true,
+          display: "요청 내용을 분석해 선택 항목을 자동으로 채우는 중…",
+        });
+      }
+    } else if (seedPromptRef.current.trim()) {
+      void send(seedPromptRef.current);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Send requirements-form answers as the first work turn (nonce-guarded, once
+  // each). Folds the original launcher request into the wire as context; this
+  // turn is where the category skill + first workflow step get injected.
+  useEffect(() => {
+    if (!answerSubmission || answerSubmission.nonce === lastAnswerNonceRef.current) return;
+    lastAnswerNonceRef.current = answerSubmission.nonce;
+    const seed = seedPromptRef.current.trim();
+    const wire = seed ? `${answerSubmission.wire}\n\n원래 요청:\n${seed}` : answerSubmission.wire;
+    void send(wire, { display: seed || answerSubmission.display });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [answerSubmission]);
+
+  // Fire a queued auto-advance turn once (a generative step's continuation).
+  // Nonce-guarded like answerSubmission so the stream handler never calls send()
+  // from a stale closure.
+  useEffect(() => {
+    if (!autoTurn || autoTurn.nonce === lastAutoNonceRef.current) return;
+    lastAutoNonceRef.current = autoTurn.nonce;
+    void send("", { display: autoTurn.display, system: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoTurn]);
+
+  const availableAgents = useMemo(
+    () => agents.filter((a) => detected[a.id]?.available),
+    [agents, detected],
+  );
+
+  return (
+    <section className="relative flex w-[412px] shrink-0 flex-col border-r border-line bg-panel min-h-0">
+      {/* header */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-line px-3.5 py-2.5">
+        <button
+          type="button"
+          onClick={onHome}
+          title="홈"
+          className="grid h-7 w-7 place-items-center rounded-lg border border-line bg-panel text-ink-muted transition-colors hover:bg-subtle"
+        >
+          <ChevronLeft size={15} />
+        </button>
+        <span className="grid h-[26px] w-[26px] place-items-center rounded-[7px] bg-accent-tint text-accent">
+          <ClipboardList size={15} />
+        </span>
+        <span className="min-w-0 flex-1 truncate font-serif text-[14.5px] font-semibold text-ink-strong">
+          {categoryLabel(category)}
+        </span>
+        <button
+          type="button"
+          onClick={openHistory}
+          title="대화 기록"
+          className="grid h-7 w-7 place-items-center rounded-lg border border-line bg-panel text-ink-muted transition-colors hover:bg-subtle"
+        >
+          <History size={15} />
+        </button>
+        <button
+          type="button"
+          onClick={onNewSession}
+          title="새 세션"
+          className="grid h-7 w-7 place-items-center rounded-lg border border-line bg-panel text-ink-muted transition-colors hover:bg-subtle"
+        >
+          <FilePlus2 size={15} />
+        </button>
+      </div>
+
+      {/* history popover */}
+      {historyOpen && (
+        <>
+          <button
+            type="button"
+            aria-label="닫기"
+            onClick={() => setHistoryOpen(false)}
+            className="absolute inset-0 z-10 cursor-default"
+          />
+          <div className="absolute right-3 top-[52px] z-20 max-h-[60%] w-[320px] overflow-auto rounded-xl border border-line-strong bg-elevated p-1.5 shadow-lg">
+            <div className="px-2 py-1 text-[11px] font-bold uppercase tracking-[0.08em] text-ink-soft">
+              이 프로젝트의 세션
+            </div>
+            {history.length === 0 ? (
+              <div className="px-2 py-3 text-center text-[12px] text-ink-soft">
+                저장된 세션이 없습니다.
+              </div>
+            ) : (
+              history.map((s) => {
+                const agentName = agents.find((a) => a.id === s.agentId)?.name ?? s.agentId;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => void chooseSession(s.id)}
+                    className={
+                      "block w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-subtle " +
+                      (s.id === persistIdRef.current ? "bg-subtle" : "")
+                    }
+                  >
+                    <div className="truncate text-[12.5px] text-ink-strong">{s.title}</div>
+                    <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink-soft">
+                      <span>{agentName}</span>
+                      <span>·</span>
+                      <span>{s.messageCount}개 메시지</span>
+                      <span>·</span>
+                      <span>{sessionTime(s.updatedAt)}</span>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </>
+      )}
+
+      {/* messages */}
+      <div ref={scrollRef} className="flex flex-1 flex-col gap-4 overflow-auto px-4 py-[18px]">
+        {messages.length === 0 && (
+          <div className="mt-6 text-center text-[12.5px] leading-[1.6] text-ink-soft">
+            메시지를 입력해 작업을 시작하세요.
+            <br />
+            에이전트가 선택한 작업 폴더에서 실행됩니다.
+          </div>
+        )}
+        {messages.map((m, i) =>
+          m.system ? (
+            <div
+              key={i}
+              className="self-center whitespace-pre-wrap rounded-full bg-subtle px-3 py-1 text-center text-[11.5px] font-medium text-ink-soft"
+            >
+              {m.content}
+            </div>
+          ) : m.role === "user" ? (
+            <div
+              key={i}
+              className="max-w-[88%] self-end whitespace-pre-wrap rounded-[14px_14px_4px_14px] bg-muted px-3.5 py-2.5 text-[13.5px] leading-[1.5] text-ink-strong"
+            >
+              {m.content}
+            </div>
+          ) : (
+            <AssistantMessage key={i} message={m} onNewSession={onNewSession} />
+          ),
+        )}
+      </div>
+
+      {/* composer */}
+      <div className="shrink-0 border-t border-line px-3.5 py-3">
+        <div className="mb-2 flex items-center gap-2 text-[11.5px] text-ink-soft">
+          <select
+            value={agentId}
+            onChange={(e) => setAgentId(e.target.value)}
+            disabled={started}
+            title={started ? "대화 중에는 에이전트를 바꿀 수 없습니다 (새 세션에서 변경)" : undefined}
+            className="rounded-md border border-line bg-panel px-1.5 py-1 text-ink-muted outline-none disabled:opacity-60"
+          >
+            {(availableAgents.length ? availableAgents : agents).map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+                {detected[a.id]?.available ? "" : " (미탐지)"}
+              </option>
+            ))}
+          </select>
+          <select
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            className="min-w-0 flex-1 truncate rounded-md border border-line bg-panel px-1.5 py-1 text-ink-muted outline-none"
+          >
+            {models.length === 0 && <option value="default">Default</option>}
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex items-end gap-2 rounded-[11px] border border-line-strong bg-panel px-2.5 py-2">
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter = 전송, Shift+Enter / Ctrl+Enter = 줄바꿈(기본 동작 허용)
+              if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+                e.preventDefault();
+                void send(input);
+              }
+            }}
+            rows={1}
+            disabled={formPending}
+            placeholder={
+              formPending
+                ? "오른쪽 '요구사항' 항목을 먼저 작성해 제출해 주세요."
+                : "메시지를 입력하세요… (Shift+Enter 줄바꿈)"
+            }
+            className="max-h-[160px] min-h-[24px] flex-1 resize-none overflow-y-auto bg-transparent text-[13px] leading-[1.5] text-ink outline-none placeholder:text-ink-faint disabled:opacity-60"
+          />
+          {streaming ? (
+            <button
+              type="button"
+              onClick={stop}
+              title="중지"
+              className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-lg bg-bad text-white transition-colors hover:opacity-90"
+            >
+              <Square size={13} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void send(input)}
+              disabled={formPending}
+              title={formPending ? "요구사항 제출 후 대화할 수 있습니다" : "전송"}
+              className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-lg bg-accent text-white transition-colors hover:bg-accent-strong disabled:opacity-50 disabled:hover:bg-accent"
+            >
+              <ArrowUp size={15} />
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
