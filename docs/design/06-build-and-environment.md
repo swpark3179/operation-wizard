@@ -56,3 +56,21 @@ cargo test --manifest-path src-tauri\Cargo.toml
 ```
 
 (이 역시 MSVC 환경에서 실행해야 한다.)
+
+## CI 릴리즈 워크플로우 (GitHub Actions)
+
+`.github/workflows/release.yml`("Release")은 **Windows 단독 실행파일(exe, 설치파일 아님)**을
+빌드해 GitHub Release로 배포하는 수동(`workflow_dispatch`) 워크플로우다.
+
+- **입력**: `version` — `major`/`minor`/`patch` 중 택1(드롭다운).
+- **버전 결정**: 최신 `v*.*.*` 태그(없으면 `package.json`의 버전)를 기준으로
+  `.github/scripts/bump-version.mjs`가 계산하고, `package.json`/`src-tauri/tauri.conf.json`/
+  `src-tauri/Cargo.toml`의 버전 필드를 갱신한다(커밋은 하지 않음 — 태그가 버전의 단일 진실 소스).
+- **빌드**: `windows-latest` 러너에서 `npm run tauri build -- --no-bundle`로 **설치파일(NSIS/MSI)
+  번들링을 건너뛰고** 컴파일된 바이너리(`src-tauri/target/release/operation-wizard.exe`)만 사용한다.
+  GitHub Actions의 `windows-latest` 이미지는 VS Build Tools가 이미 설치·레지스트리에 등록돼 있어
+  rustc/link.exe가 자동 인식하므로, 로컬 개발 환경과 달리 vcvars 초기화가 **불필요**하다.
+- **배포**: `softprops/action-gh-release`로 새 태그(`vX.Y.Z`)의 GitHub Release를 생성하고
+  exe를 첨부한다. 릴리즈 노트는 `generate_release_notes: true`(GitHub 자동 변경사항 요약)로
+  본문에 채운다.
+- 새 Cargo/npm 의존성 없음(순수 CI 워크플로우).
