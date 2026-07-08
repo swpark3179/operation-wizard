@@ -432,3 +432,25 @@
   전부 npm 번들(CDN 없음)이라 사내망/오프라인에서 동작하고 CSP는 `null` 유지.
 - **한계**: mermaid 지연 청크가 커서 Vite 청크 경고가 남는다(수용). 다크 테마에서 mermaid `neutral` 테마가
   완전히 토큰을 따르진 않는다(후속 조정 가능).
+
+---
+
+### D43. Release CI = GitHub Actions 수동 워크플로우, 설치파일 없이 단독 exe만 배포
+- **결정**: `.github/workflows/release.yml`("Release")을 추가한다. `workflow_dispatch` 입력
+  `version`(`major`/`minor`/`patch` 택1)으로 수동 트리거하며, `windows-latest`에서
+  `npm run tauri build -- --no-bundle`로 **NSIS/MSI 설치파일 번들링을 건너뛰고** 컴파일된
+  바이너리(`src-tauri/target/release/operation-wizard.exe`)를 그대로 릴리즈 자산으로 쓴다. 버전은
+  최신 `v*.*.*` git 태그(없으면 `package.json`)를 기준으로 `.github/scripts/bump-version.mjs`가
+  계산해 `package.json`/`src-tauri/tauri.conf.json`/`src-tauri/Cargo.toml`에 반영(저장소에 커밋하지
+  않음 — 태그가 버전의 단일 진실 소스)하고, `softprops/action-gh-release`가 새 태그의 GitHub Release를
+  만들어 exe를 첨부한다. 릴리즈 노트 본문은 `generate_release_notes: true`(GitHub 자동 변경사항 요약)로 채운다.
+- **근거**: 요구사항이 "단독 실행파일(exe, 설치파일 아님) 배포"라 `tauri build`의 기본 번들링(설치파일
+  생성)이 오히려 방해가 된다 — `--no-bundle`로 컴파일 산출물만 취하는 편이 정확하고 단순하다. 버전을
+  파일에 커밋하지 않고 태그만으로 추적하면 매 릴리즈마다 별도 커밋이 쌓이지 않는다. GitHub Actions의
+  `windows-latest` 이미지는 VS Build Tools가 사전 설치돼 있어 [06](06-build-and-environment.md)의 로컬
+  vcvars 제약이 CI에는 적용되지 않는다(새 Cargo/npm 의존성 0, 순수 CI 워크플로우).
+- **대안 기각**: `tauri-apps/tauri-action`(공식 액션) — MSI/NSIS 설치파일 생성에 최적화돼 있어 "단독 exe"
+  요구와 어긋나고, 이번 규모에서는 직접 `--no-bundle` 빌드가 더 명확함. 버전을 저장소에 커밋 — 매 릴리즈마다
+  불필요한 커밋/머지 충돌 위험.
+- **재검토 조건**: 설치파일(MSI/NSIS) 배포도 함께 필요해지면 `--no-bundle`을 제거하고 `tauri-apps/tauri-action`
+  또는 번들 산출물 업로드로 전환.
