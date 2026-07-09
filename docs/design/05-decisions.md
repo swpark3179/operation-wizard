@@ -475,6 +475,10 @@
 - **대안 기각**: ChatPanel에 하드코딩 프리스테이지 기계 — arming/inflight/rearm/dedupe를 병렬 복제하게 됨.
 
 ### D45. 코드베이스 경로 = workdir와 분리, folder 질문 타입 + extraDirs(--add-dir)
+> ⚠️ extraDirs의 에이전트별 매핑은 **D52로 확장**되었다(gemini/aipro도 `--include-directories`로 접근
+> 부여; codebase preflight의 경로 한 줄은 생성형 단계 공통 `pathContext` 주입으로 일반화). 아래의
+> "나머지는 프롬프트 언급으로 degrade"는 이제 plain 에이전트(opencode/antigravity)에만 해당한다.
+
 - **결정**: 분석 대상 **코드베이스 폴더는 작업 폴더(workdir)와 별개**다(workdir = 산출물/cwd, 코드베이스 =
   읽기 대상). 첫 질문에서 반드시 선택하도록 `ClarifyQuestion`에 **새 타입 `"folder"`**를 추가하고
   (`RequirementsForm`의 `FolderAnswer` = 네이티브 폴더 픽커 + 경로 칩), `optionsFor(category, settings)`가
@@ -581,3 +585,68 @@
 - **대안 기각**: 백엔드 `IngestRegistry`에 진행 스냅샷 보관 + 상태 조회 커맨드 — 앱 내 웹뷰는 리로드되지
   않아 프론트 스토어로 충분하며 IPC 표면 증가만 남음.
 - **재검토 조건**: 수집 이력(지난 실행 로그)이나 앱 재시작 후 복원이 필요하면 백엔드 영속 상태로 승격.
+
+---
+
+### D52. 코드베이스 접근 = gemini/aipro `--include-directories` + 절대경로 컨텍스트 주입 (cwd 불변)
+- **결정**: "코드베이스 폴더를 선택해도 분석이 작업 폴더에서 시작되는" 문제를 두 갈래로 해소한다.
+  ① **접근 부여**: `gemini_build_args`/`aipro_build_args`가 `ctx.extra_dirs`를 **`--include-directories
+  <dir>`**(디렉터리당 1쌍 — 콤마 결합형은 콤마 포함 경로를 오분할)로 매핑한다. gemini CLI의 공식 멀티
+  워크스페이스 플래그로, claude `--add-dir`의 대칭이다. 기존에 gemini/aipro는 extraDirs를 무시했고
+  워크스페이스 신뢰가 cwd로 한정되어 **코드베이스를 아예 읽지 못해** 작업 폴더를 분석했다(불만의 직접 원인).
+  ② **탐색 시작점 강제**: `ChatPanel`이 **모든 생성형 단계의 armed 턴**에 절대경로 컨텍스트(`pathContext`)를
+  주입한다 — "작업 폴더(산출물 저장, 절대경로): …" + "분석 대상 코드베이스 폴더(절대경로): …" + 탐색 지시
+  (codebase 단계: "모든 소스 탐색을 이 폴더에서 시작, 작업 폴더에서 소스 찾기 금지"). 이를 위해 `send()`에서
+  **`ensure_project`(workdir 확정)를 preflight·wire 조립 앞으로 이동**했다(첫 턴에도 절대경로를 알 수 있게).
+  `CODEBASE_STEP`/`SOURCE_ANALYSIS_STEP` 지시문과 `codebase-explore`/`source-analysis` 스킬도 같은 취지로
+  개정(산출물은 작업 폴더 절대경로 기준). 기존 `stepPreflight`의 codebase 한 줄은 `pathContext`로 흡수.
+- **cwd는 바꾸지 않는다(대안 기각)**: codebase 단계 턴에 `RunArgs.cwd = codebasePath`로 스왑하는 안은
+  기각 — claude 세션은 cwd 기준으로 저장되어 턴별 cwd 변경이 `--resume`을 깨뜨릴 수 있고, codex 스레드는
+  첫 턴 cwd에 고정되며, gemini/aipro는 cwd 밖 쓰기가 막혀 산출물(`docs/*.md`)을 작업 폴더에 저장할 수 없다.
+- **리스크**: 사내 aipro가 `--include-directories`를 지원하지 않는 구버전 포크일 가능성. 인자는 extraDirs가
+  있을 때(코드베이스/스킬 폴더 지정 시)만 붙으므로 영향 범위가 한정되고, 실패 시 CLI 에러가 채팅에 표면화된다.
+- **재검토 조건**: aipro가 플래그를 거부하면 `AgentDef`에 def 레벨 게이트(예: `include_dirs: bool`)를 추가해
+  aipro만 프롬프트 언급으로 되돌린다. 기본값 지시문 개정은 D39 전체 교체형 특성상 **이미 워크플로우를 저장한
+  사용자에게는 반영되지 않음**(Flows "기본값으로 되돌리기" 필요).
+
+### D53. 타임아웃 정책: claude BASH env 상향 + HTTP 120초, 실행 엔진은 계속 무타임아웃
+- **결정**: ① claude `RunSpec.env`에 `BASH_DEFAULT_TIMEOUT_MS=300000`/`BASH_MAX_TIMEOUT_MS=1200000`을
+  추가한다 — 문서 생성 단계의 긴 도구 명령(빌드·전수 검색)이 Claude Code 기본 2분 타임아웃으로 중단되어
+  "응답이 끊긴/무시된" 것처럼 보이는 문제를 방지. `run.rs`의 env 병합은 **부모 환경에 이미 있는 키를
+  덮어쓰지 않도록** 변경(사용자 자체 설정 존중; `GEMINI_CLI_TRUST_WORKSPACE`도 동일 규칙 적용됨).
+  ② `rag.rs`/`confluence.rs`의 reqwest 타임아웃을 30초 → **120초**(`HTTP_TIMEOUT` 상수)로 상향 — RAG 검색은
+  턴 중간 preflight로 실행되어 느린 사내 백엔드에서 30초 타임아웃이 "단계 건너뜀"으로 나타났다. 수집 취소
+  지연은 여전히 요청 1건으로 바운드. ③ **실행 엔진(run.rs)은 계속 타임아웃 없음**(무한 대기 = 의도된 설계;
+  정지는 사용자 Stop). 탐지 프로브(3s/15s)는 무변경.
+- **재검토 조건**: HTTP 타임아웃을 사용자별로 조정할 필요가 생기면 `RagConfig`/`ConfluenceConfig` 필드로 승격.
+
+### D54. cmd 창 깜빡임(첫 질문 시) = 업스트림 CLI 버그 — 앱 측은 완결, 코드 변경 없음
+- **결정**: "질문할 때 cmd 창이 잠깐 뜨는" 증상은 **앱의 spawn 누락이 아니다** — 백엔드의 모든 프로세스
+  실행(탐지 프로브·실행 엔진·taskkill)은 단일 팩토리 `exec::command_for`를 거치며 예외 없이
+  `CREATE_NO_WINDOW`가 적용됨을 감사로 확인했다. 잔여 깜빡임(주로 첫 질문/카테고리 진입 시)은 **Claude Code
+  CLI 자체가 세션 시작 시 셸 스냅샷 등 자기 하위 프로세스를 windowsHide 없이 spawn하는 업스트림 버그**다
+  (anthropics/claude-code #14828, #15572, #16880, #61051 — 버전에 따라 수정·회귀 반복). 앱 코드 변경은 없고
+  [06-build-and-environment.md](06-build-and-environment.md)에 known-issue + "CLI 최신화" 안내를 기록한다.
+- **대안 기각**: hidden desktop(`CreateProcessW` + `lpDesktop`)으로 자손 콘솔까지 숨기는 재작성 — std
+  `Command`를 우회하는 대량 unsafe 코드가 필요해 위험 대비 이득이 없음. `DETACHED_PROCESS` — 콘솔 상속이
+  끊겨 자손 콘솔 앱이 **새 가시 콘솔을 만들므로 오히려 악화**.
+- **재검토 조건**: CLI 최신화 후에도 앱 유발 깜빡임이 재현되면 spawn 지점 감사를 재수행.
+
+### D55. 스트림 이벤트 신뢰성: 동기 메시지 커밋 + nonce 소비 지연 + lossy 라인 리더 + 파서 방어
+- **결정**: "응답이 사라지거나(빈 말풍선) 단계 자동 진행이 멈추는" 4가지 원인을 수정한다.
+  ① **동기 커밋(`mutateMessages`)**: `ChatPanel`의 `messagesRef`가 passive effect로만 동기화되어, 연달아
+  도착하는 이벤트(claude는 TextDelta→Usage→End가 한 번에 옴)에서 `end` 핸들러가 **stale 스냅샷으로 방금
+  스트리밍된 응답을 빈 내용으로 덮어쓰고 그대로 영속화**했다. 모든 메시지 변경을 "ref에서 계산 → ref 즉시
+  갱신 → setState" 헬퍼로 통일해 ref가 항상 최신이다(StrictMode 안전 — updater 부수효과 없음). `send()`의
+  stale `messages` 클로저(transcript/append)도 ref 기반으로 수정.
+  ② **nonce 소비 지연**: 폼 제출(`answerSubmission`)/자동 진행(`autoTurn`) 효과가 nonce를 `send()` 호출 전에
+  소비했는데 `send()`에는 조용한 early-return(`streaming` 등)이 있어 **프리필과 겹친 제출이 영구 유실**됐다.
+  `send()`가 처리 여부를 boolean으로 반환하고, 효과는 성공 시에만 nonce를 소비하며 `streaming`을 deps에
+  넣어 재시도한다(이중 발사는 in-flight ref로 차단). 반환 규약: **부수효과 없이 차단된 경우만 false**
+  (시도 후 실패는 에러 표시로 종결 = true — 무한 재시도 루프 방지).
+  ③ **lossy 라인 리더(`stream_lines`)**: `BufRead::lines()`가 비 UTF-8 1바이트에 에러를 내면 리더가 스트림
+  전체를 포기해 이후 응답이 전부 유실되고도 `End{succeeded}`가 나갔다. `read_until`+`from_utf8_lossy`로
+  교체(stderr 드레인도 lossy).
+  ④ **파서 방어**: gemini/aipro `message.content`가 파트 배열이면 통째로 드롭되던 것을 평탄화해 수용하고,
+  claude `message.content`가 bare string인 경우도 수용(`stringify_tool_content`가 배열 내 bare string 지원).
+- **근거**: 사용자 보고 두 증상(응답 소실·자동 진행 멈춤)의 코드 원인을 모두 제거. 신규 의존성 0.

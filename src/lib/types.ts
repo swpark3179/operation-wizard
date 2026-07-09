@@ -132,8 +132,9 @@ export interface RunArgs {
   /** True when continuing a prior turn (resume) rather than starting fresh. */
   resume?: boolean;
   /** Extra readable directories beyond `cwd` (codebase path + armed skill
-   * resource folders). Sent every turn — claude's `--add-dir` is per-invocation;
-   * other agents ignore it (the wire prompt always mentions the paths too). */
+   * resource folders). Sent every turn — claude maps each to `--add-dir`,
+   * gemini/aipro to `--include-directories` (D52); codex is full-access and
+   * plain agents rely on the wire prompt mentions. */
   extraDirs?: string[];
 }
 

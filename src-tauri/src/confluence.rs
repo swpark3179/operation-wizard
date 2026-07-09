@@ -127,6 +127,11 @@ pub trait ConfluenceApi {
         -> Result<(Vec<PageStub>, bool), String>;
 }
 
+/// Per-request timeout. Generous (D53): slow corporate Confluence/RAG backends
+/// were hitting the previous 30s limit; the cancel flag still bounds
+/// cancellation latency to one request.
+const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Production implementation over `reqwest::blocking` (worker threads only).
 struct HttpConfluence {
     base: String,
@@ -141,7 +146,7 @@ impl HttpConfluence {
             return Err("Confluence base URL이 설정되지 않았습니다 — 지식 화면에서 등록해 주세요".into());
         }
         let http = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(HTTP_TIMEOUT)
             .danger_accept_invalid_certs(cfg.allow_invalid_certs)
             .build()
             .map_err(|e| e.to_string())?;

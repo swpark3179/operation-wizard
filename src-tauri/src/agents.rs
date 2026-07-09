@@ -50,9 +50,9 @@ pub struct RunCtx<'a> {
     pub prompt: &'a str,
     /// Extra directories the agent should be able to read beyond `cwd` (the
     /// project's codebase path + armed skill resource folders). claude maps
-    /// each to `--add-dir`; other agents ignore it (codex already runs
-    /// full-access, the rest degrade to the prompt-only mention the frontend
-    /// always adds) — D45.
+    /// each to `--add-dir`, gemini/aipro to `--include-directories` (D52);
+    /// codex already runs full-access, plain agents degrade to the prompt-only
+    /// mention the frontend always adds — D45.
     pub extra_dirs: &'a [String],
 }
 
@@ -88,12 +88,38 @@ impl RunSpec {
 /// Env shared by gemini and the gemini-compatible aipro (`defs/gemini.ts`).
 const GEMINI_ENV: &[(&str, &str)] = &[("GEMINI_CLI_TRUST_WORKSPACE", "true")];
 
+/// Claude run env (D53): lift the Bash tool's default/max command timeouts so a
+/// long build or search in a document step is not cut off mid-turn (which reads
+/// as a dropped response). Applied only when the user has not set their own
+/// value (see `run.rs` env merge).
+const CLAUDE_ENV: &[(&str, &str)] = &[
+    ("BASH_DEFAULT_TIMEOUT_MS", "300000"),
+    ("BASH_MAX_TIMEOUT_MS", "1200000"),
+];
+
 /// Append `--model <m>` unless the model is empty/`"default"`.
 fn push_model(a: &mut Vec<String>, model: Option<&str>) {
     if let Some(m) = model {
         if !m.is_empty() && m != "default" {
             a.push("--model".to_string());
             a.push(m.to_string());
+        }
+    }
+}
+
+/// Append `--include-directories <dir>` per extra dir (gemini CLI's official
+/// multi-directory workspace flag; aipro is gemini-compatible). This is the
+/// gemini counterpart of claude's `--add-dir` (D52): without it the CLI's
+/// workspace trust is limited to the cwd and the selected codebase folder is
+/// unreadable, so the codebase-analysis step used to fall back to analyzing the
+/// (output-only) workdir. One flag per dir — the comma-separated form would
+/// mis-split a path containing a comma.
+fn push_include_directories(a: &mut Vec<String>, extra_dirs: &[String]) {
+    for d in extra_dirs {
+        let d = d.trim();
+        if !d.is_empty() {
+            a.push("--include-directories".to_string());
+            a.push(d.to_string());
         }
     }
 }
@@ -166,12 +192,14 @@ fn codex_build_args(ctx: &RunCtx) -> Vec<String> {
 
 /// Gemini CLI invocation (`defs/gemini.ts`): stream-json out, `--yolo` to skip
 /// approvals; prompt on stdin. No CLI session (context re-sent each turn).
+/// Extra dirs ride `--include-directories` (D52).
 fn gemini_build_args(ctx: &RunCtx) -> Vec<String> {
     let mut a = vec![
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--yolo".to_string(),
     ];
+    push_include_directories(&mut a, ctx.extra_dirs);
     push_model(&mut a, ctx.model);
     a
 }
@@ -184,13 +212,15 @@ fn aipro_build_args(ctx: &RunCtx) -> Vec<String> {
         Some(m) if !m.is_empty() && m != "default" => m,
         _ => "glm-5.1",
     };
-    vec![
+    let mut a = vec![
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--yolo".to_string(),
         "--model".to_string(),
         model.to_string(),
-    ]
+    ];
+    push_include_directories(&mut a, ctx.extra_dirs);
+    a
 }
 
 /// Plain fallback: `<bin> -p "<prompt>"`. Best-effort for agents without a
@@ -282,7 +312,7 @@ pub static AGENT_DEFS: [AgentDef; 6] = [
             prompt_via_stdin: true,
             prompt_format: PromptFormat::ClaudeJson,
             stream_format: StreamFormat::ClaudeStreamJson,
-            env: &[],
+            env: CLAUDE_ENV,
         }),
     },
     AgentDef {
@@ -435,10 +465,29 @@ mod tests {
     }
 
     #[test]
-    fn other_agents_ignore_extra_dirs() {
+    fn codex_ignores_extra_dirs() {
+        // codex runs a full-access sandbox — no per-dir grant flags needed.
         let dirs = vec!["F:\\legacy".to_string()];
-        for args in [codex_build_args(&ctx(&dirs)), gemini_build_args(&ctx(&dirs))] {
-            assert!(!args.iter().any(|s| s == "--add-dir" || s == "F:\\legacy"));
+        let args = codex_build_args(&ctx(&dirs));
+        assert!(!args.iter().any(|s| s == "--add-dir" || s == "--include-directories" || s == "F:\\legacy"));
+    }
+
+    #[test]
+    fn gemini_and_aipro_include_directories_for_extra_dirs() {
+        // No extra dirs → no flag at all.
+        assert!(!gemini_build_args(&ctx(&[])).iter().any(|s| s == "--include-directories"));
+        assert!(!aipro_build_args(&ctx(&[])).iter().any(|s| s == "--include-directories"));
+
+        // One flag pair per non-blank dir, trimmed (D52).
+        let dirs = vec!["F:\\legacy".to_string(), "  ".to_string(), " F:\\skills\\sa ".to_string()];
+        for args in [gemini_build_args(&ctx(&dirs)), aipro_build_args(&ctx(&dirs))] {
+            let pairs: Vec<&str> = args
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| *s == "--include-directories")
+                .map(|(i, _)| args[i + 1].as_str())
+                .collect();
+            assert_eq!(pairs, vec!["F:\\legacy", "F:\\skills\\sa"]);
         }
     }
 }
