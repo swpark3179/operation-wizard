@@ -769,7 +769,8 @@ export function ChatPanel({
   );
 
   return (
-    <section className="relative flex w-[412px] shrink-0 flex-col border-r border-line bg-panel min-h-0">
+    // Width comes from the WorkspaceView wrapper (user-resizable split, D49).
+    <section className="relative flex w-full min-w-0 flex-col border-r border-line bg-panel min-h-0">
       {/* header */}
       <div className="flex shrink-0 items-center gap-2 border-b border-line px-3.5 py-2.5">
         <button

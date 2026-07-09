@@ -6,10 +6,11 @@ import {
   FolderTree,
   RefreshCw,
   ChevronRight,
+  X,
 } from "lucide-react";
 import { FileViewer } from "./FileViewer";
 import { RequirementsForm } from "./RequirementsForm";
-import type { CanvasTab } from "./WorkspaceView";
+import { fileTabId, fileTabPath, type CanvasTab } from "./WorkspaceView";
 import { listDir } from "../lib/api";
 import type { ClarifyAnswer, ClarifyQuestion } from "../lib/clarify";
 import type { FileEntry } from "../lib/types";
@@ -108,8 +109,9 @@ export function CanvasPanel({
   workdir,
   codebasePath,
   refreshNonce,
-  selectedFile,
-  onSelectFile,
+  openFiles,
+  onOpenFile,
+  onCloseFile,
   tab,
   onTabChange,
   clarify,
@@ -124,8 +126,12 @@ export function CanvasPanel({
   codebasePath?: string | null;
   /** Bumped to force a file-tree reload (e.g. after a document step writes a file). */
   refreshNonce?: number;
-  selectedFile: string | null;
-  onSelectFile: (path: string) => void;
+  /** Paths with an open `file:<path>` viewer tab (tab order, D49). */
+  openFiles: string[];
+  /** Open (or re-activate) a file's viewer tab. */
+  onOpenFile: (path: string) => void;
+  /** Close a file's viewer tab. */
+  onCloseFile: (path: string) => void;
   /** Which canvas view is active. */
   tab: CanvasTab;
   onTabChange: (tab: CanvasTab) => void;
@@ -169,7 +175,9 @@ export function CanvasPanel({
 
   // The requirements tab exists only while the form awaits the user (a stale
   // `tab === "requirements"` can never render a pill-less view); the rag tab
-  // exists once a search result arrived and stays for the session.
+  // exists once a search result arrived and stays for the session; a file tab
+  // exists only while its path is in `openFiles` (D49).
+  const activeFilePath = fileTabPath(tab);
   const effectiveTab: CanvasTab =
     tab === "requirements"
       ? clarify?.length
@@ -179,14 +187,19 @@ export function CanvasPanel({
         ? ragResult
           ? "rag"
           : "files"
-        : tab;
+        : activeFilePath
+          ? openFiles.includes(activeFilePath)
+            ? tab
+            : "files"
+          : tab;
+  const effectiveFilePath = fileTabPath(effectiveTab);
 
   const tabBtn = (id: CanvasTab, label: string, badge?: boolean) => (
     <button
       type="button"
       onClick={() => onTabChange(id)}
       className={
-        "relative rounded-md px-2.5 py-1 text-[12.5px] font-medium transition-colors " +
+        "relative shrink-0 rounded-md px-2.5 py-1 text-[12.5px] font-medium transition-colors " +
         (effectiveTab === id
           ? "bg-panel text-ink-strong shadow-xs"
           : "text-ink-soft hover:text-ink-muted")
@@ -199,14 +212,47 @@ export function CanvasPanel({
     </button>
   );
 
+  // One closable pill per open file (nested controls, so a div — not a button).
+  const fileTabPill = (path: string) => {
+    const id = fileTabId(path);
+    const active = effectiveTab === id;
+    return (
+      <div
+        key={path}
+        className={
+          "flex shrink-0 items-center gap-1 rounded-md pl-2.5 pr-1 py-1 text-[12.5px] font-medium transition-colors " +
+          (active ? "bg-panel text-ink-strong shadow-xs" : "text-ink-soft hover:text-ink-muted")
+        }
+      >
+        <button
+          type="button"
+          onClick={() => onTabChange(id)}
+          title={path}
+          className="max-w-[160px] truncate font-mono text-[11.5px]"
+        >
+          {basename(path)}
+        </button>
+        <button
+          type="button"
+          onClick={() => onCloseFile(path)}
+          title="탭 닫기"
+          className="grid h-4 w-4 shrink-0 place-items-center rounded text-ink-faint transition-colors hover:bg-subtle hover:text-ink"
+        >
+          <X size={11} />
+        </button>
+      </div>
+    );
+  };
+
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
       {/* toolbar */}
       <div className="flex h-[46px] shrink-0 items-center gap-2 border-b border-line bg-panel px-3.5">
-        <div className="flex items-center gap-0.5 rounded-lg border border-line bg-subtle p-0.5">
+        <div className="flex min-w-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-line bg-subtle p-0.5">
           {!!clarify?.length && tabBtn("requirements", "요구사항", true)}
           {!!ragResult && tabBtn("rag", "검색 결과")}
           {tabBtn("files", "파일")}
+          {openFiles.map(fileTabPill)}
         </div>
         <div className="flex-1" />
         {effectiveTab === "files" && treeRoot && (
@@ -284,24 +330,24 @@ export function CanvasPanel({
             작업하려면 홈 화면에서 작업 폴더를 지정하세요.
           </div>
         </div>
+      ) : effectiveFilePath ? (
+        // One viewer tab per open file (the 파일 tab stays a pure list — D49).
+        <FileViewer path={effectiveFilePath} refreshNonce={refreshNonce} />
       ) : (
-        <div className="flex min-h-0 flex-1" key={treeRoot}>
-          <div className="w-[240px] shrink-0 overflow-auto border-r border-line py-2">
-            {error && <div className="px-3 py-2 text-[12px] text-bad">{error}</div>}
-            {root?.length === 0 && !error && (
-              <div className="px-3 py-2 text-[12px] text-ink-faint">빈 폴더</div>
-            )}
-            {root?.map((e) => (
-              <TreeNode
-                key={e.path}
-                entry={e}
-                depth={0}
-                selected={selectedFile}
-                onSelect={onSelectFile}
-              />
-            ))}
-          </div>
-          <FileViewer path={selectedFile} refreshNonce={refreshNonce} />
+        <div className="min-h-0 flex-1 overflow-auto py-2" key={treeRoot}>
+          {error && <div className="px-3 py-2 text-[12px] text-bad">{error}</div>}
+          {root?.length === 0 && !error && (
+            <div className="px-3 py-2 text-[12px] text-ink-faint">빈 폴더</div>
+          )}
+          {root?.map((e) => (
+            <TreeNode
+              key={e.path}
+              entry={e}
+              depth={0}
+              selected={activeFilePath}
+              onSelect={onOpenFile}
+            />
+          ))}
         </div>
       )}
     </section>

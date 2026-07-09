@@ -4,7 +4,7 @@
 // phase's knowledge step. Separate from Flows (flow *definition* vs knowledge
 // *content* management).
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   BookOpen,
   ChevronDown,
@@ -15,8 +15,6 @@ import {
   Trash2,
 } from "lucide-react";
 import {
-  Channel,
-  cancelIngest,
   deleteKnowledge,
   listKnowledge,
   probeConfluence,
@@ -24,11 +22,11 @@ import {
   saveKnowledge,
   setConfluenceConfig,
   setRagConfig,
-  startConfluenceIngest,
 } from "../lib/api";
+import { startIngest, stopIngest, useIngestState } from "../lib/ingest";
 import { sessionTime } from "./workspace";
 import { useAutoGrow } from "../lib/useAutoGrow";
-import type { IngestEvent, KnowledgeEntry, Settings } from "../lib/types";
+import type { KnowledgeEntry, Settings } from "../lib/types";
 
 const inputCls =
   "w-full rounded-[6px] border border-line bg-elevated px-2.5 py-1.5 text-[13px] text-ink outline-none focus:border-accent disabled:opacity-60";
@@ -49,7 +47,8 @@ function RagSection({
 }) {
   const cfg = settings?.rag;
   const [endpoint, setEndpoint] = useState(cfg?.endpoint ?? "");
-  const [apiKey, setApiKey] = useState(cfg?.apiKey ?? "");
+  const [secretKey, setSecretKey] = useState(cfg?.secretKey ?? "");
+  const [passKey, setPassKey] = useState(cfg?.passKey ?? "");
   const [topK, setTopK] = useState(cfg?.topK != null ? String(cfg.topK) : "");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -66,7 +65,8 @@ function RagSection({
         endpoint.trim()
           ? {
               endpoint: endpoint.trim(),
-              apiKey: apiKey.trim() || null,
+              secretKey: secretKey.trim() || null,
+              passKey: passKey.trim() || null,
               topK: Number.isFinite(k) && k > 0 ? k : null,
             }
           : null,
@@ -94,12 +94,12 @@ function RagSection({
     <div className={cardCls}>
       <div className="mb-1 font-serif text-[15px] font-semibold text-ink-strong">RAG 검색 설정</div>
       <p className="mb-3 text-[12px] leading-[1.5] text-ink-muted">
-        기반 단계의 'RAG 검색'이 조회할 내 RAG 서비스입니다. 호출 코드는{" "}
-        <span className="font-mono">src-tauri/src/rag.rs</span>의{" "}
-        <span className="font-mono">TODO(user)</span> 스텁을 채워 구현합니다. API 키는
+        기반 단계의 'RAG 검색'이 조회할 내 RAG 서비스입니다. Secret/Pass 키는 요청 헤더로
+        전달되는 값이며, 실제 호출 코드는 <span className="font-mono">src-tauri/src/rag.rs</span>의{" "}
+        <span className="font-mono">TODO(user)</span> 스텁을 채워 구현합니다. 키는
         settings.json에 평문으로 저장되니 읽기 전용 키를 권장합니다.
       </p>
-      <div className="mb-2.5 grid grid-cols-[1fr_180px_80px] gap-2.5">
+      <div className="mb-2.5 grid grid-cols-[1fr_160px_160px_72px] gap-2.5">
         <div>
           <label className={labelCls}>Endpoint URL</label>
           <input
@@ -114,12 +114,26 @@ function RagSection({
           />
         </div>
         <div>
-          <label className={labelCls}>API Key (선택)</label>
+          <label className={labelCls}>Secret Key</label>
           <input
             type="password"
-            value={apiKey}
+            value={secretKey}
             onChange={(e) => {
-              setApiKey(e.target.value);
+              setSecretKey(e.target.value);
+              setSaved(false);
+            }}
+            disabled={saving}
+            placeholder="비워두면 미사용"
+            className={inputCls + " font-mono text-[12px]"}
+          />
+        </div>
+        <div>
+          <label className={labelCls}>Pass Key</label>
+          <input
+            type="password"
+            value={passKey}
+            onChange={(e) => {
+              setPassKey(e.target.value);
               setSaved(false);
             }}
             disabled={saving}
@@ -189,18 +203,12 @@ function ConfluenceSection({
   const [error, setError] = useState<string | null>(null);
   const [probe, setProbe] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  // Ingestion runner state (local to this screen; the crawl itself runs on a
-  // backend worker thread and streams IngestEvents over a Channel).
-  const [running, setRunning] = useState(false);
-  const ingestIdRef = useRef<string | null>(null);
-  const [progress, setProgress] = useState<{
-    fetched: number;
-    ingested: number;
-    failed: number;
-    last: string;
-  } | null>(null);
-  const [summary, setSummary] = useState<string | null>(null);
-  const [failures, setFailures] = useState<string[]>([]);
+  // Ingestion runner state lives in the module-level ingest store (D51), so a
+  // running crawl keeps its progress while the user works in other views and
+  // this section shows it again on return.
+  const ingest = useIngestState();
+  const running = ingest.status === "running";
+  const { progress, summary, failures } = ingest;
 
   const save = async () => {
     setSaving(true);
@@ -237,52 +245,8 @@ function ConfluenceSection({
     }
   };
 
-  const start = async () => {
-    setSummary(null);
-    setFailures([]);
-    setProgress({ fetched: 0, ingested: 0, failed: 0, last: "시작 중…" });
-    setRunning(true);
-    const channel = new Channel<IngestEvent>();
-    channel.onmessage = (ev) => {
-      switch (ev.type) {
-        case "started":
-          setProgress((p) => p && { ...p, last: `수집 시작 (${ev.rootId})` });
-          break;
-        case "pageFetched":
-          setProgress((p) => p && { ...p, fetched: ev.fetched, last: ev.title });
-          break;
-        case "pageIngested":
-          setProgress((p) => p && { ...p, ingested: ev.ingested, last: ev.title });
-          break;
-        case "pageFailed":
-          setProgress((p) => p && { ...p, failed: p.failed + 1, last: ev.title });
-          setFailures((f) => (f.length < 5 ? [...f, `${ev.title || ev.pageId}: ${ev.message}`] : f));
-          break;
-        case "error":
-          setFailures((f) => [...f, ev.message]);
-          break;
-        case "end": {
-          setRunning(false);
-          ingestIdRef.current = null;
-          const label =
-            ev.status === "succeeded" ? "완료" : ev.status === "canceled" ? "중지됨" : "실패";
-          setSummary(`${label} — 임베딩 ${ev.ingested}건 · 실패 ${ev.failed}건`);
-          break;
-        }
-      }
-    };
-    try {
-      ingestIdRef.current = await startConfluenceIngest(channel);
-    } catch (e) {
-      setRunning(false);
-      setProgress(null);
-      setSummary(String(e));
-    }
-  };
-
-  const stop = () => {
-    if (ingestIdRef.current) void cancelIngest(ingestIdRef.current).catch(() => {});
-  };
+  const start = () => void startIngest();
+  const stop = () => stopIngest();
 
   return (
     <div className={cardCls}>
@@ -291,7 +255,9 @@ function ConfluenceSection({
       </div>
       <p className="mb-3 text-[12px] leading-[1.5] text-ink-muted">
         루트 페이지의 하위 페이지를 재귀 수집해 각 페이지 원문을 위의 RAG 서비스로 전달합니다
-        (요약·임베딩은 RAG 서비스가 수행). 인증은 Server/DC의 Bearer PAT입니다.
+        (요약·임베딩은 RAG 서비스가 수행). 인증은 Server/DC의 Bearer PAT입니다. 수집은
+        백그라운드에서 진행되므로 다른 화면에서 작업을 이어가다가 돌아와 진행현황을 확인할 수
+        있습니다.
       </p>
       <div className="mb-2.5 grid grid-cols-2 gap-2.5">
         <div>
@@ -403,7 +369,13 @@ function ConfluenceSection({
             {error}
           </span>
         )}
-        <button type="button" onClick={() => void save()} disabled={saving} className={primaryBtn}>
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={saving || running}
+          title={running ? "수집이 진행 중일 때는 설정을 저장할 수 없습니다" : undefined}
+          className={primaryBtn}
+        >
           {saving ? "저장 중…" : "저장"}
         </button>
       </div>

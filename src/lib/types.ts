@@ -84,10 +84,12 @@ export interface ConfluenceConfig {
   allowInvalidCerts: boolean;
 }
 
-/** The user's RAG service endpoint (mirrors settings.rs). */
+/** The user's RAG service endpoint (mirrors settings.rs). The two keys are
+ * auth header values for the user's rag.rs implementation (D50). */
 export interface RagConfig {
   endpoint: string;
-  apiKey?: string | null;
+  secretKey?: string | null;
+  passKey?: string | null;
   /** Search result count requested by the rag workflow step. */
   topK?: number | null;
 }

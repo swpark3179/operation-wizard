@@ -142,7 +142,8 @@ fn set_rag_config(app: tauri::AppHandle, config: Option<RagConfig>) -> Result<Se
     let normalized = config
         .map(|mut c| {
             c.endpoint = c.endpoint.trim().trim_end_matches('/').to_string();
-            c.api_key = c.api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+            c.secret_key = c.secret_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+            c.pass_key = c.pass_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
             c
         })
         .filter(|c| !c.endpoint.is_empty());
