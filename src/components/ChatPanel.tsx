@@ -6,10 +6,13 @@ import {
   Channel,
   cancelRun,
   ensureProject,
+  listKnowledge,
   listSessions,
   loadSession,
+  ragSearch,
   runAgent,
   saveSession,
+  setProjectCodebase,
 } from "../lib/api";
 import { useAutoGrow } from "../lib/useAutoGrow";
 import {
@@ -17,15 +20,18 @@ import {
   parsePrefill,
   type ClarifyQuestion,
 } from "../lib/clarify";
+import { buildRagQuery, formatKnowledgeContext, formatRagContext } from "../lib/foundation";
 import { optionsFor } from "../lib/options";
 import { resolveSkills } from "../lib/skills";
-import { progressLabel, workflowFor } from "../lib/workflow";
+import { isGenerative, progressLabel, runtimeWorkflowFor } from "../lib/workflow";
 import type {
   AgentInfo,
   DetectedAgent,
+  RagHit,
   RunEvent,
   SessionMeta,
   Settings,
+  StepDef,
   StoredSession,
 } from "../lib/types";
 
@@ -68,6 +74,7 @@ export function ChatPanel({
   detected,
   settings,
   workdir,
+  codebasePath,
   initialSession,
   answerSubmission,
   formPending,
@@ -77,6 +84,7 @@ export function ChatPanel({
   onOpenFile,
   onClarify,
   onPrefill,
+  onRagResult,
   onStreamingChange,
 }: {
   /** The active project id (folder key for persistence). */
@@ -92,6 +100,9 @@ export function ChatPanel({
   settings: Settings | null;
   /** The project's resolved workdir (cwd), or null until the first send. */
   workdir: string | null;
+  /** The codebase folder to analyze (foundation phase, D45) — separate from
+   * the workdir. Null until the requirements form's folder answer arrives. */
+  codebasePath: string | null;
   /** A saved session to rehydrate (view + continue), or null for a fresh chat. */
   initialSession: StoredSession | null;
   /** Requirements-form answers to send as the next turn (nonce-guarded). */
@@ -109,6 +120,8 @@ export function ChatPanel({
   onClarify: (questions: ClarifyQuestion[]) => void;
   /** Option answers inferred from the launcher prompt (prefill pass) → form. */
   onPrefill: (answers: Record<string, string | string[]>) => void;
+  /** RAG search results from the rag foundation step → canvas "검색 결과" tab. */
+  onRagResult: (query: string, hits: RagHit[]) => void;
   /** Mirror streaming state up (canvas form disables while streaming). */
   onStreamingChange: (streaming: boolean) => void;
 }) {
@@ -156,7 +169,7 @@ export function ChatPanel({
   // parse on `end`. A loaded session starts past the end (plain chat, no
   // re-injection — transient like clarify). The agent-change reset effect
   // intentionally does not touch these.
-  const WF = useRef(workflowFor(category, settings)).current;
+  const WF = useRef(runtimeWorkflowFor(category, settings)).current;
   const stepIndexRef = useRef(initialSession ? WF.length : 0);
   const stepArmedRef = useRef(!initialSession && WF.length > 0);
   const inflightStepRef = useRef<number | null>(null);
@@ -166,12 +179,21 @@ export function ChatPanel({
   // are injected on the turn that runs it (session agents get each skill once —
   // deduped via `injectedSkillIdsRef` — sessionless agents re-see them in the
   // transcript). A hidden "prefill" turn fills known options from the prompt.
-  const optionQuestions = useMemo(() => optionsFor(category), [category]);
+  const optionQuestions = useRef(optionsFor(category, settings)).current;
   const skillMapRef = useRef(resolveSkills(settings));
   const injectedSkillIdsRef = useRef(new Set<string>());
   const seedPromptRef = useRef(seedPrompt); // original launcher prompt (folded into the first work turn)
   const prefillInflightRef = useRef(false); // this turn is the hidden prefill pass
   const bootedRef = useRef(false); // options/prefill/seed boot runs once
+  // Foundation phase (D44/D45): the codebase folder (form answer, prop-fed) and
+  // the extra readable dirs sent with every run (codebase + armed skill dirs —
+  // claude's `--add-dir` is per-invocation). The answers wire feeds the RAG
+  // query; a preflight fetch can be aborted by Stop before the run spawns.
+  const codebasePathRef = useRef<string | null>(codebasePath);
+  const codebasePersistedRef = useRef(!!initialSession); // manifest already has it
+  const skillDirsRef = useRef(new Set<string>());
+  const lastAnswersWireRef = useRef("");
+  const preflightAbortRef = useRef(false);
   // Auto-advance: a generative step queues the next step's turn here; a
   // nonce-guarded effect fires it once (never call send() from the stream
   // handler's closure — it would capture stale `messages`).
@@ -188,6 +210,10 @@ export function ChatPanel({
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    codebasePathRef.current = codebasePath;
+  }, [codebasePath]);
 
   useEffect(() => {
     onStreamingChange(streaming);
@@ -339,16 +365,17 @@ export function ChatPanel({
 
         if (stepIdx != null && ev.status === "succeeded") {
           const step = WF[stepIdx];
-          if (step.kind === "search" || step.kind === "document") {
-            // Generative step: open the produced file (if any), then AUTO-ADVANCE
-            // to the next generative step; stop before a terminal chat step.
+          if (isGenerative(step.kind)) {
+            // Generative step (search/document/foundation): open the produced
+            // file (if any), then AUTO-ADVANCE to the next generative step;
+            // stop before a terminal chat step.
             if (step.file && resolvedWorkdirRef.current) {
               onOpenFile(joinPath(resolvedWorkdirRef.current, step.file));
             }
             const nextIdx = stepIdx + 1;
             stepIndexRef.current = nextIdx;
             const nextStep = WF[nextIdx];
-            if (nextStep && (nextStep.kind === "search" || nextStep.kind === "document")) {
+            if (nextStep && isGenerative(nextStep.kind)) {
               stepArmedRef.current = true;
               setAutoTurn((s) => ({
                 display: progressLabel(nextIdx, WF),
@@ -380,6 +407,58 @@ export function ChatPanel({
       stepArmedRef.current = true;
       inflightStepRef.current = null;
     }
+  };
+
+  /** A centered workflow note (skip/stop announcements). */
+  const note = (content: string): ChatMessage => ({
+    role: "user",
+    content,
+    thinking: "",
+    events: [],
+    system: true,
+  });
+
+  /** Foundation-step preflight (D44): resolve the extra wire context for this
+   * turn, or decide to skip the step (unconfigured / empty / failed — the
+   * foundation never blocks the flow). `codebase` is synchronous; `rag` and
+   * `knowledge` fetch before the agent turn. */
+  const stepPreflight = async (step: StepDef): Promise<{ context?: string; skip?: string }> => {
+    if (step.kind === "codebase") {
+      const path = codebasePathRef.current;
+      return {
+        context: path
+          ? `분석 대상 코드베이스 폴더: ${path}`
+          : "분석 대상 코드베이스 폴더가 지정되지 않았습니다. 작업 폴더의 소스를 대신 분석하세요.",
+      };
+    }
+    if (step.kind === "rag") {
+      if (!settings?.rag?.endpoint?.trim()) {
+        return { skip: "RAG가 설정되지 않아 사내 문서 검색 단계를 건너뜁니다. (지식 화면에서 등록)" };
+      }
+      try {
+        const query = buildRagQuery(seedPromptRef.current, lastAnswersWireRef.current);
+        const hits = await ragSearch(query);
+        if (preflightAbortRef.current) return {};
+        if (!hits.length) return { skip: "관련 사내 문서를 찾지 못해 검색 단계를 건너뜁니다." };
+        onRagResult(query, hits);
+        return { context: formatRagContext(hits) };
+      } catch (e) {
+        return { skip: `사내 문서 검색 단계를 건너뜁니다 — ${String(e)}` };
+      }
+    }
+    if (step.kind === "knowledge") {
+      try {
+        const entries = await listKnowledge();
+        if (preflightAbortRef.current) return {};
+        if (!entries.length) {
+          return { skip: "등록된 사내 지식이 없어 지식 반영 단계를 건너뜁니다. (지식 화면에서 등록)" };
+        }
+        return { context: formatKnowledgeContext(entries) };
+      } catch (e) {
+        return { skip: `지식 베이스를 읽지 못해 단계를 건너뜁니다 — ${String(e)}` };
+      }
+    }
+    return {};
   };
 
   const send = async (
@@ -421,7 +500,15 @@ export function ChatPanel({
           injectedSkillIdsRef.current.add(s.id);
           injectedNow.push(s.id);
         }
-        skillBodies.push(s.body);
+        let body = s.body;
+        // A skill with a resource folder (D45): tell the agent where it is and
+        // grant read access (the dir rides extraDirs on every later turn too).
+        if (s.dir?.trim()) {
+          const dir = s.dir.trim();
+          skillDirsRef.current.add(dir);
+          body += `\n\n[스킬 리소스 폴더] 이 스킬의 참고 파일·스크립트가 다음 폴더에 있습니다: ${dir}\n필요한 파일을 직접 읽어 지시에 활용하세요.`;
+        }
+        skillBodies.push(body);
       }
     }
     // A failed send never reached the agent — forget this turn's skill marks so
@@ -430,9 +517,50 @@ export function ChatPanel({
       for (const id of injectedNow) injectedSkillIdsRef.current.delete(id);
     };
 
+    // Foundation preflight (D44): resolve the step's wire context before the
+    // agent turn, or skip the step without one (note + advance + chain on).
+    let preflightContext = "";
+    if (!isPrefill && stepInject && step) {
+      const fetches = step.kind === "rag" || step.kind === "knowledge";
+      if (fetches) setStreaming(true); // Stop stays live during the fetch
+      const pf = await stepPreflight(step);
+      if (fetches) setStreaming(false);
+      if (preflightAbortRef.current) {
+        // Stopped mid-preflight → same fallback as a canceled step: halt
+        // auto-progress, drop to plain chat.
+        preflightAbortRef.current = false;
+        unwindSkills();
+        inflightStepRef.current = null;
+        stepIndexRef.current = WF.length;
+        stepArmedRef.current = false;
+        setMessages((prev) => [...prev, note("단계 진행을 중지했습니다.")]);
+        return;
+      }
+      if (pf.skip) {
+        unwindSkills();
+        inflightStepRef.current = null;
+        setMessages((prev) => [...prev, note(pf.skip!)]);
+        const nextIdx = stepIndexRef.current + 1;
+        stepIndexRef.current = nextIdx;
+        const nextStep = WF[nextIdx];
+        if (nextStep && isGenerative(nextStep.kind)) {
+          // Chain into the next generative step (re-enter send so its skills /
+          // preflight run). A real user prompt (e.g. the answers turn) is
+          // carried along; an auto turn shows the next progress note.
+          stepArmedRef.current = true;
+          void send(text, prompt ? opts : { ...opts, system: true, display: progressLabel(nextIdx, WF) });
+        } else {
+          stepArmedRef.current = false;
+          if (prompt) void send(text, opts); // never drop a real user prompt
+        }
+        return;
+      }
+      preflightContext = pf.context ?? "";
+    }
+
     const wire = isPrefill
       ? prefillInstruction(optionQuestions, seedPromptRef.current)
-      : [...skillBodies, stepInject ? step!.instruction : "", prompt]
+      : [...skillBodies, stepInject ? step!.instruction : "", preflightContext, prompt]
           .filter(Boolean)
           .join("\n\n");
     if (!wire.trim()) {
@@ -476,7 +604,13 @@ export function ChatPanel({
         // Title the project by the user's actual request (known even during a
         // prefill turn), not the answer/instruction wire.
         const title = seedPromptRef.current.trim().slice(0, 60) || categoryLabel(category);
-        const project = await ensureProject(projectId, cwd ?? "", title, category);
+        const project = await ensureProject(
+          projectId,
+          cwd ?? "",
+          title,
+          category,
+          codebasePathRef.current,
+        );
         cwd = project.workdir;
         resolvedWorkdirRef.current = cwd;
         ensuredRef.current = true;
@@ -495,6 +629,16 @@ export function ChatPanel({
       prefillInflightRef.current = false;
       updateLastAssistant((m) => ({ ...m, streaming: false, error: "작업 폴더를 확인할 수 없습니다." }));
       return;
+    }
+
+    // Persist the codebase path onto the manifest once known — the folder
+    // answer usually arrives after `ensure_project` already ran (on the hidden
+    // prefill turn), so this update path is the normal one (D45).
+    if (!isPrefill && codebasePathRef.current && !codebasePersistedRef.current) {
+      codebasePersistedRef.current = true;
+      void setProjectCodebase(projectId, codebasePathRef.current).catch(() => {
+        codebasePersistedRef.current = false; // retry on the next turn
+      });
     }
 
     // Create the session folder as soon as the first question is asked (never
@@ -516,6 +660,12 @@ export function ChatPanel({
           model: model === "default" ? null : model,
           sessionId: useSession ? sessionIdRef.current : null,
           resume: useSession ? resumeRef.current : false,
+          // Every turn: claude's --add-dir is per-invocation (codebase + skill
+          // resource folders); other agents ignore it (prompt mentions remain).
+          extraDirs: [
+            ...(codebasePathRef.current ? [codebasePathRef.current] : []),
+            ...skillDirsRef.current,
+          ],
         },
         channel,
       );
@@ -534,6 +684,9 @@ export function ChatPanel({
 
   const stop = () => {
     if (runIdRef.current) cancelRun(runIdRef.current).catch(() => {});
+    // Streaming with no run id = a foundation preflight fetch is in flight;
+    // flag it so send() aborts instead of spawning the turn.
+    else preflightAbortRef.current = true;
   };
 
   const openHistory = async () => {
@@ -593,6 +746,7 @@ export function ChatPanel({
   useEffect(() => {
     if (!answerSubmission || answerSubmission.nonce === lastAnswerNonceRef.current) return;
     lastAnswerNonceRef.current = answerSubmission.nonce;
+    lastAnswersWireRef.current = answerSubmission.wire; // feeds the RAG query
     const seed = seedPromptRef.current.trim();
     const wire = seed ? `${answerSubmission.wire}\n\n원래 요청:\n${seed}` : answerSubmission.wire;
     void send(wire, { display: seed || answerSubmission.display });

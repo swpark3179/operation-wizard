@@ -25,8 +25,12 @@ use crate::settings;
 /// Normalized run event streamed to the webview. Ports the subset of Open
 /// Design's `DaemonAgentPayload` this app renders. Serialized as
 /// `{ "type": "...", ...camelCase fields }`.
+// `rename_all` covers the variant names only; `rename_all_fields` is required
+// for the struct-variant fields (without it `toolUseId`/`sessionId`/token
+// fields reached the webview as snake_case and were silently dropped by the
+// frontend mirror — codex session capture, tool-result error flags, usage).
 #[derive(Serialize, Clone, Debug, PartialEq)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum RunEvent {
     /// Lifecycle status; carries the model + captured session id on init.
     Status {
@@ -84,6 +88,11 @@ pub struct RunArgs {
     /// True when continuing a prior turn (resume) rather than starting fresh.
     #[serde(default)]
     pub resume: Option<bool>,
+    /// Extra readable directories beyond `cwd` (codebase path + armed skill
+    /// resource folders). Passed every turn — claude's `--add-dir` is
+    /// per-invocation. Non-claude agents ignore it (see `RunCtx.extra_dirs`).
+    #[serde(default)]
+    pub extra_dirs: Vec<String>,
 }
 
 struct RunHandle {
@@ -419,6 +428,7 @@ pub fn run_agent(
         session_id: args.session_id.as_deref(),
         resume: args.resume.unwrap_or(false),
         prompt: &args.prompt,
+        extra_dirs: &args.extra_dirs,
     });
 
     // Mint a run id.
@@ -662,6 +672,33 @@ mod tests {
     fn text_delta_serializes_camel_case() {
         let json = serde_json::to_string(&RunEvent::TextDelta { delta: "x".into() }).unwrap();
         assert_eq!(json, r#"{"type":"textDelta","delta":"x"}"#);
+    }
+
+    #[test]
+    fn multi_word_fields_serialize_camel_case() {
+        // Guards `rename_all_fields` — the frontend mirror reads these names.
+        let json = serde_json::to_string(&RunEvent::ToolResult {
+            tool_use_id: "t1".into(),
+            content: "c".into(),
+            is_error: true,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"type":"toolResult","toolUseId":"t1","content":"c","isError":true}"#);
+
+        let json = serde_json::to_string(&RunEvent::Status {
+            label: "initializing".into(),
+            model: None,
+            session_id: Some("s1".into()),
+        })
+        .unwrap();
+        assert!(json.contains(r#""sessionId":"s1""#));
+
+        let json = serde_json::to_string(&RunEvent::Usage {
+            input_tokens: Some(1),
+            output_tokens: Some(2),
+        })
+        .unwrap();
+        assert!(json.contains(r#""inputTokens":1"#) && json.contains(r#""outputTokens":2"#));
     }
 
     // ── codex parser ──────────────────────────────────────────────────────────

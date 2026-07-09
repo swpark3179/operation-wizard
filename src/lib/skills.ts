@@ -62,6 +62,28 @@ const TEST_PLAN_SKILL = `[시스템 스킬: 테스트 계획]
   - **완료 기준**(어떤 조건이면 이 변경을 배포 가능하다고 판단하는지).
 - 자동화 가능한 케이스는 기존 테스트 방식(예: cargo test 등 프로젝트의 테스트 러너)에 맞춰 제안합니다.`;
 
+// ── 기반(foundation) 단계 스킬 ───────────────────────────────────────────────────
+
+const CODEBASE_EXPLORE_SKILL = `[시스템 스킬: 코드베이스 탐색]
+당신은 레거시 코드베이스 탐색 전문가입니다. 이 단계에서 아래 방법을 지키세요.
+- 프롬프트에 명시된 **분석 대상 코드베이스 폴더**만 읽기 전용으로 탐색합니다.
+  그 폴더의 파일을 수정·생성·삭제하지 않습니다(산출물은 작업 폴더에만 씁니다).
+- 다음 순서로 파악합니다: 빌드/설정 파일로 기술 스택 확인 → 진입점 → 폴더/모듈 구조 →
+  이번 요청과 관련된 영역 좁히기 → 그 영역의 의존 관계와 호출 흐름.
+- 구조와 흐름은 \`\`\`mermaid\`\`\` 다이어그램으로 표현합니다.
+- 언급하는 모든 모듈·함수에 실제 파일 경로를 표기하고, 추측한 내용은 "추정"으로 구분합니다.
+- 코드베이스가 크면 요청과 무관한 영역은 개요 수준으로만 다룹니다.`;
+
+const HTML_RENDER_SKILL = `[시스템 스킬: HTML 문서 렌더링]
+당신은 문서를 보기 좋은 웹 페이지로 재구성하는 퍼블리셔입니다. 이 단계에서 아래를 지키세요.
+- 직전 산출물(마크다운/계획/다이어그램)의 **내용을 바꾸지 말고** 시각적 표현만 재구성합니다.
+- 결과는 **자립형(single-file) HTML**이어야 합니다: 모든 CSS는 인라인 \`<style>\`로,
+  외부 CDN·폰트·스크립트·이미지 링크를 사용하지 않습니다(사내망/오프라인에서 열립니다).
+- 표는 HTML 표로, mermaid 다이어그램은 가능하면 인라인 SVG나 구조화된 HTML(순서 목록/박스)로
+  변환합니다. 변환이 어려우면 코드 블록으로 보존합니다.
+- 제목 계층·목차·섹션 카드 등으로 읽기 흐름을 만들고, 차분한 중립 톤 팔레트를 사용합니다.
+- 지정된 경로에 파일 쓰기 도구로 저장하고, 저장 후 한 문장으로만 보고합니다.`;
+
 // ── 기타 카테고리 스킬 (단일 chat 단계에 부착) ────────────────────────────────────
 
 const GUIDE_SKILL = `[시스템 스킬: 운영 가이드 생성]
@@ -84,8 +106,12 @@ const CHANGE_SKILL = `[시스템 스킬: 데이터 변경·권한]
 - 가능한 경우 영향 건수 사전 확인(SELECT), 트랜잭션, 백업/롤백 스크립트를 함께 제안합니다.
 - 요청받지 않은 범위로 변경을 확대하지 않습니다.`;
 
-/** Built-in default skill registry (also the sample content in the Flows view). */
+/** Built-in default skill registry (also the sample content in the Flows view).
+ * `confluence-search` predates the rag foundation step and stays for workflows
+ * saved before the change. */
 export const DEFAULT_SKILLS: SkillDef[] = [
+  { id: "codebase-explore", name: "코드베이스 탐색", body: CODEBASE_EXPLORE_SKILL },
+  { id: "html-render", name: "HTML 문서 렌더링", body: HTML_RENDER_SKILL },
   { id: "source-analysis", name: "소스코드 분석", body: SOURCE_ANALYSIS_SKILL },
   { id: "confluence-search", name: "컨플루언스 탐색", body: CONFLUENCE_SKILL },
   { id: "plan-method", name: "개발 계획 수립", body: PLAN_SKILL },

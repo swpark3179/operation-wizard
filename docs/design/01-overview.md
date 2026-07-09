@@ -52,11 +52,18 @@
   턴을 발사한다. 프롬프트 주입 + 텍스트 블록/도구 이벤트 해석 방식이며 실패 시 일반 chat 폴백(자세히는
   [07-workspace-and-runs.md](07-workspace-and-runs.md)·[08-guided-flows-and-skills.md](08-guided-flows-and-skills.md)).
 - **설정형 워크플로우·스킬(증분 6):** 단계·스킬의 **정의는 사용자 설정**이다 — **Flows 설정 화면**에서
-  카테고리별 단계(이름/종류/지시문/산출물 파일/스킬 연결)와 스킬 레지스트리를 편집해 `settings.json`에
-  저장한다(`set_skills`/`set_workflow`). 코드 기본값이 폴백=샘플이며, 기본 `plan` 플로우는 **선택지 →
-  소스코드 분석(`docs/source-analysis.md`, mermaid) → 컨플루언스 탐색 → 계획서(`docs/plan.md`) →
-  변경영향분석서(`docs/impact-analysis.md`) → 테스트 계획서(`docs/test-plan.md`) → 자유 대화**로, 생성형
-  단계는 자동 진행하고 산출물은 캔버스 **마크다운+mermaid 미리보기**로 표시된다(D39~D42).
+  카테고리별 단계(이름/종류/지시문/산출물 파일/결과 형태/스킬 연결)와 스킬 레지스트리를 편집해
+  `settings.json`에 저장한다(`set_skills`/`set_workflow`). 코드 기본값이 폴백=샘플이며, 생성형 단계는
+  자동 진행하고 산출물은 캔버스 **마크다운+mermaid 미리보기**로 표시된다(D39~D42).
+- **기반 3단계 + 지식 인프라(증분 7):** 워크플로우 앞에 **반드시 거치는 기반 3단계**를 도입했다 —
+  ① **코드베이스 분석**(첫 질문에서 코드베이스 폴더 필수 선택; workdir와 별개, claude `--add-dir`로 접근
+  부여, 사용자 탐색 스킬 연결 가능) → ② **사내 문서 RAG 검색**(지식 화면에서 Confluence URL을 등록하면
+  하위 페이지를 재귀 수집해 **사용자의 RAG API**(`rag.rs`의 TODO 스텁을 채워 연동)로 전달; 실행 시점에는
+  `rag_search` 결과를 캔버스 '검색 결과' 탭(HTML)으로 보여주고 에이전트에 주입) → ③ **지식 베이스
+  반영**(지식 화면에서 제목+본문 CRUD, 단순 저장 후 프롬프트 주입). 이후 기존 설정 단계들이 이어진다.
+  `plan`은 항상 강제, 그 외 카테고리는 Flows 토글로 opt-in. 스킬은 **리소스 폴더**(claude skill 스타일
+  참고 파일/스크립트)를 가질 수 있고, 단계는 **결과 형태**(대화만/파일/HTML 캔버스 — HTML은 내장
+  `html-render` 스킬 턴으로 재생성)를 고른다(D44~D48).
 
 ## 범위 밖 (현재 미포함)
 
@@ -66,6 +73,8 @@
 - 대화는 파일(JSON)로 영속화된다([07](07-workspace-and-runs.md)). SQLite/전문 검색/여러 프로젝트
   목록 화면은 후속 증분. opencode/antigravity의 1급 실행 파서(현재 plain; claude·codex·gemini·aipro는
   1급 지원).
+- RAG API 실연동 — `rag.rs`의 `ingest_page`/`search`는 사용자가 채우는 TODO 스텁(미구현 시 rag 단계는
+  안내와 함께 건너뜀). Confluence Cloud(Basic 인증)도 v1 범위 밖(Server/DC PAT만).
 - 인증/로그인 상태 프로브(Open Design의 claude/codex `authProbe`는 후속 작업).
 - Claude의 라이브 모델 목록(Open Design의 MMS 라우트 fetch는 자체 프록시 인프라
   의존이라 제외 — 정적 fallback만 사용).

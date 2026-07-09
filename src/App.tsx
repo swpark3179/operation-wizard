@@ -4,6 +4,7 @@ import type { View } from "./components/NavRail";
 import { HomeArea } from "./components/HomeArea";
 import { AgentsView } from "./components/AgentsView";
 import { FlowSettingsView } from "./components/FlowSettingsView";
+import { KnowledgeView } from "./components/KnowledgeView";
 import { detectAgent, getSettings, listAgents, setAgentBin } from "./lib/api";
 import type { AgentInfo, DetectedAgent, Settings } from "./lib/types";
 
@@ -83,9 +84,13 @@ function App() {
             onSave={handleSave}
           />
         </div>
-      ) : (
+      ) : view === "flows" ? (
         <div className="h-full overflow-auto">
           <FlowSettingsView settings={settings} onSettingsChange={setSettings} />
+        </div>
+      ) : (
+        <div className="h-full overflow-auto">
+          <KnowledgeView settings={settings} onSettingsChange={setSettings} />
         </div>
       )}
     </AppShell>

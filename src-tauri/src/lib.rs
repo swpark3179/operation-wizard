@@ -1,8 +1,11 @@
 mod agents;
+mod confluence;
 mod detect;
 mod exec;
 mod files;
+mod knowledge;
 mod projects;
+mod rag;
 mod resolve;
 mod run;
 mod settings;
@@ -11,7 +14,7 @@ use serde::Serialize;
 use tauri::Manager;
 
 use detect::DetectedAgent;
-use settings::{Settings, SkillDef, StepDef};
+use settings::{ConfluenceConfig, RagConfig, Settings, SkillDef, StepDef};
 
 /// Registry metadata for one agent. The frontend renders one card per entry,
 /// in registry order.
@@ -111,12 +114,52 @@ fn set_workflow(
     Ok(s)
 }
 
+/// Set (or clear, with `None`/empty base URL) the Confluence crawl config.
+#[tauri::command]
+fn set_confluence_config(
+    app: tauri::AppHandle,
+    config: Option<ConfluenceConfig>,
+) -> Result<Settings, String> {
+    let normalized = config
+        .map(|mut c| {
+            c.base_url = c.base_url.trim().trim_end_matches('/').to_string();
+            c.token = c.token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+            c.root_page_id = c.root_page_id.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            c.space_key = c.space_key.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            c
+        })
+        .filter(|c| !c.base_url.is_empty());
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut s = settings::load(&config_dir);
+    s.set_confluence(normalized);
+    settings::save(&config_dir, &s)?;
+    Ok(s)
+}
+
+/// Set (or clear, with `None`/empty endpoint) the RAG service config.
+#[tauri::command]
+fn set_rag_config(app: tauri::AppHandle, config: Option<RagConfig>) -> Result<Settings, String> {
+    let normalized = config
+        .map(|mut c| {
+            c.endpoint = c.endpoint.trim().trim_end_matches('/').to_string();
+            c.api_key = c.api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+            c
+        })
+        .filter(|c| !c.endpoint.is_empty());
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut s = settings::load(&config_dir);
+    s.set_rag(normalized);
+    settings::save(&config_dir, &s)?;
+    Ok(s)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(run::RunRegistry::default())
+        .manage(confluence::IngestRegistry::default())
         .invoke_handler(tauri::generate_handler![
             list_agents,
             detect_agent,
@@ -124,6 +167,8 @@ pub fn run() {
             set_agent_bin,
             set_skills,
             set_workflow,
+            set_confluence_config,
+            set_rag_config,
             run::run_agent,
             run::cancel_run,
             files::list_dir,
@@ -132,7 +177,15 @@ pub fn run() {
             projects::save_session,
             projects::list_sessions,
             projects::load_session,
-            projects::list_projects
+            projects::list_projects,
+            projects::set_project_codebase,
+            knowledge::list_knowledge,
+            knowledge::save_knowledge,
+            knowledge::delete_knowledge,
+            confluence::start_confluence_ingest,
+            confluence::cancel_ingest,
+            confluence::probe_confluence,
+            rag::rag_search
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

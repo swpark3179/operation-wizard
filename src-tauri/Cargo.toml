@@ -24,3 +24,8 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wait-timeout = "0.2"
+# First HTTP dependency (Confluence crawl + user RAG API). `blocking` matches the
+# app's std worker-thread idiom (never call on the IPC thread); `native-tls` is
+# schannel on Windows, which trusts the OS cert store — where corporate
+# TLS-inspection proxy CAs live (avoids the codex BadSignature class, D28/D48).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }

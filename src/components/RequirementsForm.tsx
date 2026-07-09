@@ -1,7 +1,65 @@
 import { useState } from "react";
-import { ClipboardCheck, Circle, CheckCircle2, Square, CheckSquare, Send } from "lucide-react";
+import {
+  ClipboardCheck,
+  Circle,
+  CheckCircle2,
+  Square,
+  CheckSquare,
+  Send,
+  FolderOpen,
+  X,
+} from "lucide-react";
 import type { ClarifyAnswer, ClarifyQuestion } from "../lib/clarify";
+import { pickFolder } from "../lib/api";
 import { useAutoGrow } from "../lib/useAutoGrow";
+
+/** Folder answer (type "folder"): a native picker button + the chosen path as
+ * a clearable mono chip. The value is the absolute path string, so the shared
+ * required-validation works unchanged (D45). */
+function FolderAnswer({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+}) {
+  const choose = async () => {
+    const folder = await pickFolder();
+    if (folder) onChange(folder);
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => void choose()}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel px-3 py-2 text-[12.5px] font-medium text-ink-muted transition-colors hover:border-line-strong hover:bg-subtle disabled:opacity-60"
+      >
+        <FolderOpen size={14} className="text-accent" />
+        {value ? "다른 폴더 선택…" : "폴더 선택…"}
+      </button>
+      {value && (
+        <span
+          title={value}
+          className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md border border-line bg-subtle px-2 py-1.5 font-mono text-[11.5px] text-ink-muted"
+        >
+          <span className="truncate">{value}</span>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => onChange("")}
+            title="선택 해제"
+            className="shrink-0 text-ink-faint transition-colors hover:text-ink disabled:opacity-60"
+          >
+            <X size={12} />
+          </button>
+        </span>
+      )}
+    </div>
+  );
+}
 
 /** Auto-growing text answer (own component so the hook is called once per field). */
 function TextAnswer({
@@ -140,6 +198,14 @@ export function RequirementsForm({
 
                 {q.type === "text" && (
                   <TextAnswer
+                    value={(answers[q.id] as string) ?? ""}
+                    onChange={(v) => setText(q.id, v)}
+                    disabled={disabled || submitted}
+                  />
+                )}
+
+                {q.type === "folder" && (
+                  <FolderAnswer
                     value={(answers[q.id] as string) ?? ""}
                     onChange={(v) => setText(q.id, v)}
                     disabled={disabled || submitted}

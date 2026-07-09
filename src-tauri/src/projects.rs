@@ -41,6 +41,12 @@ pub struct Project {
     #[serde(default)]
     pub category: String,
     pub created_at: u64,
+    /// The codebase folder analyzed in the foundation phase — SEPARATE from
+    /// `workdir` (workdir = agent cwd + output/canvas root; codebase = read
+    /// target, granted via `RunArgs.extraDirs`). `None` for old manifests and
+    /// non-foundation projects (D45).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codebase_path: Option<String>,
 }
 
 /// Session metadata (the header of `session.json`, also returned by `list_sessions`).
@@ -80,6 +86,8 @@ pub struct ProjectSummary {
     pub session_count: u64,
     /// Most-recently-updated session id, to open when the project is clicked.
     pub last_session_id: Option<String>,
+    /// The project's analyzed codebase folder (restored when reopening).
+    pub codebase_path: Option<String>,
 }
 
 /// A full stored session: metadata (flattened) + the opaque message array.
@@ -131,13 +139,23 @@ fn session_dir(root: &Path, project_id: &str, session_id: &str) -> PathBuf {
     sessions_dir(root, project_id).join(session_id)
 }
 
-fn new_project(id: &str, workdir: &str, title: &str, category: &str) -> Project {
+fn new_project(
+    id: &str,
+    workdir: &str,
+    title: &str,
+    category: &str,
+    codebase_path: Option<&str>,
+) -> Project {
     Project {
         id: id.to_string(),
         workdir: workdir.to_string(),
         title: title.to_string(),
         category: category.to_string(),
         created_at: now_millis(),
+        codebase_path: codebase_path
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string),
     }
 }
 
@@ -151,6 +169,7 @@ fn ensure_project_at(
     workdir_in: &str,
     title: &str,
     category: &str,
+    codebase_path: Option<&str>,
 ) -> Result<Project, String> {
     if !valid_project_id(id) {
         return Err(format!("invalid project id: {id:?}"));
@@ -173,7 +192,30 @@ fn ensure_project_at(
     } else {
         workdir_in.trim().to_string()
     };
-    let p = new_project(id, &workdir, title, category);
+    let p = new_project(id, &workdir, title, category, codebase_path);
+    let json = serde_json::to_string_pretty(&p).map_err(|e| e.to_string())?;
+    fs::write(&manifest, json).map_err(|e| e.to_string())?;
+    Ok(p)
+}
+
+/// Update (or clear, with `None`/empty) an existing project's codebase path.
+/// The codebase is picked in the requirements form — possibly after
+/// `ensure_project` already ran — and can change on a later session, so this
+/// mutates the manifest in place (read → mutate → rewrite).
+fn set_project_codebase_at(
+    root: &Path,
+    project_id: &str,
+    codebase_path: Option<String>,
+) -> Result<Project, String> {
+    if !valid_project_id(project_id) {
+        return Err(format!("invalid project id: {project_id:?}"));
+    }
+    let manifest = project_dir(root, project_id).join("project.json");
+    let txt = fs::read_to_string(&manifest)
+        .map_err(|_| format!("project not found: {project_id}"))?;
+    let mut p: Project =
+        serde_json::from_str(&txt).map_err(|e| format!("invalid project manifest: {e}"))?;
+    p.codebase_path = codebase_path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let json = serde_json::to_string_pretty(&p).map_err(|e| e.to_string())?;
     fs::write(&manifest, json).map_err(|e| e.to_string())?;
     Ok(p)
@@ -271,6 +313,7 @@ fn list_projects_at(root: &Path) -> Result<Vec<ProjectSummary>, String> {
             updated_at: latest.map(|s| s.updated_at).unwrap_or(project.created_at),
             session_count: sessions.len() as u64,
             last_session_id: latest.map(|s| s.id.clone()),
+            codebase_path: project.codebase_path,
         });
     }
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -287,9 +330,26 @@ pub fn ensure_project(
     workdir: Option<String>,
     title: String,
     category: String,
+    codebase_path: Option<String>,
 ) -> Result<Project, String> {
     let workdir = workdir.unwrap_or_default();
-    ensure_project_at(&projects_root()?, &project_id, &workdir, &title, &category)
+    ensure_project_at(
+        &projects_root()?,
+        &project_id,
+        &workdir,
+        &title,
+        &category,
+        codebase_path.as_deref(),
+    )
+}
+
+/// Update (or clear with null/empty) an existing project's codebase path.
+#[tauri::command]
+pub fn set_project_codebase(
+    project_id: String,
+    codebase_path: Option<String>,
+) -> Result<Project, String> {
+    set_project_codebase_at(&projects_root()?, &project_id, codebase_path)
 }
 
 /// Write one session to disk (project must already exist via `ensure_project`).
@@ -339,9 +399,9 @@ mod tests {
     #[test]
     fn rejects_bad_project_id() {
         let root = std::env::temp_dir().join("ow-test-badpid");
-        assert!(ensure_project_at(&root, "../evil", "", "t", "plan").is_err());
-        assert!(ensure_project_at(&root, "a/b", "", "t", "plan").is_err());
-        assert!(ensure_project_at(&root, "", "", "t", "plan").is_err());
+        assert!(ensure_project_at(&root, "../evil", "", "t", "plan", None).is_err());
+        assert!(ensure_project_at(&root, "a/b", "", "t", "plan", None).is_err());
+        assert!(ensure_project_at(&root, "", "", "t", "plan", None).is_err());
     }
 
     #[test]
@@ -349,9 +409,9 @@ mod tests {
         let root = std::env::temp_dir().join("ow-test-defaultwd");
         let _ = fs::remove_dir_all(&root);
 
-        let p1 = ensure_project_at(&root, "proj-1", "", "First", "plan").unwrap();
+        let p1 = ensure_project_at(&root, "proj-1", "", "First", "plan", None).unwrap();
         // Idempotent: second ensure reuses the manifest (title/createdAt kept).
-        let p2 = ensure_project_at(&root, "proj-1", "", "Second", "guide").unwrap();
+        let p2 = ensure_project_at(&root, "proj-1", "", "Second", "guide", None).unwrap();
         assert_eq!(p1.id, p2.id);
         assert_eq!(p1.created_at, p2.created_at);
         assert_eq!(p2.title, "First"); // reused, not overwritten
@@ -364,10 +424,49 @@ mod tests {
     }
 
     #[test]
+    fn codebase_path_roundtrip_and_update() {
+        let root = std::env::temp_dir().join("ow-test-codebase");
+        let _ = fs::remove_dir_all(&root);
+
+        // Stored on creation (trimmed), surfaced by the summary rollup.
+        let p = ensure_project_at(&root, "proj-cb", "", "t", "plan", Some(" F:\\SHI\\legacy ")).unwrap();
+        assert_eq!(p.codebase_path.as_deref(), Some("F:\\SHI\\legacy"));
+        save_session_at(&root, "proj-cb", StoredSession { meta: meta("s1"), messages: json!([]) })
+            .unwrap();
+        let summaries = list_projects_at(&root).unwrap();
+        assert_eq!(summaries[0].codebase_path.as_deref(), Some("F:\\SHI\\legacy"));
+
+        // Update preserves the rest of the manifest.
+        let updated =
+            set_project_codebase_at(&root, "proj-cb", Some("F:\\SHI\\other".into())).unwrap();
+        assert_eq!(updated.codebase_path.as_deref(), Some("F:\\SHI\\other"));
+        assert_eq!(updated.title, "t");
+        assert_eq!(updated.created_at, p.created_at);
+
+        // Clear with None / empty.
+        let cleared = set_project_codebase_at(&root, "proj-cb", Some("  ".into())).unwrap();
+        assert!(cleared.codebase_path.is_none());
+
+        // Missing project / bad id are rejected.
+        assert!(set_project_codebase_at(&root, "nope", Some("x".into())).is_err());
+        assert!(set_project_codebase_at(&root, "../evil", None).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn old_manifest_without_codebase_loads() {
+        let raw = r#"{ "id": "p", "workdir": "F:\\w", "title": "t", "createdAt": 1 }"#;
+        let p: Project = serde_json::from_str(raw).unwrap();
+        assert!(p.codebase_path.is_none());
+        assert_eq!(p.category, ""); // pre-category manifests still load too
+    }
+
+    #[test]
     fn ensure_external_workdir_passthrough() {
         let root = std::env::temp_dir().join("ow-test-extwd");
         let _ = fs::remove_dir_all(&root);
-        let p = ensure_project_at(&root, "proj-x", "F:\\SHI\\myrepo", "t", "plan").unwrap();
+        let p = ensure_project_at(&root, "proj-x", "F:\\SHI\\myrepo", "t", "plan", None).unwrap();
         assert_eq!(p.workdir, "F:\\SHI\\myrepo");
         let _ = fs::remove_dir_all(&root);
     }
@@ -377,7 +476,7 @@ mod tests {
         let root = std::env::temp_dir().join("ow-test-roundtrip");
         let _ = fs::remove_dir_all(&root);
 
-        ensure_project_at(&root, "proj-1", "", "t", "plan").unwrap();
+        ensure_project_at(&root, "proj-1", "", "t", "plan", None).unwrap();
         let session = StoredSession {
             meta: meta("sess-1"),
             messages: json!([{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]),
@@ -420,7 +519,7 @@ mod tests {
 
         // Project alpha: two sessions. ensure_project first (save no longer
         // creates the manifest).
-        ensure_project_at(&root, "alpha-1", "F:\\SHI\\alpha", "Alpha", "plan").unwrap();
+        ensure_project_at(&root, "alpha-1", "F:\\SHI\\alpha", "Alpha", "plan", None).unwrap();
         save_session_at(&root, "alpha-1", StoredSession { meta: meta("a1"), messages: json!([{"x":1}]) })
             .unwrap();
         save_session_at(&root, "alpha-1", StoredSession { meta: meta("a2"), messages: json!([{"x":1}, {"y":2}]) })
@@ -429,7 +528,7 @@ mod tests {
         // Project beta: one session (saved last → most recently updated). Sleep so
         // its updatedAt is strictly greater regardless of ms-clock granularity.
         std::thread::sleep(std::time::Duration::from_millis(5));
-        ensure_project_at(&root, "beta-1", "F:\\SHI\\beta", "Beta", "guide").unwrap();
+        ensure_project_at(&root, "beta-1", "F:\\SHI\\beta", "Beta", "guide", None).unwrap();
         save_session_at(&root, "beta-1", StoredSession { meta: meta("b1"), messages: json!([]) }).unwrap();
 
         let projects = list_projects_at(&root).unwrap();

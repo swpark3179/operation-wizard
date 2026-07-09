@@ -48,6 +48,12 @@ pub struct RunCtx<'a> {
     /// The user prompt (used by plain agents that take it as an argument;
     /// stdin-based agents deliver it separately in `run.rs`).
     pub prompt: &'a str,
+    /// Extra directories the agent should be able to read beyond `cwd` (the
+    /// project's codebase path + armed skill resource folders). claude maps
+    /// each to `--add-dir`; other agents ignore it (codex already runs
+    /// full-access, the rest degrade to the prompt-only mention the frontend
+    /// always adds) — D45.
+    pub extra_dirs: &'a [String],
 }
 
 /// How to *run* an agent (build args + deliver prompt + parse output). The run
@@ -108,6 +114,13 @@ fn claude_build_args(ctx: &RunCtx) -> Vec<String> {
         "--add-dir".to_string(),
         ctx.cwd.to_string(),
     ];
+    for d in ctx.extra_dirs {
+        let d = d.trim();
+        if !d.is_empty() {
+            a.push("--add-dir".to_string());
+            a.push(d.to_string());
+        }
+    }
     push_model(&mut a, ctx.model);
     if let Some(sid) = ctx.session_id {
         if !sid.is_empty() {
@@ -385,4 +398,47 @@ pub fn all() -> &'static [AgentDef] {
 /// Look up a definition by id (`None` for an unknown id).
 pub fn find(id: &str) -> Option<&'static AgentDef> {
     AGENT_DEFS.iter().find(|d| d.id == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx<'a>(extra_dirs: &'a [String]) -> RunCtx<'a> {
+        RunCtx {
+            cwd: "F:\\work",
+            model: None,
+            session_id: None,
+            resume: false,
+            prompt: "hi",
+            extra_dirs,
+        }
+    }
+
+    #[test]
+    fn claude_add_dir_pairs_for_extra_dirs() {
+        // No extra dirs → exactly one --add-dir (the cwd).
+        let a = claude_build_args(&ctx(&[]));
+        assert_eq!(a.iter().filter(|s| *s == "--add-dir").count(), 1);
+
+        // Non-empty entries each get an --add-dir pair after the cwd; blank
+        // entries are skipped and values are trimmed.
+        let dirs = vec!["F:\\legacy".to_string(), "  ".to_string(), " F:\\skills\\sa ".to_string()];
+        let a = claude_build_args(&ctx(&dirs));
+        let pairs: Vec<&str> = a
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| *s == "--add-dir")
+            .map(|(i, _)| a[i + 1].as_str())
+            .collect();
+        assert_eq!(pairs, vec!["F:\\work", "F:\\legacy", "F:\\skills\\sa"]);
+    }
+
+    #[test]
+    fn other_agents_ignore_extra_dirs() {
+        let dirs = vec!["F:\\legacy".to_string()];
+        for args in [codex_build_args(&ctx(&dirs)), gemini_build_args(&ctx(&dirs))] {
+            assert!(!args.iter().any(|s| s == "--add-dir" || s == "F:\\legacy"));
+        }
+    }
 }

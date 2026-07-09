@@ -12,11 +12,14 @@
 // local CLI agents, so every such protocol rides in fenced text blocks and any
 // parse failure falls back to plain chat so the conversation never breaks.
 
-export type ClarifyType = "single" | "multi" | "text";
+export type ClarifyType = "single" | "multi" | "text" | "folder";
 
 export interface ClarifyQuestion {
   id: string;
   label: string;
+  /** "folder" renders a native folder-picker button (value = absolute path);
+   * folder questions are excluded from the prefill protocol — an agent cannot
+   * know local paths (D45). */
   type: ClarifyType;
   /** Choices for single/multi (required for those types). */
   options?: string[];
@@ -87,7 +90,8 @@ function coerceQuestions(parsed: unknown): ClarifyQuestion[] | null {
   for (const q of raw) {
     const o = q as Partial<ClarifyQuestion>;
     if (typeof o?.id !== "string" || typeof o?.label !== "string") continue;
-    if (o.type !== "single" && o.type !== "multi" && o.type !== "text") continue;
+    if (o.type !== "single" && o.type !== "multi" && o.type !== "text" && o.type !== "folder")
+      continue;
     if (o.type === "single" || o.type === "multi") {
       const opts = Array.isArray(o.options)
         ? o.options.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
@@ -95,7 +99,7 @@ function coerceQuestions(parsed: unknown): ClarifyQuestion[] | null {
       if (opts.length === 0) continue; // choice question needs options
       questions.push({ id: o.id, label: o.label, type: o.type, options: opts, required: !!o.required });
     } else {
-      questions.push({ id: o.id, label: o.label, type: "text", required: !!o.required });
+      questions.push({ id: o.id, label: o.label, type: o.type, required: !!o.required });
     }
   }
   return questions.length ? questions : null;
@@ -163,8 +167,10 @@ function serializeQuestion(q: ClarifyQuestion): string {
 }
 
 /** Build the instruction that asks the agent to prefill known option answers
- * from the user's request. Prepended (invisibly) to a hidden prefill turn. */
+ * from the user's request. Prepended (invisibly) to a hidden prefill turn.
+ * Folder questions are excluded — an agent cannot know local paths. */
 export function prefillInstruction(questions: ClarifyQuestion[], userPrompt: string): string {
+  questions = questions.filter((q) => q.type !== "folder");
   return `[시스템 지시: 요청 자동 분석 단계]
 아래는 사용자가 답해야 할 선택 항목 목록입니다. 사용자의 요청을 읽고, 요청에서 "확실하게" 알 수 있는 항목만 골라 답을 채우세요.
 
@@ -208,6 +214,7 @@ export function parsePrefill(
     for (const [id, raw] of Object.entries(answers as Record<string, unknown>)) {
       const q = byId.get(id);
       if (!q) continue;
+      if (q.type === "folder") continue; // never agent-fillable (defensive)
       if (q.type === "text") {
         if (typeof raw === "string" && raw.trim()) out[id] = raw;
       } else if (q.type === "single") {

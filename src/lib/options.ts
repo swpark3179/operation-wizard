@@ -10,6 +10,19 @@
 
 import type { ClarifyQuestion } from "./clarify";
 import type { Category } from "../components/workspace";
+import type { Settings } from "./types";
+import { foundationEnabled } from "./workflow";
+
+/** The mandatory codebase-folder question, prepended when the category's
+ * foundation phase applies (D45). Excluded from prefill (folder type); its
+ * answer is delivered structurally (WorkspaceView state → ChatPanel prop), not
+ * as wire prose. */
+export const CODEBASE_QUESTION: ClarifyQuestion = {
+  id: "codebasePath",
+  label: "분석할 코드베이스 폴더를 선택하세요.",
+  type: "folder",
+  required: true,
+};
 
 export const CATEGORY_OPTIONS: Record<Category, ClarifyQuestion[]> = {
   plan: [
@@ -115,6 +128,9 @@ export const CATEGORY_OPTIONS: Record<Category, ClarifyQuestion[]> = {
 };
 
 /** The static option catalog for a category (may be empty → no options phase). */
-export function optionsFor(category: Category): ClarifyQuestion[] {
-  return CATEGORY_OPTIONS[category] ?? [];
+export function optionsFor(category: Category, settings: Settings | null): ClarifyQuestion[] {
+  const base = CATEGORY_OPTIONS[category] ?? [];
+  // The foundation phase's first stage needs the codebase folder up front, so
+  // the folder question gates the form even when the catalog is empty.
+  return foundationEnabled(category, settings) ? [CODEBASE_QUESTION, ...base] : base;
 }

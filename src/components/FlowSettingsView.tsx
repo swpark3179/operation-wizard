@@ -7,14 +7,22 @@ import { useMemo, useState } from "react";
 import {
   ChevronDown,
   ChevronUp,
+  FolderOpen,
+  Pin,
   Plus,
   RotateCcw,
   Trash2,
+  X,
 } from "lucide-react";
 import { CATEGORIES, type Category } from "./workspace";
-import { setSkills, setWorkflow } from "../lib/api";
+import { pickFolder, setSkills, setWorkflow } from "../lib/api";
 import { skillList } from "../lib/skills";
-import { workflowFor } from "../lib/workflow";
+import {
+  DEFAULT_FOUNDATION_STEPS,
+  FOUNDATION_KINDS,
+  stepOutput,
+  workflowFor,
+} from "../lib/workflow";
 import { useAutoGrow } from "../lib/useAutoGrow";
 import type { Settings, SkillDef, StepDef } from "../lib/types";
 
@@ -22,22 +30,56 @@ const KIND_LABEL: Record<string, string> = {
   search: "조사",
   document: "문서 생성",
   chat: "대화",
+  codebase: "코드베이스 분석",
+  rag: "RAG 검색",
+  knowledge: "지식 주입",
 };
+
+/** Kinds offered by the step-kind select — the foundation kinds are pinned
+ * cards only (added/removed via the foundation toggle, never per-step). */
+const EDITABLE_KINDS = ["search", "document", "chat"] as const;
+
+const OUTPUT_LABEL: Record<string, string> = {
+  chat: "대화만",
+  file: "파일",
+  html: "HTML 캔버스",
+};
+
+/** Kinds whose result form is configurable (rag/knowledge inject context only;
+ * chat is terminal). */
+const OUTPUT_KINDS = ["search", "document", "codebase"] as const;
+
+const isFoundationKind = (kind: string) => FOUNDATION_KINDS.includes(kind);
 
 function cloneSteps(steps: StepDef[]): StepDef[] {
   return steps.map((s) => ({ ...s, skillIds: [...s.skillIds] }));
 }
 
-/** Client-side mirror of settings.rs `validate_steps` (backend re-validates). */
+/** Client-side mirror of settings.rs `validate_steps` (backend re-validates),
+ * plus the foundation pinning rule (D44): foundation steps, when present, must
+ * be the leading prefix in canonical order (the pinned UI already enforces
+ * this; the mirror guards pasted/legacy drafts). */
 function stepsError(steps: StepDef[]): string | null {
   if (steps.length === 0) return "단계가 최소 1개 필요합니다.";
   if (steps.some((s) => !s.name.trim())) return "모든 단계에 이름을 입력하세요.";
   if (steps[steps.length - 1].kind !== "chat")
     return "마지막 단계는 '대화'여야 합니다 (사용자 입력 대기 지점).";
+  const foundationIdx = steps
+    .map((s, i) => (isFoundationKind(s.kind) ? i : -1))
+    .filter((i) => i >= 0);
+  if (foundationIdx.length > 0) {
+    const inPrefix = foundationIdx.every((idx, n) => idx === n);
+    const canonical = foundationIdx.every(
+      (idx, n) => steps[idx].kind === FOUNDATION_KINDS[n],
+    );
+    if (!inPrefix || !canonical)
+      return "기반 단계(코드베이스 분석 → RAG 검색 → 지식 주입)는 맨 앞에 순서대로 있어야 합니다.";
+  }
   return null;
 }
 
-/** One workflow step editor card. */
+/** One workflow step editor card. Foundation steps render pinned: no delete /
+ * move / kind change, but instruction, skills, file and output stay editable. */
 function StepCard({
   step,
   index,
@@ -59,6 +101,7 @@ function StepCard({
   onRemove: () => void;
 }) {
   const instructionRef = useAutoGrow(step.instruction, 220);
+  const pinned = isFoundationKind(step.kind);
   const knownIds = new Set(skills.map((s) => s.id));
   // Dangling ids (skill deleted after the step referenced it) stay visible so
   // the user can unlink them; the runtime skips them silently.
@@ -85,51 +128,67 @@ function StepCard({
           placeholder="단계 이름 (진행 표시에 사용)"
           className="min-w-0 flex-1 rounded-[6px] border border-line bg-elevated px-2.5 py-1.5 text-[13px] text-ink outline-none focus:border-accent"
         />
-        <select
-          value={step.kind}
-          onChange={(e) => onChange({ ...step, kind: e.target.value })}
-          disabled={disabled}
-          title="단계 종류: 조사·문서 생성은 자동 진행, 대화는 사용자 입력 대기"
-          className="rounded-[6px] border border-line bg-panel px-1.5 py-1.5 text-[12.5px] text-ink-muted outline-none"
-        >
-          {Object.entries(KIND_LABEL).map(([k, label]) => (
-            <option key={k} value={k}>
-              {label}
-            </option>
-          ))}
-        </select>
-        <div className="flex shrink-0 items-center">
-          <button
-            type="button"
-            onClick={() => onMove(-1)}
-            disabled={disabled || index === 0}
-            title="위로"
-            className="grid h-7 w-7 place-items-center rounded-md text-ink-soft transition-colors hover:bg-subtle hover:text-ink disabled:opacity-30 disabled:hover:bg-transparent"
-          >
-            <ChevronUp size={15} />
-          </button>
-          <button
-            type="button"
-            onClick={() => onMove(1)}
-            disabled={disabled || index === total - 1}
-            title="아래로"
-            className="grid h-7 w-7 place-items-center rounded-md text-ink-soft transition-colors hover:bg-subtle hover:text-ink disabled:opacity-30 disabled:hover:bg-transparent"
-          >
-            <ChevronDown size={15} />
-          </button>
-          <button
-            type="button"
-            onClick={onRemove}
-            disabled={disabled}
-            title="단계 삭제"
-            className="grid h-7 w-7 place-items-center rounded-md text-ink-soft transition-colors hover:bg-bad-bg hover:text-bad disabled:opacity-30"
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
+        {pinned ? (
+          <>
+            <span className="shrink-0 rounded-[6px] border border-line bg-subtle px-2 py-1.5 text-[12.5px] text-ink-muted">
+              {KIND_LABEL[step.kind] ?? step.kind}
+            </span>
+            <span
+              title="필수 기반 단계 — 삭제·이동·종류 변경 불가 (지시문·스킬은 편집 가능)"
+              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-accent-tint px-2 py-0.5 text-[11px] font-medium text-accent"
+            >
+              <Pin size={11} /> 기반 단계
+            </span>
+          </>
+        ) : (
+          <>
+            <select
+              value={step.kind}
+              onChange={(e) => onChange({ ...step, kind: e.target.value })}
+              disabled={disabled}
+              title="단계 종류: 조사·문서 생성은 자동 진행, 대화는 사용자 입력 대기"
+              className="rounded-[6px] border border-line bg-panel px-1.5 py-1.5 text-[12.5px] text-ink-muted outline-none"
+            >
+              {EDITABLE_KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {KIND_LABEL[k]}
+                </option>
+              ))}
+            </select>
+            <div className="flex shrink-0 items-center">
+              <button
+                type="button"
+                onClick={() => onMove(-1)}
+                disabled={disabled || index === 0}
+                title="위로"
+                className="grid h-7 w-7 place-items-center rounded-md text-ink-soft transition-colors hover:bg-subtle hover:text-ink disabled:opacity-30 disabled:hover:bg-transparent"
+              >
+                <ChevronUp size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={() => onMove(1)}
+                disabled={disabled || index === total - 1}
+                title="아래로"
+                className="grid h-7 w-7 place-items-center rounded-md text-ink-soft transition-colors hover:bg-subtle hover:text-ink disabled:opacity-30 disabled:hover:bg-transparent"
+              >
+                <ChevronDown size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={onRemove}
+                disabled={disabled}
+                title="단계 삭제"
+                className="grid h-7 w-7 place-items-center rounded-md text-ink-soft transition-colors hover:bg-bad-bg hover:text-bad disabled:opacity-30"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
-      {step.kind === "document" && (
+      {(step.kind === "document" || step.kind === "codebase") && (
         <input
           value={step.file ?? ""}
           onChange={(e) => onChange({ ...step, file: e.target.value || null })}
@@ -148,6 +207,30 @@ function StepCard({
         placeholder="이 단계의 지시문 (해당 턴의 프롬프트 앞에 보이지 않게 주입됩니다)"
         className="mb-2.5 max-h-[220px] w-full resize-none overflow-y-auto rounded-[6px] border border-line bg-elevated px-2.5 py-2 font-mono text-[12px] leading-[1.55] text-ink outline-none focus:border-accent"
       />
+
+      {(OUTPUT_KINDS as readonly string[]).includes(step.kind) && (
+        <div className="mb-2.5 flex items-center gap-2">
+          <span className="text-[11.5px] font-medium text-ink-soft">결과 형태:</span>
+          <select
+            value={stepOutput(step)}
+            onChange={(e) => onChange({ ...step, output: e.target.value })}
+            disabled={disabled}
+            title="대화만: 산출물 없음 / 파일: 지정한 파일을 캔버스에 열기 / HTML 캔버스: 산출물을 보기 좋은 HTML로 재생성해 캔버스에 표시"
+            className="rounded-[6px] border border-line bg-panel px-1.5 py-1 text-[12px] text-ink-muted outline-none"
+          >
+            {Object.entries(OUTPUT_LABEL).map(([k, label]) => (
+              <option key={k} value={k}>
+                {label}
+              </option>
+            ))}
+          </select>
+          {stepOutput(step) === "html" && (
+            <span className="text-[11px] text-ink-faint">
+              html-render 스킬 턴이 자동 추가되어 .html로 재생성됩니다
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="text-[11.5px] font-medium text-ink-soft">주입 스킬:</span>
@@ -211,6 +294,11 @@ function WorkflowSection({
   const skills = skillList(settings);
   const isCustom = !!settings?.workflows?.[category];
   const validation = stepsError(draft);
+  // Foundation state (D44): presence of foundation steps in the draft IS the
+  // flag. plan always carries them (workflowFor pins them); other categories
+  // opt in via the toggle below.
+  const foundationOn = draft.some((s) => isFoundationKind(s.kind));
+  const foundationCount = draft.filter((s) => isFoundationKind(s.kind)).length;
 
   const update = (i: number, next: StepDef) => {
     setDraft((d) => d.map((s, idx) => (idx === i ? next : s)));
@@ -219,11 +307,20 @@ function WorkflowSection({
   const move = (i: number, dir: -1 | 1) => {
     setDraft((d) => {
       const j = i + dir;
-      if (j < 0 || j >= d.length) return d;
+      // Never move into (or out of) the pinned foundation prefix.
+      if (j < foundationCount || j >= d.length) return d;
       const next = [...d];
       [next[i], next[j]] = [next[j], next[i]];
       return next;
     });
+    setSaved(false);
+  };
+  const toggleFoundation = () => {
+    setDraft((d) =>
+      foundationOn
+        ? d.filter((s) => !isFoundationKind(s.kind))
+        : [...cloneSteps(DEFAULT_FOUNDATION_STEPS), ...d],
+    );
     setSaved(false);
   };
   const remove = (i: number) => {
@@ -293,6 +390,24 @@ function WorkflowSection({
           {isCustom ? "사용자 정의" : "기본값"}
         </span>
       </div>
+
+      {category === "plan" ? (
+        <div className="mb-3 rounded-[10px] border border-line bg-subtle px-3 py-2 text-[12px] text-ink-muted">
+          이 카테고리는 기반 3단계(코드베이스 분석 → RAG 검색 → 지식 주입)가 항상 먼저
+          실행됩니다. 지시문과 스킬 연결은 아래 카드에서 편집할 수 있습니다.
+        </div>
+      ) : (
+        <label className="mb-3 flex cursor-pointer items-center gap-2 rounded-[10px] border border-line bg-subtle px-3 py-2 text-[12.5px] text-ink-muted">
+          <input
+            type="checkbox"
+            checked={foundationOn}
+            onChange={toggleFoundation}
+            disabled={saving}
+            className="accent-[var(--accent)]"
+          />
+          기반 3단계 사용 — 코드베이스 분석 · RAG 검색 · 지식 주입을 먼저 실행
+        </label>
+      )}
 
       <div className="flex flex-col gap-2.5">
         {draft.map((s, i) => (
@@ -425,6 +540,44 @@ function SkillCard({
             placeholder={"스킬 지시문 (마크다운). 관례: 첫 줄을 [시스템 스킬: 이름] 헤더로 시작"}
             className="max-h-[320px] w-full resize-none overflow-y-auto rounded-[6px] border border-line bg-elevated px-2.5 py-2 font-mono text-[12px] leading-[1.55] text-ink outline-none focus:border-accent"
           />
+          {/* Resource folder (claude-skill style, D45): the path is mentioned in
+              the prompt on injection and granted read access (--add-dir). */}
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-[11.5px] font-medium text-ink-soft">리소스 폴더:</span>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => {
+                void pickFolder().then((dir) => {
+                  if (dir) onChange({ ...skill, dir });
+                });
+              }}
+              className="inline-flex items-center gap-1.5 rounded-[6px] border border-line px-2 py-1 text-[12px] font-medium text-ink-muted transition-colors hover:bg-subtle disabled:opacity-40"
+            >
+              <FolderOpen size={13} />
+              {skill.dir ? "변경…" : "폴더 선택…"}
+            </button>
+            {skill.dir && (
+              <span
+                title={skill.dir}
+                className="inline-flex min-w-0 items-center gap-1.5 rounded-md border border-line bg-subtle px-2 py-1 font-mono text-[11px] text-ink-muted"
+              >
+                <span className="max-w-[280px] truncate">{skill.dir}</span>
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => onChange({ ...skill, dir: null })}
+                  title="폴더 해제"
+                  className="shrink-0 text-ink-faint transition-colors hover:text-ink"
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
+            <span className="text-[11px] text-ink-faint">
+              주입 시 경로가 에이전트에 전달되고 읽기 권한(--add-dir)이 추가됩니다
+            </span>
+          </div>
           <div className="mt-1 font-mono text-[11px] text-ink-faint">id: {skill.id}</div>
         </div>
       )}

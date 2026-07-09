@@ -44,6 +44,10 @@ export interface SkillDef {
   id: string;
   name: string;
   body: string;
+  /** Optional resource folder (claude-skill style reference files/scripts).
+   * Mentioned in the wire prompt and added to `RunArgs.extraDirs` on the turn
+   * that injects the skill. */
+  dir?: string | null;
 }
 
 /** One step of a category's guided workflow (mirrors settings.rs `StepDef`).
@@ -59,6 +63,33 @@ export interface StepDef {
   file?: string | null;
   /** Skills injected on this step's turn (unknown ids are skipped at runtime). */
   skillIds: string[];
+  /** Result form: "chat" | "file" | "html". Absent → derived from `kind`
+   * (document→"file", else "chat"). "html" expands into an extra render
+   * sub-step at runtime (see `expandOutputSteps` in lib/workflow.ts). */
+  output?: string | null;
+}
+
+/** Confluence crawl source for RAG ingestion (mirrors settings.rs). The token
+ * is stored as plain text in settings.json — use a read-only-scope PAT. */
+export interface ConfluenceConfig {
+  /** Base URL including any context path, e.g. "https://wiki.example.com/confluence". */
+  baseUrl: string;
+  /** Bearer PAT (Confluence Server/DC). */
+  token?: string | null;
+  /** Crawl root page id (descendants collected recursively). */
+  rootPageId?: string | null;
+  /** Alternative: flat listing of one space's pages. */
+  spaceKey?: string | null;
+  /** Opt-in for corporate TLS-inspection proxies whose CA is not installed. */
+  allowInvalidCerts: boolean;
+}
+
+/** The user's RAG service endpoint (mirrors settings.rs). */
+export interface RagConfig {
+  endpoint: string;
+  apiKey?: string | null;
+  /** Search result count requested by the rag workflow step. */
+  topK?: number | null;
 }
 
 export interface Settings {
@@ -68,6 +99,10 @@ export interface Settings {
   skills?: SkillDef[] | null;
   /** Per-category workflow overrides; absent key → built-in default flow. */
   workflows?: Record<string, StepDef[]>;
+  /** Confluence crawl source; absent/null → not configured. */
+  confluence?: ConfluenceConfig | null;
+  /** RAG service endpoint; absent/null → the rag workflow step skips. */
+  rag?: RagConfig | null;
 }
 
 // ── Agent runs (mirrors src-tauri/src/run.rs) ────────────────────────────────
@@ -94,6 +129,41 @@ export interface RunArgs {
   sessionId?: string | null;
   /** True when continuing a prior turn (resume) rather than starting fresh. */
   resume?: boolean;
+  /** Extra readable directories beyond `cwd` (codebase path + armed skill
+   * resource folders). Sent every turn — claude's `--add-dir` is per-invocation;
+   * other agents ignore it (the wire prompt always mentions the paths too). */
+  extraDirs?: string[];
+}
+
+// ── RAG / Confluence ingestion / knowledge (mirrors rag.rs, confluence.rs,
+//    knowledge.rs) ─────────────────────────────────────────────────────────────
+
+/** One RAG search hit — rendered in the canvas "검색 결과" tab and injected
+ * into the rag step's agent turn. */
+export interface RagHit {
+  title?: string | null;
+  url?: string | null;
+  snippet: string;
+  score?: number | null;
+}
+
+/** Progress events streamed while a Confluence crawl+ingest runs. */
+export type IngestEvent =
+  | { type: "started"; rootId: string }
+  | { type: "pageFetched"; pageId: string; title: string; fetched: number }
+  | { type: "pageIngested"; pageId: string; title: string; ingested: number }
+  | { type: "pageFailed"; pageId: string; title: string; message: string }
+  | { type: "error"; message: string }
+  | { type: "end"; status: string; ingested: number; failed: number };
+
+/** One knowledge entry (title + how-it-was-done body), injected into the
+ * foundation phase's knowledge step. */
+export interface KnowledgeEntry {
+  id: string;
+  title: string;
+  body: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 /** One directory entry (mirrors src-tauri/src/files.rs). */
@@ -113,6 +183,8 @@ export interface ProjectMeta {
   title: string;
   category: string;
   createdAt: number;
+  /** Codebase folder analyzed in the foundation phase — separate from `workdir`. */
+  codebasePath?: string | null;
 }
 
 /** A project row for the Home "recent" list (manifest + activity rollup). */
@@ -127,6 +199,8 @@ export interface ProjectSummary {
   sessionCount: number;
   /** Most-recently-updated session id, to open when the project is clicked. */
   lastSessionId?: string | null;
+  /** The project's analyzed codebase folder (restored when reopening). */
+  codebasePath?: string | null;
 }
 
 /** Session metadata (header of a stored session; returned by `list_sessions`). */

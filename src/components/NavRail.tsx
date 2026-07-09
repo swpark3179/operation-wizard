@@ -1,12 +1,13 @@
-import { Home, Boxes, Workflow } from "lucide-react";
+import { Home, Boxes, Workflow, Library } from "lucide-react";
 import type { ComponentType } from "react";
 
-export type View = "home" | "agents" | "flows";
+export type View = "home" | "agents" | "flows" | "knowledge";
 
 const ITEMS: { id: View; label: string; icon: ComponentType<{ size?: number }> }[] = [
   { id: "home", label: "Home", icon: Home },
   { id: "agents", label: "Agents", icon: Boxes },
   { id: "flows", label: "Flows", icon: Workflow },
+  { id: "knowledge", label: "지식", icon: Library },
 ];
 
 export function NavRail({ view, onChange }: { view: View; onChange: (v: View) => void }) {
