@@ -15,14 +15,17 @@
 │ Rail │   - HomeArea  (Home → Workspace)  │
 │ (좌) │   - AgentsView  (Agents)          │
 │      │   - FlowSettingsView (Flows)      │
+│      │   - KnowledgeView (지식)          │
 └──────┴──────────────────────────────────┘
 ```
 
 - `AppShell` = `TopBar`(로고·제목·배지만; 작업 폴더 표시 없음 — R1) + (`NavRail` + `main`).
   `main`은 `overflow-hidden`이고, 각 뷰가 자체 스크롤을 소유한다(워크스페이스의 2패널 전체 높이용).
-- `NavRail`: 폭 56px 고정, 아이콘 버튼 3개 — **Home**(`Home`), **Agents**(`Boxes`), **Flows**(`Workflow`).
-  활성 항목은 accent-tint 배경 + accent 색. (별도 Settings 뷰는 폐지 — 경로 설정은 Agents 카드로 통합, D38.)
-- 뷰 전환 상태는 `App.tsx`의 `view`(`"home" | "agents" | "flows"`)가 보유. Home 재선택은
+- `NavRail`: 폭 56px 고정, 아이콘 버튼 4개 — **Home**(`Home`), **Agents**(`Boxes`), **Flows**(`Workflow`),
+  **지식**(`Library`). 활성 항목은 accent-tint 배경 + accent 색. (별도 Settings 뷰는 폐지 — 경로 설정은
+  Agents 카드로 통합, D38.) Confluence 수집이 백그라운드로 진행 중이면 '지식' 아이콘에 accent pulse 점을
+  표시한다(D51).
+- 뷰 전환 상태는 `App.tsx`의 `view`(`"home" | "agents" | "flows" | "knowledge"`)가 보유. Home 재선택은
   `HomeArea`를 런처로 리셋한다.
 
 ## 화면
@@ -34,9 +37,11 @@
   조회 / 데이터 변경·권한) + 최근 작업(프로젝트 목록). 카테고리/전송 → **새 프로젝트** + 워크스페이스 진입.
   진입 시 프롬프트 대화가 아니라 **카테고리별 고정 선택지 폼을 먼저** 보여주고(프롬프트로 시작했으면 아는
   값 자동 채움), 폼 제출이 첫 작업 턴을 발사한다([07](07-workspace-and-runs.md)·[08](08-guided-flows-and-skills.md) D36).
-- `WorkspaceView`: 좌 `ChatPanel`(412px, 실행 스트리밍; **요구사항 폼 대기 중에는 컴포저 비활성** — D41) +
-  우 `CanvasPanel`(작업 폴더 파일 뷰어 — `.md`는 마크다운+mermaid 미리보기(D42); **'요구사항' 탭은 폼이
-  대기 중일 때만 표시**). 상세 동작은 [07-workspace-and-runs.md](07-workspace-and-runs.md).
+- `WorkspaceView`: 좌 `ChatPanel`(기본 412px, **경계 드래그로 폭 조절·localStorage 기억** — D49;
+  실행 스트리밍; **요구사항 폼 대기 중에는 컴포저 비활성** — D41) + 우 `CanvasPanel`(작업 폴더 파일
+  뷰어 — **'파일' 탭은 목록 전용, 파일을 열면 파일별 닫기 가능한 뷰어 탭 생성**(D49); `.md`는
+  마크다운+mermaid 미리보기(D42); **'요구사항' 탭은 폼이 대기 중일 때만 표시**). 상세 동작은
+  [07-workspace-and-runs.md](07-workspace-and-runs.md).
 
 ### Flows 뷰 (워크플로우·스킬 설정)
 - `FlowSettingsView`: 카테고리 탭(segmented pill) + **단계 편집기** + **스킬 라이브러리**
@@ -46,6 +51,13 @@
     (종단 대화 단계 앞에 삽입). 인라인 검증(마지막 단계는 '대화') 실패 시 저장 비활성.
   - 스킬 카드: 접이식(이름/본문 textarea/사용처 힌트 배지/삭제). 저장은 레지스트리 전체 교체.
   - 각 섹션에 **저장 / 기본값으로 되돌리기** + `사용자 정의`/`기본값` 배지 + `Saved.` 표시(AgentCard 패턴).
+
+### 지식 뷰 (RAG·Confluence·지식 베이스)
+- `KnowledgeView`(D48): ① **RAG 검색 설정** — Endpoint URL / Secret Key / Pass Key(요청 헤더 값, D50) /
+  Top K + 연결 테스트, ② **Confluence 수집** — 설정(Base URL/PAT/루트 페이지·스페이스 키/TLS 예외) +
+  수집 시작·중지 + 진행 표시(수집/임베딩/실패 카운트·티커), ③ **지식 베이스** CRUD 카드.
+- 수집 진행 상태는 화면 밖 **모듈 싱글턴 스토어**(`lib/ingest.ts`)가 소유해 다른 뷰로 이동해도 유지되고,
+  돌아오면 실시간 현황·완료 요약이 그대로 보인다(D51). 수집 중에는 Confluence 설정 저장이 비활성.
 
 ### Agents 뷰
 - 제목 + 설명 + **에이전트당 카드 1개**(`AgentCard`)를 레지스트리 순서로 세로 나열.

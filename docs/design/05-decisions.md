@@ -536,3 +536,48 @@
   동일 적용).
 - **재검토 조건**: 지식이 수천 건으로 늘면 지식도 RAG 임베딩으로 승격(어댑터 재사용); Confluence Cloud
   지원이 필요하면 `ConfluenceConfig`에 authMode(Basic) 추가.
+
+---
+
+### D49. 캔버스 파일 뷰어 탭화 + 채팅/캔버스 드래그 리사이즈
+- **결정**: 캔버스 '파일' 탭에서 트리(240px)+FileViewer 나란히 배치를 폐지하고, **'파일' 탭은 목록(트리)
+  전용**, 파일을 열면(트리 클릭 또는 워크플로우 document 단계의 `onOpenFile`) **파일별 뷰어 탭이 새로
+  열린다**. `CanvasTab`을 `"files" | "requirements" | "rag" | \`file:${path}\``로 확장하고
+  `WorkspaceView`가 `openFiles: string[]`(탭 순서=삽입 순서, dedupe)를 소유한다. 파일 탭 pill은 닫기(×)
+  버튼을 가지며, 활성 탭을 닫으면 '파일' 탭으로 폴백. `openFiles`에 없는 `file:` 탭은 `effectiveTab`이
+  '파일'로 폴백(요구사항/rag 탭과 동일 방어 패턴). 새 세션/기록 열기 시 `openFiles` 초기화.
+  또한 **ChatPanel(412px 고정)과 CanvasPanel 사이 경계를 드래그해 폭 조절**할 수 있다 — `chatWidth`
+  상태(+`localStorage["ow.chatWidth"]` 기억, 순수 UI 값이라 settings.json 무변경), 리사이저 핸들은
+  pointer capture로 드래그하고(clamp 320px~720px·캔버스 최소 360px 보장) 드래그 중 전역 오버레이로
+  캔버스 iframe(HTML/rag 미리보기)의 이벤트 삼킴을 차단한다. ChatPanel은 `w-full`로 바꿔 래퍼가 폭을
+  소유(ChatPanel API 무변경).
+- **근거**: 사용자 요구 — "파일 목록과 문서 내용을 동시에 볼 필요 없이 탭으로 분리, 패널 크기 조정".
+  FileViewer는 이미 자립형 컬럼이라 무변경으로 탭 본문에 재사용. 신규 백엔드/IPC 0.
+- **재검토 조건**: 열린 탭이 많아져 관리가 필요하면(고정/전체 닫기 등) 탭 오버플로 메뉴를 도입.
+
+### D50. RagConfig = endpoint + secretKey + passKey (apiKey 대체)
+- **결정**: RAG 연결 설정을 **endpoint URL + secret key + pass key** 3값으로 바꾼다(`RagConfig.api_key`
+  삭제 → `secret_key`/`pass_key` 추가, `top_k` 유지). 두 키는 사용자 RAG 서비스 호출 시 **요청 헤더**로
+  전달될 값이며, 실제 전송은 여전히 `rag.rs`의 TODO(user) 스텁이 담당한다(스켈레톤 주석을
+  `.header("X-Secret-Key", …)`/`.header("X-Pass-Key", …)` 예시로 갱신 — 헤더 이름은 사용자 서비스 계약).
+  `set_rag_config`가 두 키를 trim/empty-filter 정규화. 구 settings.json의 `apiKey`는 serde가 unknown
+  field로 무시(마이그레이션 불필요, 하위호환 테스트 추가). 지식 뷰 폼은 Endpoint/Secret Key/Pass Key
+  (password)/Top K 4필드.
+- **근거**: 사용자 확정 — RAG 연결에 필요한 헤더 3종. 어차피 스텁이라 필드 교체 비용이 최소인 지금이 적기.
+  평문 저장 주의는 D48과 동일(읽기 전용 키 권장).
+
+### D51. Confluence 수집 관찰성 = 프론트 모듈 싱글턴 스토어 (백엔드 무변경)
+- **결정**: 수집을 시작한 뒤 **다른 화면으로 이동해도 진행현황이 유지·재표시**되게 한다. 백엔드 크롤
+  워커는 이미 detached 스레드라 뷰 전환과 무관하게 돌지만, 수신 `Channel`과 진행 집계가
+  `ConfluenceSection` 지역 state에 있어 언마운트 시 유실되던 것이 문제였다. 해결은 **React 트리 밖 모듈
+  싱글턴 스토어**(`src/lib/ingest.ts`): `startIngest`/`stopIngest`가 Channel과
+  `{status, ingestId, progress, failures, summary}`를 소유하고, 컴포넌트는 `useIngestState`
+  (`useSyncExternalStore`)로 구독만 한다(이중 시작 가드 포함). 지식 뷰의 수집 러너가 이 스토어를 쓰고,
+  **NavRail '지식' 아이콘에 수집 중 accent pulse 점**을 표시해 돌아갈 곳을 알린다. 수집 중 Confluence
+  설정 저장은 비활성(실행 중 크롤은 시작 시점 설정을 사용). 데몬 수명 = 앱 프로세스 수명(재시작 복원 없음).
+- **근거**: 사용자 요구 — "데몬으로 실행해 다른 작업을 이어가고, 진행현황을 보러 돌아올 수 있게".
+  워커가 이미 백그라운드라 **백엔드 변경 0**이 가장 작은 해법. App state로 리프트하면 페이지당 이벤트마다
+  App 전체가 리렌더되므로 구독형 스토어가 적합.
+- **대안 기각**: 백엔드 `IngestRegistry`에 진행 스냅샷 보관 + 상태 조회 커맨드 — 앱 내 웹뷰는 리로드되지
+  않아 프론트 스토어로 충분하며 IPC 표면 증가만 남음.
+- **재검토 조건**: 수집 이력(지난 실행 로그)이나 앱 재시작 후 복원이 필요하면 백엔드 영속 상태로 승격.

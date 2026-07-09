@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { CanvasPanel } from "./CanvasPanel";
 import type { Category } from "./workspace";
@@ -6,7 +6,33 @@ import { formatClarifyAnswers, type ClarifyAnswer, type ClarifyQuestion } from "
 import { ragResultHtml } from "../lib/foundation";
 import type { AgentInfo, DetectedAgent, RagHit, Settings, StoredSession } from "../lib/types";
 
-export type CanvasTab = "files" | "requirements" | "rag";
+/** Canvas views: the fixed tabs plus one `file:<path>` viewer tab per open file
+ * (the 파일 tab is the list; opening a file spawns its own closable tab — D49). */
+export type CanvasTab = "files" | "requirements" | "rag" | `file:${string}`;
+
+export function fileTabId(path: string): CanvasTab {
+  return `file:${path}`;
+}
+
+/** The open file's path when `tab` is a file viewer tab, else null. */
+export function fileTabPath(tab: CanvasTab): string | null {
+  return tab.startsWith("file:") ? tab.slice("file:".length) : null;
+}
+
+// Chat panel width (D49): user-draggable, remembered across sessions as a pure
+// UI preference (localStorage — not part of settings.json).
+const CHAT_WIDTH_KEY = "ow.chatWidth";
+const CHAT_MIN_WIDTH = 320;
+const CHAT_MAX_WIDTH = 720;
+/** Keep a canvas remainder at least this wide when clamping the drag. */
+const CANVAS_MIN_WIDTH = 360;
+
+function initialChatWidth(): number {
+  const stored = Number(localStorage.getItem(CHAT_WIDTH_KEY));
+  return Number.isFinite(stored) && stored > 0
+    ? Math.min(CHAT_MAX_WIDTH, Math.max(CHAT_MIN_WIDTH, Math.round(stored)))
+    : 412;
+}
 
 /** The workspace: left conversation panel + right canvas panel. */
 export function WorkspaceView({
@@ -40,10 +66,16 @@ export function WorkspaceView({
   initialSession: StoredSession | null;
   onHome: () => void;
 }) {
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  // Paths with an open file viewer tab (insertion order = tab order, D49).
+  const [openFiles, setOpenFiles] = useState<string[]>([]);
   // Bumped to reload the canvas file tree (e.g. after a workflow document step
   // writes a new file).
   const [refreshNonce, setRefreshNonce] = useState(0);
+  // Draggable chat/canvas split (D49). The width applies to the ChatPanel
+  // wrapper; the canvas takes the remainder.
+  const [chatWidth, setChatWidth] = useState(initialChatWidth);
+  const [resizing, setResizing] = useState(false);
+  const layoutRef = useRef<HTMLDivElement | null>(null);
   // The project's working folder (cwd + canvas root). Resolved lazily by
   // ChatPanel on the first send for a fresh chat; known up front when opening a
   // recent project. Survives the sessionNonce remount (same project).
@@ -93,6 +125,7 @@ export function WorkspaceView({
     setActiveSeed("");
     resetClarify();
     setRagResult(null); // codebasePath stays — it is project-scoped
+    setOpenFiles([]);
     setSessionNonce((n) => n + 1);
   };
 
@@ -102,6 +135,7 @@ export function WorkspaceView({
     setActiveSeed("");
     resetClarify();
     setRagResult(null);
+    setOpenFiles([]);
     setSessionNonce((n) => n + 1);
   };
 
@@ -125,12 +159,46 @@ export function WorkspaceView({
     setCanvasTab("requirements");
   };
 
-  // Open a produced file in the canvas (e.g. a workflow document step): switch
-  // to the files tab, reload the tree so the new file appears, and select it.
-  const handleOpenFile = (path: string) => {
-    setSelectedFile(path);
-    setCanvasTab("files");
-    setRefreshNonce((n) => n + 1);
+  // Open a file in its own viewer tab (D49). Tree clicks just open the tab;
+  // workflow-produced files also bump the nonce so the tree shows the new file
+  // and an already-open tab re-reads the rewritten content.
+  const openFile = (path: string, opts?: { refresh?: boolean }) => {
+    setOpenFiles((f) => (f.includes(path) ? f : [...f, path]));
+    setCanvasTab(fileTabId(path));
+    if (opts?.refresh) setRefreshNonce((n) => n + 1);
+  };
+
+  const handleOpenFile = (path: string) => openFile(path, { refresh: true });
+
+  const handleCloseFile = (path: string) => {
+    setOpenFiles((f) => f.filter((p) => p !== path));
+    setCanvasTab((t) => (t === fileTabId(path) ? "files" : t));
+  };
+
+  // Drag-to-resize the chat/canvas split (D49). Pointer capture keeps the
+  // events on the handle even over the canvas iframes; the width is clamped so
+  // both panels stay usable and persisted on release.
+  const handleResizeStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setResizing(true);
+  };
+
+  const handleResizeMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!resizing) return;
+    const rect = layoutRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const max = Math.min(CHAT_MAX_WIDTH, rect.width - CANVAS_MIN_WIDTH);
+    setChatWidth(Math.min(max, Math.max(CHAT_MIN_WIDTH, Math.round(e.clientX - rect.left))));
+  };
+
+  const handleResizeEnd = () => {
+    if (!resizing) return;
+    setResizing(false);
+    setChatWidth((w) => {
+      localStorage.setItem(CHAT_WIDTH_KEY, String(w));
+      return w;
+    });
   };
 
   const handleSubmitAnswers = (answers: ClarifyAnswer[]) => {
@@ -150,9 +218,10 @@ export function WorkspaceView({
   };
 
   return (
-    <div className="flex h-full min-h-0">
-      <ChatPanel
-        key={sessionNonce}
+    <div ref={layoutRef} className={"flex h-full min-h-0" + (resizing ? " select-none" : "")}>
+      <div style={{ width: chatWidth }} className="flex min-h-0 shrink-0">
+        <ChatPanel
+          key={sessionNonce}
         projectId={projectId}
         onResolveWorkdir={setResolvedWorkdir}
         category={activeCategory}
@@ -166,20 +235,37 @@ export function WorkspaceView({
         answerSubmission={answerSubmission}
         formPending={!!clarify?.length}
         onHome={onHome}
-        onNewSession={handleNewSession}
-        onOpenSession={handleOpenSession}
-        onOpenFile={handleOpenFile}
-        onClarify={handleClarify}
-        onPrefill={handlePrefill}
-        onRagResult={handleRagResult}
-        onStreamingChange={setStreaming}
+          onNewSession={handleNewSession}
+          onOpenSession={handleOpenSession}
+          onOpenFile={handleOpenFile}
+          onClarify={handleClarify}
+          onPrefill={handlePrefill}
+          onRagResult={handleRagResult}
+          onStreamingChange={setStreaming}
+        />
+      </div>
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        title="드래그하여 크기 조정"
+        onPointerDown={handleResizeStart}
+        onPointerMove={handleResizeMove}
+        onPointerUp={handleResizeEnd}
+        onPointerCancel={handleResizeEnd}
+        className={
+          // Zero net width (negative margins) so the grab strip sits on the
+          // panel seam instead of adding a gap.
+          "relative z-10 -mx-0.5 w-1 shrink-0 cursor-col-resize transition-colors " +
+          (resizing ? "bg-accent" : "bg-transparent hover:bg-accent")
+        }
       />
       <CanvasPanel
         workdir={resolvedWorkdir}
         codebasePath={codebasePath}
         refreshNonce={refreshNonce}
-        selectedFile={selectedFile}
-        onSelectFile={setSelectedFile}
+        openFiles={openFiles}
+        onOpenFile={openFile}
+        onCloseFile={handleCloseFile}
         tab={canvasTab}
         onTabChange={setCanvasTab}
         clarify={clarify}
@@ -189,6 +275,9 @@ export function WorkspaceView({
         ragResult={ragResult}
         streaming={streaming}
       />
+      {/* While dragging, a full-window shield keeps the canvas iframes (HTML/
+          rag previews) from swallowing pointer events. */}
+      {resizing && <div className="fixed inset-0 z-50 cursor-col-resize" />}
     </div>
   );
 }

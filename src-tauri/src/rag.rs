@@ -69,13 +69,18 @@ impl RagClient {
     }
 
     /// TODO(user): POST one crawled page to your RAG ingestion endpoint.
-    /// `self.cfg.endpoint` / `self.cfg.api_key` are already loaded from
-    /// settings. Example skeleton:
+    /// `self.cfg.endpoint` / `self.cfg.secret_key` / `self.cfg.pass_key` are
+    /// already loaded from settings — the two keys are meant to travel as
+    /// request headers (names are your service's contract, D50). Example
+    /// skeleton:
     ///
     /// ```ignore
     /// let mut req = self.http.post(format!("{}/ingest", self.cfg.endpoint)).json(page);
-    /// if let Some(key) = self.cfg.api_key.as_deref() {
-    ///     req = req.bearer_auth(key);
+    /// if let Some(key) = self.cfg.secret_key.as_deref() {
+    ///     req = req.header("X-Secret-Key", key);
+    /// }
+    /// if let Some(key) = self.cfg.pass_key.as_deref() {
+    ///     req = req.header("X-Pass-Key", key);
     /// }
     /// let res = req.send().map_err(|e| e.to_string())?;
     /// if !res.status().is_success() {
@@ -89,7 +94,8 @@ impl RagClient {
     }
 
     /// TODO(user): query your RAG search endpoint and map the response into
-    /// `RagHit`s. Example skeleton:
+    /// `RagHit`s. The secret/pass keys travel as request headers, same as
+    /// `ingest_page`. Example skeleton:
     ///
     /// ```ignore
     /// #[derive(serde::Deserialize)]
@@ -98,8 +104,11 @@ impl RagClient {
     ///     .http
     ///     .post(format!("{}/search", self.cfg.endpoint))
     ///     .json(&serde_json::json!({ "query": query, "topK": top_k }));
-    /// if let Some(key) = self.cfg.api_key.as_deref() {
-    ///     req = req.bearer_auth(key);
+    /// if let Some(key) = self.cfg.secret_key.as_deref() {
+    ///     req = req.header("X-Secret-Key", key);
+    /// }
+    /// if let Some(key) = self.cfg.pass_key.as_deref() {
+    ///     req = req.header("X-Pass-Key", key);
     /// }
     /// let res: SearchResponse = req.send().map_err(|e| e.to_string())?
     ///     .error_for_status().map_err(|e| e.to_string())?
@@ -143,7 +152,12 @@ mod tests {
     use super::*;
 
     fn cfg() -> RagConfig {
-        RagConfig { endpoint: "https://rag.example.com".into(), api_key: None, top_k: None }
+        RagConfig {
+            endpoint: "https://rag.example.com".into(),
+            secret_key: None,
+            pass_key: None,
+            top_k: None,
+        }
     }
 
     // Locks the actionable-error contract until the user fills in the stubs:

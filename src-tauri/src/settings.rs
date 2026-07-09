@@ -103,9 +103,13 @@ pub struct ConfluenceConfig {
 pub struct RagConfig {
     #[serde(default)]
     pub endpoint: String,
-    /// Plain-text secret — same caveat as `ConfluenceConfig.token`.
+    /// Auth header values the user's rag.rs implementation sends with each
+    /// request (D50; how they are attached is the user's TODO stub). Plain-text
+    /// secrets — same caveat as `ConfluenceConfig.token`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
+    pub secret_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_key: Option<String>,
     /// Search result count requested by the rag workflow step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
@@ -317,7 +321,8 @@ mod tests {
         }));
         s.set_rag(Some(RagConfig {
             endpoint: "https://rag.example.com".into(),
-            api_key: Some("key".into()),
+            secret_key: Some("secret".into()),
+            pass_key: Some("pass".into()),
             top_k: Some(5),
         }));
         save(&root, &s).unwrap();
@@ -366,6 +371,15 @@ mod tests {
         assert_eq!(s.skills.as_ref().unwrap()[0].dir, None);
         assert_eq!(s.workflows["plan"][0].output, None);
         assert!(s.confluence.is_none() && s.rag.is_none());
+
+        // A pre-D50 rag section (apiKey) still parses: the unknown field is
+        // ignored, the new header fields default to None.
+        let raw_rag = r#"{ "rag": { "endpoint": "https://r", "apiKey": "legacy", "topK": 3 } }"#;
+        let s: Settings = serde_json::from_str(raw_rag).unwrap();
+        let rag = s.rag.unwrap();
+        assert_eq!(rag.endpoint, "https://r");
+        assert!(rag.secret_key.is_none() && rag.pass_key.is_none());
+        assert_eq!(rag.top_k, Some(3));
     }
 
     #[test]
