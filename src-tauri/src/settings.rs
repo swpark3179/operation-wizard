@@ -11,8 +11,13 @@ use serde::{Deserialize, Serialize};
 pub const CATEGORIES: [&str; 4] = ["plan", "guide", "query", "change"];
 
 /// Valid workflow step kinds — keep in sync with `StepKind` in
-/// `src/lib/workflow.ts`.
-pub const STEP_KINDS: [&str; 3] = ["search", "document", "chat"];
+/// `src/lib/workflow.ts`. The foundation kinds (`codebase`/`rag`/`knowledge`)
+/// are the mandatory pre-phase steps pinned at the front of a workflow (D44).
+pub const STEP_KINDS: [&str; 6] = ["search", "document", "chat", "codebase", "rag", "knowledge"];
+
+/// Valid step output modes — keep in sync with `STEP_OUTPUTS` in
+/// `src/lib/workflow.ts` (D47). Absent → frontend derives from kind.
+pub const STEP_OUTPUTS: [&str; 3] = ["chat", "file", "html"];
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +36,12 @@ pub struct SkillDef {
     pub name: String,
     #[serde(default)]
     pub body: String,
+    /// Optional resource folder (claude-skill style reference files/scripts).
+    /// The frontend mentions the path in the wire prompt and passes it through
+    /// `RunArgs.extraDirs` (claude `--add-dir`); no existence check here — a
+    /// missing folder degrades gracefully at run time (D45).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 /// One step of a category's guided workflow.
@@ -54,6 +65,50 @@ pub struct StepDef {
     /// tolerated — the runtime skips unknown ids, the editor warns).
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    /// Result form: "chat" | "file" | "html" (see `STEP_OUTPUTS`). Kept a plain
+    /// string for the same no-wipe reason as `kind`. Absent → the frontend
+    /// derives it from `kind` (document→"file", else "chat") — D47.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
+/// Confluence crawl source for RAG ingestion (D48). The PAT is stored as plain
+/// text in settings.json — acceptable for a local single-user desktop app;
+/// recommend a read-only-scope token.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfluenceConfig {
+    /// Base URL including any context path, e.g. "https://wiki.example.com/confluence".
+    #[serde(default)]
+    pub base_url: String,
+    /// Bearer PAT (Confluence Server/DC). Cloud Basic auth is out of scope v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// Crawl root page id — descendants are collected recursively (BFS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_page_id: Option<String>,
+    /// Alternative to `root_page_id`: flat listing of one space's pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_key: Option<String>,
+    /// Opt-in escape hatch for corporate TLS-inspection proxies whose CA is not
+    /// in the Windows store. Default false; the UI labels it dangerous.
+    #[serde(default)]
+    pub allow_invalid_certs: bool,
+}
+
+/// The user's own RAG service (summarization + embedding happen there; this app
+/// only passes raw content and queries — see `rag.rs` for the fill-in stubs).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RagConfig {
+    #[serde(default)]
+    pub endpoint: String,
+    /// Plain-text secret — same caveat as `ConfluenceConfig.token`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Search result count requested by the rag workflow step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -69,6 +124,12 @@ pub struct Settings {
     /// Per-category workflow overrides. Absent key → built-in default flow.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub workflows: HashMap<String, Vec<StepDef>>,
+    /// Confluence crawl source for RAG ingestion. `None` → not configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confluence: Option<ConfluenceConfig>,
+    /// The user's RAG service endpoint. `None` → the rag workflow step skips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rag: Option<RagConfig>,
     /// Legacy v0.1 single-agent field. Folded into `agents` on load and never
     /// re-serialized (so the next `save` drops it — self-healing migration).
     #[serde(default, skip_serializing)]
@@ -108,6 +169,16 @@ impl Settings {
             }
         }
     }
+
+    /// Set (`Some`) or clear (`None`) the Confluence crawl config.
+    pub fn set_confluence(&mut self, config: Option<ConfluenceConfig>) {
+        self.confluence = config;
+    }
+
+    /// Set (`Some`) or clear (`None`) the RAG endpoint config.
+    pub fn set_rag(&mut self, config: Option<RagConfig>) {
+        self.rag = config;
+    }
 }
 
 /// Save-time validation for a user skill registry.
@@ -142,6 +213,11 @@ pub fn validate_steps(steps: &[StepDef]) -> Result<(), String> {
         }
         if !STEP_KINDS.contains(&s.kind.as_str()) {
             return Err(format!("step '{}' has unknown kind: {}", s.id, s.kind));
+        }
+        if let Some(output) = s.output.as_deref() {
+            if !STEP_OUTPUTS.contains(&output) {
+                return Err(format!("step '{}' has unknown output: {}", s.id, output));
+            }
         }
         if !seen.insert(s.id.trim()) {
             return Err(format!("duplicate step id: {}", s.id));
@@ -187,7 +263,12 @@ mod tests {
     }
 
     fn skill(id: &str) -> SkillDef {
-        SkillDef { id: id.into(), name: format!("{id} 스킬"), body: format!("[{id}] 지시문") }
+        SkillDef {
+            id: id.into(),
+            name: format!("{id} 스킬"),
+            body: format!("[{id}] 지시문"),
+            dir: None,
+        }
     }
 
     fn step(id: &str, kind: &str) -> StepDef {
@@ -198,6 +279,7 @@ mod tests {
             instruction: String::new(),
             file: None,
             skill_ids: vec![],
+            output: None,
         }
     }
 
@@ -208,14 +290,36 @@ mod tests {
 
         let mut s = Settings::default();
         s.set_agent_bin("opencode", Some("C:\\bin\\opencode.cmd".into()));
-        s.set_skills(Some(vec![skill("source-analysis"), skill("test-plan")]));
+        s.set_skills(Some(vec![
+            SkillDef { dir: Some("C:\\skills\\sa".into()), ..skill("source-analysis") },
+            skill("test-plan"),
+        ]));
         s.set_workflow(
             "plan",
             Some(vec![
-                StepDef { file: Some("docs/plan.md".into()), ..step("doc", "document") },
+                StepDef {
+                    file: Some("docs/plan.md".into()),
+                    output: Some("html".into()),
+                    ..step("doc", "document")
+                },
+                step("codebase", "codebase"),
+                step("rag", "rag"),
+                step("knowledge", "knowledge"),
                 step("chat", "chat"),
             ]),
         );
+        s.set_confluence(Some(ConfluenceConfig {
+            base_url: "https://wiki.example.com/confluence".into(),
+            token: Some("pat".into()),
+            root_page_id: Some("12345".into()),
+            space_key: None,
+            allow_invalid_certs: false,
+        }));
+        s.set_rag(Some(RagConfig {
+            endpoint: "https://rag.example.com".into(),
+            api_key: Some("key".into()),
+            top_k: Some(5),
+        }));
         save(&root, &s).unwrap();
 
         let loaded = load(&root);
@@ -241,8 +345,27 @@ mod tests {
         assert_eq!(s.agent_custom_bin("opencode").as_deref(), Some("C:\\o.cmd"));
         assert!(s.skills.is_none());
         assert!(s.workflows.is_empty());
+        // New sections absent from an old file → None.
+        assert!(s.confluence.is_none());
+        assert!(s.rag.is_none());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn old_skill_and_step_json_load_without_new_fields() {
+        // Raw pre-extension JSON: no `dir`, no `output`, no confluence/rag.
+        let raw = r#"{
+            "skills": [{ "id": "a", "name": "A", "body": "b" }],
+            "workflows": { "plan": [
+                { "id": "doc", "name": "문서", "kind": "document", "file": "docs/p.md", "skillIds": ["a"] },
+                { "id": "chat", "name": "대화", "kind": "chat" }
+            ]}
+        }"#;
+        let s: Settings = serde_json::from_str(raw).unwrap();
+        assert_eq!(s.skills.as_ref().unwrap()[0].dir, None);
+        assert_eq!(s.workflows["plan"][0].output, None);
+        assert!(s.confluence.is_none() && s.rag.is_none());
     }
 
     #[test]
@@ -264,6 +387,23 @@ mod tests {
         let mut unnamed = step("a", "chat");
         unnamed.name = "  ".into();
         assert!(validate_steps(&[unnamed]).is_err(), "step needs a name");
+
+        // Foundation kinds are valid, non-terminal steps.
+        let foundation = vec![
+            step("codebase", "codebase"),
+            step("rag", "rag"),
+            step("knowledge", "knowledge"),
+            step("chat", "chat"),
+        ];
+        assert!(validate_steps(&foundation).is_ok());
+
+        // Output mode: valid values pass, unknown values fail.
+        let mut html = step("doc", "document");
+        html.output = Some("html".into());
+        assert!(validate_steps(&[html, step("chat", "chat")]).is_ok());
+        let mut bad = step("doc", "document");
+        bad.output = Some("popup".into());
+        assert!(validate_steps(&[bad, step("chat2", "chat")]).is_err(), "unknown output");
     }
 
     #[test]
@@ -286,20 +426,28 @@ mod tests {
         let mut s = Settings::default();
         s.set_skills(Some(vec![skill("a")]));
         s.set_workflow("plan", Some(vec![step("chat", "chat")]));
+        s.set_confluence(Some(ConfluenceConfig { base_url: "https://w".into(), ..Default::default() }));
+        s.set_rag(Some(RagConfig { endpoint: "https://r".into(), ..Default::default() }));
         save(&root, &s).unwrap();
 
         let mut loaded = load(&root);
         loaded.set_skills(None);
         loaded.set_workflow("plan", None);
+        loaded.set_confluence(None);
+        loaded.set_rag(None);
         save(&root, &loaded).unwrap();
 
         let reloaded = load(&root);
         assert!(reloaded.skills.is_none());
         assert!(reloaded.workflows.is_empty());
+        assert!(reloaded.confluence.is_none());
+        assert!(reloaded.rag.is_none());
         // The serialized file should not even contain the cleared fields.
         let raw = fs::read_to_string(root.join("settings.json")).unwrap();
         assert!(!raw.contains("\"skills\""));
         assert!(!raw.contains("\"workflows\""));
+        assert!(!raw.contains("\"confluence\""));
+        assert!(!raw.contains("\"rag\""));
 
         let _ = fs::remove_dir_all(&root);
     }

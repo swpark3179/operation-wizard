@@ -454,3 +454,85 @@
   불필요한 커밋/머지 충돌 위험.
 - **재검토 조건**: 설치파일(MSI/NSIS) 배포도 함께 필요해지면 `--no-bundle`을 제거하고 `tauri-apps/tauri-action`
   또는 번들 산출물 업로드로 전환.
+
+---
+
+### D44. 기반 3단계 = 고정(pinned) StepKind로 워크플로우 앞에 프리펜드
+- **결정**: 카테고리 워크플로우 앞에 **반드시 거치는 기반 3단계**를 추가한다 — ① 코드베이스 분석 →
+  ② 사내 문서 RAG 검색 → ③ 지식 베이스 반영. 별도 오케스트레이션 기계를 만들지 않고 **새 StepKind**
+  (`codebase`/`rag`/`knowledge`, `FOUNDATION_KINDS`)로 모델링해 기존 스텝 커서·자동전진·취소 폴백·Flows
+  편집 UI를 전부 재사용한다. `plan`은 항상 강제, guide/query/change는 Flows의 "기반 3단계 사용" 토글로
+  opt-in하며 **저장된 워크플로우 배열에 기반 kind 존재 여부가 곧 플래그**다(새 설정 필드 없음).
+  `coerceSteps(steps, {foundation})`가 순서(`codebase→rag→knowledge`)를 강제하고 누락 단계를 기본값
+  (`DEFAULT_FOUNDATION_STEPS`)으로 보충한다 — **기존에 저장된 plan 워크플로우도 로드 시 자동으로 기반
+  단계를 얻는다**(하위호환 겸 필수화). 편집기는 기반 카드를 pinned로 렌더(삭제·이동·kind 변경 불가;
+  지시문·스킬·산출물 파일은 편집 가능). `end` 핸들러의 생성형 판정은 `isGenerative(kind)`(chat 외 전부)로
+  일반화. rag/knowledge 단계는 에이전트 턴 **전에 클라이언트 preflight**(`stepPreflight`)가 컨텍스트를
+  조회해 wire에 첨부하고, 미설정/0건/실패면 **에이전트 턴 없이 건너뛴다**(system 안내 + 커서 전진 + 다음
+  생성형 단계로 체인; 미답 프롬프트는 다음 단계로 이월). preflight 중 Stop은 취소 폴백(커서 끝, 일반 대화).
+- **근거**: 사용자 요구 — "큰 세 단계를 반드시 지나고 그 이후 기존 단계 진행". 단계 모델 재사용이
+  스킬 연결(1단계에 사용자 탐색 스킬), 진행 표시, 안전장치를 공짜로 제공한다.
+- **대안 기각**: ChatPanel에 하드코딩 프리스테이지 기계 — arming/inflight/rearm/dedupe를 병렬 복제하게 됨.
+
+### D45. 코드베이스 경로 = workdir와 분리, folder 질문 타입 + extraDirs(--add-dir)
+- **결정**: 분석 대상 **코드베이스 폴더는 작업 폴더(workdir)와 별개**다(workdir = 산출물/cwd, 코드베이스 =
+  읽기 대상). 첫 질문에서 반드시 선택하도록 `ClarifyQuestion`에 **새 타입 `"folder"`**를 추가하고
+  (`RequirementsForm`의 `FolderAnswer` = 네이티브 폴더 픽커 + 경로 칩), `optionsFor(category, settings)`가
+  기반 단계 활성 카테고리의 폼 맨 앞에 필수 `codebasePath` 질문을 프리펜드한다. **프리필은 folder 질문을
+  제외**한다(에이전트는 로컬 경로를 알 수 없음). 폼 제출 시 folder 답변은 wire에서 분리되어 **구조적으로
+  전달**된다: `WorkspaceView.codebasePath` 상태 → `ChatPanel` prop → ① codebase 단계 preflight가
+  "분석 대상 코드베이스 폴더: <path>"를 주입, ② **매 턴** `RunArgs.extraDirs`로 전달(claude는 `--add-dir`
+  반복 인자, codex는 full-access 샌드박스라 불필요, 나머지는 프롬프트 언급으로 degrade), ③ 프로젝트
+  매니페스트에 영속(`Project.codebasePath`, `ensure_project` 인자 + `set_project_codebase` 커맨드 —
+  폴더 선택이 ensure 이후에 일어나므로 갱신 커맨드가 정상 경로). 스킬 리소스 폴더(`SkillDef.dir`)도 같은
+  extraDirs 경로를 탄다: 주입 턴에 본문 뒤 "[스킬 리소스 폴더] …" 라인을 붙이고 이후 턴에도 접근 유지.
+  캔버스는 **루트 전환 칩**(작업 폴더 ↔ 코드베이스)으로 코드베이스를 브라우징한다(`list_dir`/`read_file`은
+  절대경로라 백엔드 무변경). 재오픈 시 `ProjectSummary.codebasePath`로 복원.
+- **근거**: 사용자 확정 — 분석 대상과 산출물 위치의 분리. 요구사항 폼은 이미 필수·채팅차단(D41)·프리필
+  게이트라 폴더 강제 선택 지점으로 재사용이 최적.
+
+### D46. RAG 검색 결과 캔버스 탭 = 인메모리 HTML(srcdoc), 파일 아님
+- **결정**: rag 단계의 검색 결과는 `CanvasTab`에 **새 탭 `"rag"`("검색 결과")**로 표시한다. 클라이언트가
+  `RagHit[]`에서 **이스케이프된 자립형 HTML 문자열**을 결정적으로 생성(`lib/foundation.ts::ragResultHtml`)해
+  FileViewer의 HTML 미리보기와 동일하게 **sandbox iframe(`allow-scripts`, same-origin 없음) srcdoc**으로
+  렌더한다. 요구사항 탭과 달리 결과가 생긴 뒤 세션 동안 pill이 유지된다(새 세션/기록 열기 시 초기화).
+- **근거**: 프론트에 파일쓰기 능력이 없고(D21) 일시적 결과물로 workdir을 오염시키지 않기 위함. 에이전트
+  생성 HTML이 아니라 클라이언트 생성이라 이스케이프가 보장된다.
+
+### D47. 단계별 결과형식 output(chat/file/html) + html은 렌더 서브스텝으로 런타임 확장
+- **결정**: `StepDef.output?: "chat"|"file"|"html"`(`STEP_OUTPUTS`, 백엔드 save 검증·plain String)을
+  추가한다. 미지정 시 kind에서 파생(document→file, 그 외→chat; `stepOutput`). Flows 편집기는
+  search/document/codebase kind에 "결과 형태" 셀렉트를 노출한다. `"chat"`은 런타임에 file을 제거(산출물
+  없음), `"html"`은 `runtimeWorkflowFor` = `expandOutputSteps(workflowFor(...))`가 원 단계 뒤에 **합성
+  렌더 서브스텝**(`{id: <id>-html, kind:"document", file: <file>.html, skillIds:["html-render"]}`)을
+  삽입한다 — 내장 `html-render` 스킬이 md 산출물을 외부 리소스 없는 자립형 HTML로 재생성하고, 기존
+  자동전진·`onOpenFile`·FileViewer sandbox 미리보기 경로를 그대로 탄다. 설정에는 `output`만 저장되고
+  편집기는 합성 단계를 보지 않는다(`workflowFor`는 편집용 미확장, 오케스트레이터만 확장본 사용).
+- **근거**: 사용자 요구 — "각 단계 결과를 대화만/파일/HTML 캔버스 중 선택; HTML은 예쁘게 재생성하는
+  스킬로". 한 턴에 md+html을 모두 시키면 지시 과부하 — 별도 턴이 품질·단순성 모두 우수.
+
+### D48. 지식 뷰 + reqwest(blocking/native-tls) + Confluence 수집 Channel + RAG 어댑터 스텁
+- **결정**: NavRail에 4번째 뷰 **"지식"(`knowledge`)**을 추가한다 — ① RAG 검색 설정(endpoint/apiKey/topK +
+  연결 테스트), ② Confluence 수집(baseUrl/PAT/루트 페이지 ID 또는 스페이스 키/TLS 예외 + 수집 시작·중지·
+  진행 표시), ③ 지식 베이스 CRUD(제목+본문; `%USERPROFILE%\.operation-wizard\knowledge\<id>.json`
+  항목당 1파일, `knowledge.rs`). 지식은 **단순 저장 + 프롬프트 주입**(RAG 아님)으로, knowledge 단계
+  preflight가 `list_knowledge` 전체를 16KB 상한으로 주입한다(수십~수백 건에 충분; RAG 승격은 재검토 조건).
+  **첫 HTTP 의존성 reqwest**를 `default-features=false, features=["blocking","json","native-tls"]`로
+  추가한다 — blocking은 앱의 std 워커스레드 관용구와 일치하고(IPC 스레드 호출 금지), native-tls는 Windows
+  에서 schannel = OS 인증서 저장소를 신뢰해 사내 TLS 재서명 프록시(D28의 codex BadSignature 부류)를
+  회피한다. `ConfluenceConfig.allowInvalidCerts`(기본 off)는 최후 수단 opt-in. **Confluence 수집**
+  (`confluence.rs`)은 Server/DC REST(Bearer PAT; Cloud Basic은 v1 범위 밖)로 **반복 BFS**(visited dedupe,
+  MAX_PAGES=2000/MAX_DEPTH=10, 호출 사이 취소 플래그) 크롤링하고, 페이지 **원문 그대로**를
+  `RagClient::ingest_page`로 전달한다(요약·임베딩은 사용자 RAG 서비스 담당). 진행은 `IngestEvent`
+  Channel(run.rs 패턴; `IngestRegistry`로 취소), per-page 실패는 계속 진행. **RAG 어댑터**(`rag.rs`)는
+  사용자가 채우는 확장 지점 — `RagClient::{ingest_page, search}`가 예시 스켈레톤 주석과 함께 **TODO(user)
+  스텁**으로 제공되며, 미구현 시 한글 안내 Err를 반환해 rag 단계가 "건너뜀"으로 degrade한다(크래시 없음).
+  검색은 `rag_search(query, topK?)` 커맨드(spawn_blocking). 크롤/검색 파이프는 trait(`ConfluenceApi`) +
+  순수 파서로 네트워크 없이 단위 테스트한다. **비밀값 주의**: PAT/apiKey는 settings.json 평문 저장
+  (로컬 단일사용자 v1 수용; Windows Credential Manager 승격은 후속).
+- **부수 버그픽스**: `RunEvent`가 `rename_all_fields` 누락으로 struct variant 필드(`toolUseId`/`sessionId`/
+  `inputTokens` 등)를 snake_case로 직렬화해 프론트 미러에서 조용히 유실되던 문제(codex 세션 캡처·도구 결과
+  에러 플래그·토큰 사용량)를 `rename_all_fields = "camelCase"`로 수정(직렬화 테스트 추가; `IngestEvent`도
+  동일 적용).
+- **재검토 조건**: 지식이 수천 건으로 늘면 지식도 RAG 임베딩으로 승격(어댑터 재사용); Confluence Cloud
+  지원이 필요하면 `ConfluenceConfig`에 authMode(Basic) 추가.

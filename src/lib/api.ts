@@ -2,10 +2,15 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AgentInfo,
+  ConfluenceConfig,
   DetectedAgent,
   FileEntry,
+  IngestEvent,
+  KnowledgeEntry,
   ProjectMeta,
   ProjectSummary,
+  RagConfig,
+  RagHit,
   RunArgs,
   RunEvent,
   SessionMeta,
@@ -39,6 +44,54 @@ export function setSkills(skills: SkillDef[] | null): Promise<Settings> {
 /** Replace one category's workflow steps, or reset to the default with null. */
 export function setWorkflow(category: string, steps: StepDef[] | null): Promise<Settings> {
   return invoke<Settings>("set_workflow", { category, steps });
+}
+
+/** Set (or clear, with null/empty base URL) the Confluence crawl config. */
+export function setConfluenceConfig(config: ConfluenceConfig | null): Promise<Settings> {
+  return invoke<Settings>("set_confluence_config", { config });
+}
+
+/** Set (or clear, with null/empty endpoint) the RAG service config. */
+export function setRagConfig(config: RagConfig | null): Promise<Settings> {
+  return invoke<Settings>("set_rag_config", { config });
+}
+
+// ── RAG / Confluence ingestion / knowledge ───────────────────────────────────
+
+/** Search the user's RAG service (rag workflow step). Rejects with a Korean
+ * guidance message while the rag.rs stubs are unimplemented/unconfigured. */
+export function ragSearch(query: string, topK?: number): Promise<RagHit[]> {
+  return invoke<RagHit[]>("rag_search", { query, topK: topK ?? null });
+}
+
+/** Start a Confluence crawl+ingest; progress streams over `onEvent` until a
+ * terminal `end` event. Returns the ingest id (pass to {@link cancelIngest}). */
+export function startConfluenceIngest(onEvent: Channel<IngestEvent>): Promise<string> {
+  return invoke<string>("start_confluence_ingest", { onEvent });
+}
+
+export function cancelIngest(ingestId: string): Promise<void> {
+  return invoke("cancel_ingest", { ingestId });
+}
+
+/** Settings-screen connection test: returns the crawl root's page title. */
+export function probeConfluence(): Promise<string> {
+  return invoke<string>("probe_confluence");
+}
+
+/** All knowledge entries (full bodies), newest-updated first. */
+export function listKnowledge(): Promise<KnowledgeEntry[]> {
+  return invoke<KnowledgeEntry[]>("list_knowledge");
+}
+
+/** Upsert one knowledge entry; returns it with stamped timestamps. */
+export function saveKnowledge(entry: KnowledgeEntry): Promise<KnowledgeEntry> {
+  return invoke<KnowledgeEntry>("save_knowledge", { entry });
+}
+
+/** Delete one knowledge entry (idempotent). */
+export function deleteKnowledge(id: string): Promise<void> {
+  return invoke("delete_knowledge", { id });
 }
 
 // ── Agent runs ───────────────────────────────────────────────────────────────
@@ -76,8 +129,23 @@ export function ensureProject(
   workdir: string,
   title: string,
   category: string,
+  codebasePath?: string | null,
 ): Promise<ProjectMeta> {
-  return invoke<ProjectMeta>("ensure_project", { projectId, workdir, title, category });
+  return invoke<ProjectMeta>("ensure_project", {
+    projectId,
+    workdir,
+    title,
+    category,
+    codebasePath: codebasePath ?? null,
+  });
+}
+
+/** Update (or clear with null) an existing project's codebase path. */
+export function setProjectCodebase(
+  projectId: string,
+  codebasePath: string | null,
+): Promise<ProjectMeta> {
+  return invoke<ProjectMeta>("set_project_codebase", { projectId, codebasePath });
 }
 
 /** Persist one session (project must already exist via {@link ensureProject}). */

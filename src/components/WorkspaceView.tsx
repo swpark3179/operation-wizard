@@ -3,14 +3,16 @@ import { ChatPanel } from "./ChatPanel";
 import { CanvasPanel } from "./CanvasPanel";
 import type { Category } from "./workspace";
 import { formatClarifyAnswers, type ClarifyAnswer, type ClarifyQuestion } from "../lib/clarify";
-import type { AgentInfo, DetectedAgent, Settings, StoredSession } from "../lib/types";
+import { ragResultHtml } from "../lib/foundation";
+import type { AgentInfo, DetectedAgent, RagHit, Settings, StoredSession } from "../lib/types";
 
-export type CanvasTab = "files" | "requirements";
+export type CanvasTab = "files" | "requirements" | "rag";
 
 /** The workspace: left conversation panel + right canvas panel. */
 export function WorkspaceView({
   projectId,
   initialWorkdir,
+  initialCodebasePath,
   category,
   seedPrompt,
   agents,
@@ -25,6 +27,9 @@ export function WorkspaceView({
    * workdir when opening a recent project, or null for a fresh auto project
    * (resolved lazily on the first send). */
   initialWorkdir: string | null;
+  /** The project's stored codebase path when reopening (else null — chosen in
+   * the requirements form's folder question, D45). */
+  initialCodebasePath: string | null;
   category: Category;
   seedPrompt: string;
   agents: AgentInfo[];
@@ -43,6 +48,13 @@ export function WorkspaceView({
   // ChatPanel on the first send for a fresh chat; known up front when opening a
   // recent project. Survives the sessionNonce remount (same project).
   const [resolvedWorkdir, setResolvedWorkdir] = useState<string | null>(initialWorkdir);
+  // The foundation phase's analyzed codebase folder — project-scoped like the
+  // workdir (survives the sessionNonce remount). Set by the form's folder
+  // answer; delivered to ChatPanel structurally (never as wire prose).
+  const [codebasePath, setCodebasePath] = useState<string | null>(initialCodebasePath);
+  // The latest RAG search result, rendered as a canvas tab (in-memory HTML via
+  // sandboxed iframe srcdoc — never written to disk, D46).
+  const [ragResult, setRagResult] = useState<{ query: string; html: string } | null>(null);
   // Remount key: bumping it starts a fresh ChatPanel (new session) or swaps in a
   // loaded session, resetting all of ChatPanel's state/refs in one shot.
   const [sessionNonce, setSessionNonce] = useState(0);
@@ -80,6 +92,7 @@ export function WorkspaceView({
     setLoadedSession(null);
     setActiveSeed("");
     resetClarify();
+    setRagResult(null); // codebasePath stays — it is project-scoped
     setSessionNonce((n) => n + 1);
   };
 
@@ -88,7 +101,15 @@ export function WorkspaceView({
     setActiveCategory((s.category as Category) ?? activeCategory);
     setActiveSeed("");
     resetClarify();
+    setRagResult(null);
     setSessionNonce((n) => n + 1);
+  };
+
+  // RAG search results from the rag foundation step: build the (escaped)
+  // result document and surface it as the "검색 결과" tab.
+  const handleRagResult = (query: string, hits: RagHit[]) => {
+    setRagResult({ query, html: ragResultHtml(query, hits) });
+    setCanvasTab("rag");
   };
 
   const handleClarify = (questions: ClarifyQuestion[]) => {
@@ -113,7 +134,15 @@ export function WorkspaceView({
   };
 
   const handleSubmitAnswers = (answers: ClarifyAnswer[]) => {
-    const { wire, display } = formatClarifyAnswers(answers);
+    // The folder answer (codebasePath) is delivered structurally — lifted into
+    // state (→ ChatPanel prop → extraDirs + preflight context) and excluded
+    // from the answers wire (D45).
+    const folder = answers.find((a) => a.type === "folder" && a.id === "codebasePath");
+    if (typeof folder?.value === "string" && folder.value.trim()) {
+      setCodebasePath(folder.value.trim());
+    }
+    const rest = answers.filter((a) => a.type !== "folder");
+    const { wire, display } = formatClarifyAnswers(rest);
     setAnswerSubmission((s) => ({ wire, display, nonce: (s?.nonce ?? 0) + 1 }));
     setClarify(null);
     setClarifyPrefill(null);
@@ -132,6 +161,7 @@ export function WorkspaceView({
         detected={detected}
         settings={settings}
         workdir={resolvedWorkdir}
+        codebasePath={codebasePath}
         initialSession={loadedSession}
         answerSubmission={answerSubmission}
         formPending={!!clarify?.length}
@@ -141,10 +171,12 @@ export function WorkspaceView({
         onOpenFile={handleOpenFile}
         onClarify={handleClarify}
         onPrefill={handlePrefill}
+        onRagResult={handleRagResult}
         onStreamingChange={setStreaming}
       />
       <CanvasPanel
         workdir={resolvedWorkdir}
+        codebasePath={codebasePath}
         refreshNonce={refreshNonce}
         selectedFile={selectedFile}
         onSelectFile={setSelectedFile}
@@ -154,6 +186,7 @@ export function WorkspaceView({
         clarifyPrefill={clarifyPrefill}
         prefillNonce={prefillNonce}
         onSubmitAnswers={handleSubmitAnswers}
+        ragResult={ragResult}
         streaming={streaming}
       />
     </div>

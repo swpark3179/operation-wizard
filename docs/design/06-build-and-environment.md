@@ -48,6 +48,8 @@
 - Rust(`rustup`, 타깃 `x86_64-pc-windows-msvc`)
 - Visual Studio 2022 + "C++를 사용한 데스크톱 개발" 워크로드 (MSVC `link.exe`/`cl.exe` + SDK)
 - WebView2 런타임 (Windows 11 내장)
+- `reqwest`(D48)는 `native-tls`로 빌드되어 Windows에서 **schannel**을 쓴다 — OpenSSL 설치 불필요,
+  OS 인증서 저장소(사내 프록시 CA 포함)를 그대로 신뢰한다.
 
 ## 테스트 실행
 

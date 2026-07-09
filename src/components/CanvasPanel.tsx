@@ -106,6 +106,7 @@ function TreeNode({
 
 export function CanvasPanel({
   workdir,
+  codebasePath,
   refreshNonce,
   selectedFile,
   onSelectFile,
@@ -115,9 +116,12 @@ export function CanvasPanel({
   clarifyPrefill,
   prefillNonce,
   onSubmitAnswers,
+  ragResult,
   streaming,
 }: {
   workdir: string | null;
+  /** The project's analyzed codebase folder (D45) — adds a tree-root toggle. */
+  codebasePath?: string | null;
   /** Bumped to force a file-tree reload (e.g. after a document step writes a file). */
   refreshNonce?: number;
   selectedFile: string | null;
@@ -132,35 +136,50 @@ export function CanvasPanel({
   /** Bumped when a fresh prefill arrives (re-inits the form). */
   prefillNonce?: number;
   onSubmitAnswers: (answers: ClarifyAnswer[]) => void;
+  /** The latest RAG search result (in-memory HTML for the "검색 결과" tab, D46). */
+  ragResult: { query: string; html: string } | null;
   /** True while a run is streaming (form submit disabled). */
   streaming: boolean;
 }) {
   const [root, setRoot] = useState<FileEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Which folder the file tree shows: the workdir (outputs) or the analyzed
+  // codebase. Falls back to the workdir while no codebase is set.
+  const [rootChoice, setRootChoice] = useState<"workdir" | "codebase">("workdir");
+  const treeRoot = rootChoice === "codebase" && codebasePath ? codebasePath : workdir;
 
   const load = useCallback(async () => {
-    if (!workdir) {
+    if (!treeRoot) {
       setRoot(null);
       return;
     }
     setError(null);
     try {
-      setRoot(await listDir(workdir));
+      setRoot(await listDir(treeRoot));
     } catch (e) {
       setError(String(e));
       setRoot([]);
     }
-  }, [workdir]);
+  }, [treeRoot]);
 
-  // Reload on workdir change or when a produced file bumps refreshNonce.
+  // Reload on root change or when a produced file bumps refreshNonce.
   useEffect(() => {
     void load();
   }, [load, refreshNonce]);
 
-  // The requirements tab exists only while the form awaits the user; once the
-  // answers are submitted (clarify cleared) the pill disappears entirely, so a
-  // stale `tab === "requirements"` can never render a pill-less view.
-  const effectiveTab: CanvasTab = clarify?.length ? tab : "files";
+  // The requirements tab exists only while the form awaits the user (a stale
+  // `tab === "requirements"` can never render a pill-less view); the rag tab
+  // exists once a search result arrived and stays for the session.
+  const effectiveTab: CanvasTab =
+    tab === "requirements"
+      ? clarify?.length
+        ? "requirements"
+        : "files"
+      : tab === "rag"
+        ? ragResult
+          ? "rag"
+          : "files"
+        : tab;
 
   const tabBtn = (id: CanvasTab, label: string, badge?: boolean) => (
     <button
@@ -186,11 +205,36 @@ export function CanvasPanel({
       <div className="flex h-[46px] shrink-0 items-center gap-2 border-b border-line bg-panel px-3.5">
         <div className="flex items-center gap-0.5 rounded-lg border border-line bg-subtle p-0.5">
           {!!clarify?.length && tabBtn("requirements", "요구사항", true)}
+          {!!ragResult && tabBtn("rag", "검색 결과")}
           {tabBtn("files", "파일")}
         </div>
         <div className="flex-1" />
-        {effectiveTab === "files" && workdir && (
+        {effectiveTab === "files" && treeRoot && (
           <>
+            {codebasePath && (
+              <div className="flex items-center gap-0.5 rounded-lg border border-line bg-subtle p-0.5 text-[11.5px]">
+                {(
+                  [
+                    ["workdir", "작업 폴더"],
+                    ["codebase", "코드베이스"],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setRootChoice(id)}
+                    className={
+                      "rounded-md px-2 py-0.5 font-medium transition-colors " +
+                      (rootChoice === id
+                        ? "bg-panel text-ink-strong shadow-xs"
+                        : "text-ink-soft hover:text-ink-muted")
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
             <button
               type="button"
               onClick={() => void load()}
@@ -200,11 +244,11 @@ export function CanvasPanel({
               <RefreshCw size={14} />
             </button>
             <span
-              title={workdir}
+              title={treeRoot}
               className="inline-flex max-w-[220px] items-center gap-1.5 rounded-md border border-line bg-subtle px-2 py-1 font-mono text-[11.5px] text-ink-soft"
             >
               <Folder size={12} className="shrink-0" />
-              <span className="truncate">{basename(workdir)}</span>
+              <span className="truncate">{basename(treeRoot)}</span>
             </span>
           </>
         )}
@@ -218,7 +262,16 @@ export function CanvasPanel({
           disabled={streaming}
           onSubmit={onSubmitAnswers}
         />
-      ) : !workdir ? (
+      ) : effectiveTab === "rag" && ragResult ? (
+        // In-memory result document, sandboxed exactly like the file viewer's
+        // HTML preview (allow-scripts, no same-origin) — D46.
+        <iframe
+          title="사내 문서 검색 결과"
+          sandbox="allow-scripts"
+          srcDoc={ragResult.html}
+          className="h-full w-full flex-1 border-0 bg-white"
+        />
+      ) : !treeRoot ? (
         <div className="flex flex-1 flex-col items-center justify-center px-6 text-center text-ink-soft">
           <div className="mb-4 grid h-16 w-16 place-items-center rounded-[18px] bg-subtle text-ink-faint">
             <FolderTree size={30} />
@@ -232,7 +285,7 @@ export function CanvasPanel({
           </div>
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1" key={treeRoot}>
           <div className="w-[240px] shrink-0 overflow-auto border-r border-line py-2">
             {error && <div className="px-3 py-2 text-[12px] text-bad">{error}</div>}
             {root?.length === 0 && !error && (

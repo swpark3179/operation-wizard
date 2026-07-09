@@ -30,6 +30,9 @@ export function HomeArea({
   // adopts its id + resolved workdir.
   const [projectId, setProjectId] = useState<string | null>(null);
   const [initialWorkdir, setInitialWorkdir] = useState<string | null>(null);
+  // The reopened project's stored codebase path (fresh chats pick one in the
+  // requirements form instead — D45).
+  const [initialCodebasePath, setInitialCodebasePath] = useState<string | null>(null);
 
   // Reset to the launcher whenever Home is (re)selected in the nav rail.
   useEffect(() => {
@@ -39,6 +42,7 @@ export function HomeArea({
     setLoadedSession(null);
     setProjectId(null);
     setInitialWorkdir(null);
+    setInitialCodebasePath(null);
   }, [resetNonce]);
 
   if (screen === "workspace" && category && projectId) {
@@ -46,6 +50,7 @@ export function HomeArea({
       <WorkspaceView
         projectId={projectId}
         initialWorkdir={initialWorkdir}
+        initialCodebasePath={initialCodebasePath}
         category={category}
         seedPrompt={seedPrompt}
         agents={agents}
@@ -59,6 +64,7 @@ export function HomeArea({
           setLoadedSession(null);
           setProjectId(null);
           setInitialWorkdir(null);
+          setInitialCodebasePath(null);
         }}
       />
     );
@@ -71,15 +77,18 @@ export function HomeArea({
       onStart={(cat, prompt, workdir) => {
         setProjectId(crypto.randomUUID());
         setInitialWorkdir(workdir ?? null);
+        setInitialCodebasePath(null);
         setLoadedSession(null);
         setCategory(cat);
         setSeedPrompt(prompt);
         setScreen("workspace");
       }}
-      // Recent project → adopt its id + resolved workdir, open the given session.
-      onOpenSession={(session, id, projectWorkdir) => {
+      // Recent project → adopt its id + resolved workdir/codebase, open the
+      // given session.
+      onOpenSession={(session, id, projectWorkdir, codebasePath) => {
         setProjectId(id);
         setInitialWorkdir(projectWorkdir);
+        setInitialCodebasePath(codebasePath ?? null);
         setLoadedSession(session);
         setCategory((session.category as Category) ?? "plan");
         setSeedPrompt("");

@@ -17,8 +17,14 @@ export function HomeView({
 }: {
   /** Start a new project. `workdir` = a folder chosen on Home, or undefined → auto. */
   onStart: (category: Category, prompt: string, workdir?: string) => void;
-  /** Open a recent project's latest session (adopts its id + resolved workdir). */
-  onOpenSession: (session: StoredSession, projectId: string, workdir: string) => void;
+  /** Open a recent project's latest session (adopts its id + resolved workdir
+   * + stored codebase path). */
+  onOpenSession: (
+    session: StoredSession,
+    projectId: string,
+    workdir: string,
+    codebasePath?: string | null,
+  ) => void;
 }) {
   const [prompt, setPrompt] = useState("");
   const promptRef = useAutoGrow(prompt, 200);
@@ -47,7 +53,7 @@ export function HomeView({
   const openProject = async (p: ProjectSummary) => {
     try {
       if (p.lastSessionId) {
-        onOpenSession(await loadSession(p.id, p.lastSessionId), p.id, p.workdir);
+        onOpenSession(await loadSession(p.id, p.lastSessionId), p.id, p.workdir, p.codebasePath);
       } else {
         onStart("plan", "");
       }
