@@ -57,7 +57,23 @@
 cargo test --manifest-path src-tauri\Cargo.toml
 ```
 
-(이 역시 MSVC 환경에서 실행해야 한다.)
+(이 역시 MSVC 환경에서 실행해야 한다. Linux에서는 `libgtk-3-dev`/`libwebkit2gtk-4.1-dev` 설치 시
+`cargo test`가 동작한다 — 파서/설정 등 단위 테스트는 플랫폼 무관.)
+
+## Known issue: 첫 질문 시 콘솔 창 깜빡임 (업스트림 CLI 버그)
+
+질문(특히 세션의 첫 턴)에서 cmd/콘솔 창이 잠깐 나타났다 사라질 수 있다. **이 앱의 프로세스 실행은
+원인이 아니다** — 모든 spawn(탐지 프로브·실행 엔진·`taskkill`)은 `exec::command_for` 단일 팩토리를
+거치며 `CREATE_NO_WINDOW`가 예외 없이 적용된다(D54에서 감사 완료). 깜빡임은 **Claude Code CLI가
+세션 시작 시 자기 하위 프로세스(셸 스냅샷 등)를 windowsHide 없이 spawn하는 업스트림 버그**다
+(anthropics/claude-code [#14828](https://github.com/anthropics/claude-code/issues/14828) ·
+[#15572](https://github.com/anthropics/claude-code/issues/15572) ·
+[#16880](https://github.com/anthropics/claude-code/issues/16880) ·
+[#61051](https://github.com/anthropics/claude-code/issues/61051) — 버전에 따라 수정·회귀 반복).
+
+- **조치**: Claude Code CLI를 최신 버전으로 업데이트한다(`npm i -g @anthropic-ai/claude-code` 또는
+  네이티브 인스톨러). gemini/aipro도 유사 증상이 있으면 각 CLI 업데이트.
+- 앱 측 코드 변경은 없다([05](05-decisions.md) D54 — hidden desktop 재작성은 기각).
 
 ## CI 릴리즈 워크플로우 (GitHub Actions)
 

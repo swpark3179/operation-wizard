@@ -208,10 +208,6 @@ export function ChatPanel({
   const [history, setHistory] = useState<SessionMeta[]>([]);
 
   useEffect(() => {
-    messagesRef.current = messages;
-  }, [messages]);
-
-  useEffect(() => {
     codebasePathRef.current = codebasePath;
   }, [codebasePath]);
 
@@ -252,8 +248,21 @@ export function ChatPanel({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
 
+  /** Synchronously commit a messages change: compute from the live ref (never
+   * a stale render snapshot), update the ref, then set state. Channel events
+   * arrive back-to-back — a passive `useEffect` ref sync lags a commit behind,
+   * which used to let the `end` handler clobber the just-streamed reply with an
+   * empty snapshot and persist it empty. Every message mutation goes through
+   * here so `messagesRef.current` is always current. */
+  const mutateMessages = (fn: (prev: ChatMessage[]) => ChatMessage[]): ChatMessage[] => {
+    const next = fn(messagesRef.current);
+    messagesRef.current = next;
+    setMessages(next);
+    return next;
+  };
+
   const updateLastAssistant = (fn: (m: ChatMessage) => ChatMessage) => {
-    setMessages((prev) => {
+    mutateMessages((prev) => {
       const next = [...prev];
       for (let i = next.length - 1; i >= 0; i--) {
         if (next[i].role === "assistant") {
@@ -343,7 +352,7 @@ export function ChatPanel({
         // conversation. Never touches the step cursor or persistence.
         if (prefillInflightRef.current) {
           prefillInflightRef.current = false;
-          const msgs = messagesRef.current;
+          const msgs = messagesRef.current; // live via mutateMessages
           if (ev.status === "succeeded") {
             for (let i = msgs.length - 1; i >= 0; i--) {
               if (msgs[i].role === "assistant") {
@@ -353,7 +362,8 @@ export function ChatPanel({
               }
             }
           }
-          setMessages([]); // the prefill pair was the only content on a fresh chat
+          // Drop the hidden prefill pair (the only content on a fresh chat).
+          mutateMessages(() => []);
           break;
         }
 
@@ -361,7 +371,9 @@ export function ChatPanel({
         inflightStepRef.current = null;
 
         // Clear the mid-stream flag on the whole list (matches persist()).
-        let next = messagesRef.current.map((m) => (m.streaming ? { ...m, streaming: false } : m));
+        const next = mutateMessages((prev) =>
+          prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)),
+        );
 
         if (stepIdx != null && ev.status === "succeeded") {
           const step = WF[stepIdx];
@@ -392,7 +404,6 @@ export function ChatPanel({
           stepArmedRef.current = false;
         }
 
-        setMessages(next);
         persist(next); // save the completed turn (incl. captured cli session id)
         break;
       }
@@ -418,19 +429,21 @@ export function ChatPanel({
     system: true,
   });
 
+  /** Surface a turn that failed before it could spawn (e.g. `ensure_project`),
+   * as a normal message pair with the error on the assistant side. */
+  const failTurn = (display: string, system: boolean | undefined, error: string) => {
+    mutateMessages((prev) => [
+      ...prev,
+      { role: "user", content: display, thinking: "", events: [], system },
+      { role: "assistant", content: "", thinking: "", events: [], error },
+    ]);
+  };
+
   /** Foundation-step preflight (D44): resolve the extra wire context for this
    * turn, or decide to skip the step (unconfigured / empty / failed — the
    * foundation never blocks the flow). `codebase` is synchronous; `rag` and
    * `knowledge` fetch before the agent turn. */
   const stepPreflight = async (step: StepDef): Promise<{ context?: string; skip?: string }> => {
-    if (step.kind === "codebase") {
-      const path = codebasePathRef.current;
-      return {
-        context: path
-          ? `분석 대상 코드베이스 폴더: ${path}`
-          : "분석 대상 코드베이스 폴더가 지정되지 않았습니다. 작업 폴더의 소스를 대신 분석하세요.",
-      };
-    }
     if (step.kind === "rag") {
       if (!settings?.rag?.endpoint?.trim()) {
         return { skip: "RAG가 설정되지 않아 사내 문서 검색 단계를 건너뜁니다. (지식 화면에서 등록)" };
@@ -461,22 +474,82 @@ export function ChatPanel({
     return {};
   };
 
+  /** Absolute-path context injected on armed generative turns (D52): where
+   * outputs go (workdir) and — when a codebase folder was selected — where the
+   * sources live, with an explicit search-root directive so the agent starts
+   * exploring there instead of the (output-only) workdir. */
+  const pathContext = (step: StepDef, cwd: string): string => {
+    const lines = [`작업 폴더(산출물 저장 위치, 절대경로): ${cwd}`];
+    const cb = codebasePathRef.current;
+    if (cb) {
+      lines.push(`분석 대상 코드베이스 폴더(절대경로): ${cb}`);
+      lines.push(
+        step.kind === "codebase"
+          ? "모든 소스 파일 탐색·검색·읽기를 반드시 위 코드베이스 폴더(절대경로)에서 시작하세요. 작업 폴더에서 소스를 찾지 마세요 — 작업 폴더는 산출물 저장 전용입니다."
+          : "소스코드는 위 코드베이스 폴더에서 읽고, 산출물 문서는 작업 폴더에서 읽고 쓰세요.",
+      );
+    } else if (step.kind === "codebase") {
+      lines.push("분석 대상 코드베이스 폴더가 지정되지 않았습니다. 작업 폴더의 소스를 대신 분석하세요.");
+    }
+    return lines.join("\n");
+  };
+
+  /** Send one turn. Resolves to `true` when the turn was handled — spawned,
+   * deliberately consumed (skip/stop/nothing-to-send), or attempted and its
+   * failure surfaced in the chat. Resolves to `false` only when nothing
+   * happened at all (still streaming / blocked by the pending form / empty),
+   * so the caller may retry. The nonce-guarded effects only consume their
+   * nonce on `true`; a submission racing the in-flight prefill is therefore
+   * retried when streaming ends instead of being silently lost (D55). */
   const send = async (
     text: string,
     opts?: { display?: string; system?: boolean; prefill?: boolean },
-  ) => {
+  ): Promise<boolean> => {
     const prompt = text.trim();
-    if (streaming) return;
+    if (streaming) return false;
     // While the requirements form awaits the user, block manual sends — only
     // the hidden prefill pass and auto-advance turns (system) may run.
-    if (formPending && !opts?.system && !opts?.prefill) return;
+    if (formPending && !opts?.system && !opts?.prefill) return false;
     // Block an empty manual send before consuming the step arm; auto-advance /
     // prefill turns (system) legitimately carry no user text (the wire is built
     // from the injected instruction).
-    if (!prompt && !opts?.system) return;
+    if (!prompt && !opts?.system) return false;
 
     const isPrefill = !!opts?.prefill;
     prefillInflightRef.current = isPrefill;
+
+    // Resolve the working folder up front (first send of a fresh chat creates
+    // the project folder + manifest). Doing this before the preflight/wire
+    // assembly lets the path context and preflight see the absolute workdir on
+    // the very first turn (D52).
+    let cwd = resolvedWorkdirRef.current;
+    if (!ensuredRef.current) {
+      try {
+        // Title the project by the user's actual request (known even during a
+        // prefill turn), not the answer/instruction wire.
+        const title = seedPromptRef.current.trim().slice(0, 60) || categoryLabel(category);
+        const project = await ensureProject(
+          projectId,
+          cwd ?? "",
+          title,
+          category,
+          codebasePathRef.current,
+        );
+        cwd = project.workdir;
+        resolvedWorkdirRef.current = cwd;
+        ensuredRef.current = true;
+        onResolveWorkdir(cwd);
+      } catch (e) {
+        prefillInflightRef.current = false;
+        failTurn(opts?.display ?? prompt, opts?.system, String(e));
+        return true; // attempted & surfaced — don't auto-retry
+      }
+    }
+    if (!cwd) {
+      prefillInflightRef.current = false;
+      failTurn(opts?.display ?? prompt, opts?.system, "작업 폴더를 확인할 수 없습니다.");
+      return true;
+    }
 
     // This turn's workflow step + its skills (both skipped for a prefill turn,
     // which is isolated analysis). If armed, prepend the step's skill bodies +
@@ -533,13 +606,13 @@ export function ChatPanel({
         inflightStepRef.current = null;
         stepIndexRef.current = WF.length;
         stepArmedRef.current = false;
-        setMessages((prev) => [...prev, note("단계 진행을 중지했습니다.")]);
-        return;
+        mutateMessages((prev) => [...prev, note("단계 진행을 중지했습니다.")]);
+        return true; // deliberately stopped — consumed
       }
       if (pf.skip) {
         unwindSkills();
         inflightStepRef.current = null;
-        setMessages((prev) => [...prev, note(pf.skip!)]);
+        mutateMessages((prev) => [...prev, note(pf.skip!)]);
         const nextIdx = stepIndexRef.current + 1;
         stepIndexRef.current = nextIdx;
         const nextStep = WF[nextIdx];
@@ -548,31 +621,35 @@ export function ChatPanel({
           // preflight run). A real user prompt (e.g. the answers turn) is
           // carried along; an auto turn shows the next progress note.
           stepArmedRef.current = true;
-          void send(text, prompt ? opts : { ...opts, system: true, display: progressLabel(nextIdx, WF) });
-        } else {
-          stepArmedRef.current = false;
-          if (prompt) void send(text, opts); // never drop a real user prompt
+          return send(text, prompt ? opts : { ...opts, system: true, display: progressLabel(nextIdx, WF) });
         }
-        return;
+        stepArmedRef.current = false;
+        if (prompt) return send(text, opts); // never drop a real user prompt
+        return true;
       }
       preflightContext = pf.context ?? "";
     }
 
+    // Absolute-path context for generative turns (D52): output location + the
+    // codebase search root. `cwd` is already resolved above, first turn included.
+    const pathCtx =
+      !isPrefill && stepInject && step && isGenerative(step.kind) ? pathContext(step, cwd) : "";
+
     const wire = isPrefill
       ? prefillInstruction(optionQuestions, seedPromptRef.current)
-      : [...skillBodies, stepInject ? step!.instruction : "", preflightContext, prompt]
+      : [...skillBodies, stepInject ? step!.instruction : "", pathCtx, preflightContext, prompt]
           .filter(Boolean)
           .join("\n\n");
     if (!wire.trim()) {
       inflightStepRef.current = null;
       prefillInflightRef.current = false;
-      return; // nothing to send (empty input, no injected instruction)
+      return true; // nothing to send (empty input, no injected instruction)
     }
     if (!opts?.system) setInput("");
 
     // Sessionless agents need the whole conversation each turn; capture it from
     // the pre-append messages before we add the new pair.
-    const transcript = buildTranscript(messages, wire);
+    const transcript = buildTranscript(messagesRef.current, wire);
 
     // The chat shows the display text (clean prompt / compact summary / step
     // note), not the instruction-wrapped or answer-wire text. Auto-advance turns
@@ -591,45 +668,7 @@ export function ChatPanel({
       events: [],
       streaming: true,
     };
-    const nextMessages = [...messages, user, assistant];
-    setMessages(nextMessages);
-
-    // Create the project folder + manifest once (on the first send of a fresh
-    // chat). Passes the chosen folder if known, else "" → the project's own
-    // workspace/ subfolder. Always runs even when the workdir is pre-known, so
-    // the manifest is written (else the project is missing from the recent list).
-    let cwd = resolvedWorkdirRef.current;
-    if (!ensuredRef.current) {
-      try {
-        // Title the project by the user's actual request (known even during a
-        // prefill turn), not the answer/instruction wire.
-        const title = seedPromptRef.current.trim().slice(0, 60) || categoryLabel(category);
-        const project = await ensureProject(
-          projectId,
-          cwd ?? "",
-          title,
-          category,
-          codebasePathRef.current,
-        );
-        cwd = project.workdir;
-        resolvedWorkdirRef.current = cwd;
-        ensuredRef.current = true;
-        onResolveWorkdir(cwd);
-      } catch (e) {
-        rearmStep();
-        unwindSkills();
-        prefillInflightRef.current = false;
-        updateLastAssistant((m) => ({ ...m, streaming: false, error: String(e) }));
-        return;
-      }
-    }
-    if (!cwd) {
-      rearmStep();
-      unwindSkills();
-      prefillInflightRef.current = false;
-      updateLastAssistant((m) => ({ ...m, streaming: false, error: "작업 폴더를 확인할 수 없습니다." }));
-      return;
-    }
+    const nextMessages = mutateMessages((prev) => [...prev, user, assistant]);
 
     // Persist the codebase path onto the manifest once known — the folder
     // answer usually arrives after `ensure_project` already ran (on the hidden
@@ -660,8 +699,9 @@ export function ChatPanel({
           model: model === "default" ? null : model,
           sessionId: useSession ? sessionIdRef.current : null,
           resume: useSession ? resumeRef.current : false,
-          // Every turn: claude's --add-dir is per-invocation (codebase + skill
-          // resource folders); other agents ignore it (prompt mentions remain).
+          // Every turn: claude maps these to --add-dir, gemini/aipro to
+          // --include-directories (codebase + skill resource folders, D52);
+          // codex is full-access, plain agents rely on the prompt mentions.
           extraDirs: [
             ...(codebasePathRef.current ? [codebasePathRef.current] : []),
             ...skillDirsRef.current,
@@ -680,6 +720,7 @@ export function ChatPanel({
       setStreaming(false);
       if (!isPrefill) persist();
     }
+    return true; // turn handled (spawned, or its failure surfaced in the chat)
   };
 
   const stop = () => {
@@ -740,28 +781,46 @@ export function ChatPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Guards the two nonce effects below against re-entry: send() is async and
+  // toggles `streaming` (a dep) mid-flight, so an effect re-run could otherwise
+  // double-fire the same turn before its nonce is consumed.
+  const nonceSendInflightRef = useRef(false);
+
   // Send requirements-form answers as the first work turn (nonce-guarded, once
   // each). Folds the original launcher request into the wire as context; this
   // turn is where the category skill + first workflow step get injected.
+  // The nonce is only consumed when send() actually handled the turn — if the
+  // hidden prefill pass is still streaming, `streaming` in the deps retries the
+  // submission when it ends instead of silently dropping it (D55).
   useEffect(() => {
     if (!answerSubmission || answerSubmission.nonce === lastAnswerNonceRef.current) return;
-    lastAnswerNonceRef.current = answerSubmission.nonce;
-    lastAnswersWireRef.current = answerSubmission.wire; // feeds the RAG query
+    if (streaming || nonceSendInflightRef.current) return; // deps retry us later
+    const submission = answerSubmission;
+    lastAnswersWireRef.current = submission.wire; // feeds the RAG query
     const seed = seedPromptRef.current.trim();
-    const wire = seed ? `${answerSubmission.wire}\n\n원래 요청:\n${seed}` : answerSubmission.wire;
-    void send(wire, { display: seed || answerSubmission.display });
+    const wire = seed ? `${submission.wire}\n\n원래 요청:\n${seed}` : submission.wire;
+    nonceSendInflightRef.current = true;
+    void send(wire, { display: seed || submission.display }).then((handled) => {
+      nonceSendInflightRef.current = false;
+      if (handled) lastAnswerNonceRef.current = submission.nonce;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [answerSubmission]);
+  }, [answerSubmission, streaming]);
 
   // Fire a queued auto-advance turn once (a generative step's continuation).
   // Nonce-guarded like answerSubmission so the stream handler never calls send()
-  // from a stale closure.
+  // from a stale closure, and consumed only when the turn was handled (D55).
   useEffect(() => {
     if (!autoTurn || autoTurn.nonce === lastAutoNonceRef.current) return;
-    lastAutoNonceRef.current = autoTurn.nonce;
-    void send("", { display: autoTurn.display, system: true });
+    if (streaming || nonceSendInflightRef.current) return; // deps retry us later
+    const turn = autoTurn;
+    nonceSendInflightRef.current = true;
+    void send("", { display: turn.display, system: true }).then((handled) => {
+      nonceSendInflightRef.current = false;
+      if (handled) lastAutoNonceRef.current = turn.nonce;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoTurn]);
+  }, [autoTurn, streaming]);
 
   const availableAgents = useMemo(
     () => agents.filter((a) => detected[a.id]?.available),

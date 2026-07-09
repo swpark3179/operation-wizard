@@ -43,6 +43,11 @@ pub struct RagHit {
     pub score: Option<f64>,
 }
 
+/// Per-request timeout. Generous (D53): the search runs mid-turn as a workflow
+/// preflight and a slow corporate RAG backend timing out reads as a silently
+/// skipped step.
+const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Blocking HTTP client over the user's RAG service. Construct on a worker
 /// thread only — `reqwest::blocking` must never run on the IPC thread.
 pub struct RagClient {
@@ -61,7 +66,7 @@ impl RagClient {
             return Err("RAG endpoint가 설정되지 않았습니다 — 지식 화면에서 등록해 주세요".into());
         }
         let http = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(HTTP_TIMEOUT)
             .danger_accept_invalid_certs(allow_invalid_certs)
             .build()
             .map_err(|e| e.to_string())?;

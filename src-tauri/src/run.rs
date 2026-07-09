@@ -89,8 +89,8 @@ pub struct RunArgs {
     #[serde(default)]
     pub resume: Option<bool>,
     /// Extra readable directories beyond `cwd` (codebase path + armed skill
-    /// resource folders). Passed every turn — claude's `--add-dir` is
-    /// per-invocation. Non-claude agents ignore it (see `RunCtx.extra_dirs`).
+    /// resource folders). Passed every turn — claude maps each to `--add-dir`,
+    /// gemini/aipro to `--include-directories` (see `RunCtx.extra_dirs`, D52).
     #[serde(default)]
     pub extra_dirs: Vec<String>,
 }
@@ -107,14 +107,14 @@ pub struct RunRegistry {
     runs: Mutex<HashMap<String, RunHandle>>,
 }
 
-/// Turn a tool-result `content` (string, or array of `{type:text,text}`) into a
-/// single display string.
+/// Turn a tool-result `content` (string, or array of `{type:text,text}` parts /
+/// bare strings) into a single display string.
 fn stringify_tool_content(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(arr)) => arr
             .iter()
-            .filter_map(|b| b.get("text").and_then(|x| x.as_str()))
+            .filter_map(|b| b.as_str().or_else(|| b.get("text").and_then(|x| x.as_str())))
             .collect::<Vec<_>>()
             .join("\n"),
         Some(Value::Null) | None => String::new(),
@@ -151,7 +151,13 @@ pub fn parse_claude_stream_line(line: &str) -> Vec<RunEvent> {
         }
         "assistant" => {
             let mut out = vec![];
-            if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) {
+            // Defensive: `content` is normally an array of blocks, but accept a
+            // bare string too so a shape drift can't silently drop the reply.
+            if let Some(t) = v.pointer("/message/content").and_then(|c| c.as_str()) {
+                if !t.is_empty() {
+                    out.push(RunEvent::TextDelta { delta: t.to_string() });
+                }
+            } else if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) {
                 for block in content {
                     match block.get("type").and_then(|x| x.as_str()) {
                         Some("text") => {
@@ -334,10 +340,11 @@ pub fn parse_gemini_event_line(line: &str) -> Vec<RunEvent> {
         }],
         "message" => {
             if v.get("role").and_then(|x| x.as_str()) == Some("assistant") {
-                if let Some(c) = v.get("content").and_then(|x| x.as_str()) {
-                    if !c.is_empty() {
-                        return vec![RunEvent::TextDelta { delta: c.to_string() }];
-                    }
+                // `content` is a plain string on current CLIs, but some builds
+                // emit an array of parts — flatten instead of dropping the reply.
+                let c = stringify_tool_content(v.get("content"));
+                if !c.is_empty() {
+                    return vec![RunEvent::TextDelta { delta: c }];
                 }
             }
             vec![]
@@ -398,6 +405,26 @@ pub fn parse_gemini_event_line(line: &str) -> Vec<RunEvent> {
     }
 }
 
+/// Read `reader` line-by-line, decoding each line lossily: an invalid UTF-8
+/// byte becomes U+FFFD instead of aborting the stream (`BufRead::lines` errors
+/// out, which used to drop the rest of the agent's output — the reply after one
+/// bad byte was lost while the run still ended "succeeded"). Stops on EOF or a
+/// real I/O error. Trailing `\r`/`\n` are stripped from each line.
+fn stream_lines<R: BufRead>(mut reader: R, mut on_line: impl FnMut(&str)) {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buf);
+                on_line(line.trim_end_matches(['\r', '\n']));
+            }
+            Err(_) => break, // real I/O error (UTF-8 can no longer error here)
+        }
+    }
+}
+
 /// Start an agent run. Resolves the binary, spawns the child on a worker thread,
 /// and returns the new run id immediately; events stream over `on_event` until a
 /// terminal `End`. The slow work (child I/O) never touches the IPC thread.
@@ -440,8 +467,12 @@ pub fn run_agent(
     let mut cmd = crate::exec::command_for(&resolved.path, &built);
     cmd.current_dir(&args.cwd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Merge the spec's env over the inherited one, but never clobber a value
+    // the user set themselves (e.g. their own BASH_*_TIMEOUT_MS — D53).
     for (k, v) in run.env {
-        cmd.env(k, v);
+        if std::env::var_os(k).is_none() {
+            cmd.env(k, v);
+        }
     }
     if run.prompt_via_stdin {
         cmd.stdin(Stdio::piped());
@@ -500,44 +531,38 @@ pub fn run_agent(
             }
         }
 
-        // Drain stderr on its own thread (avoids a full-pipe deadlock).
+        // Drain stderr on its own thread (avoids a full-pipe deadlock). Decoded
+        // lossily — `read_to_string` fails wholesale on one invalid UTF-8 byte.
         let err_handle = stderr.map(|mut e| {
             std::thread::spawn(move || {
-                let mut s = String::new();
-                let _ = e.read_to_string(&mut s);
-                s
+                let mut buf = Vec::new();
+                let _ = e.read_to_end(&mut buf);
+                String::from_utf8_lossy(&buf).into_owned()
             })
         });
 
-        // Stream stdout line-by-line.
+        // Stream stdout line-by-line (lossy — see `stream_lines`).
         if let Some(out) = stdout {
-            let reader = BufReader::new(out);
-            for line in reader.lines() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(_) => break,
-                };
-                match fmt {
-                    StreamFormat::ClaudeStreamJson => {
-                        for ev in parse_claude_stream_line(&line) {
-                            let _ = on_event.send(ev);
-                        }
-                    }
-                    StreamFormat::CodexJson => {
-                        for ev in parse_codex_event_line(&line) {
-                            let _ = on_event.send(ev);
-                        }
-                    }
-                    StreamFormat::GeminiJson => {
-                        for ev in parse_gemini_event_line(&line) {
-                            let _ = on_event.send(ev);
-                        }
-                    }
-                    StreamFormat::Plain => {
-                        let _ = on_event.send(RunEvent::Stdout { chunk: format!("{line}\n") });
+            stream_lines(BufReader::new(out), |line| match fmt {
+                StreamFormat::ClaudeStreamJson => {
+                    for ev in parse_claude_stream_line(line) {
+                        let _ = on_event.send(ev);
                     }
                 }
-            }
+                StreamFormat::CodexJson => {
+                    for ev in parse_codex_event_line(line) {
+                        let _ = on_event.send(ev);
+                    }
+                }
+                StreamFormat::GeminiJson => {
+                    for ev in parse_gemini_event_line(line) {
+                        let _ = on_event.send(ev);
+                    }
+                }
+                StreamFormat::Plain => {
+                    let _ = on_event.send(RunEvent::Stdout { chunk: format!("{line}\n") });
+                }
+            });
         }
 
         // stdout is closed → the child is exiting (or was killed). `wait` returns
@@ -787,5 +812,52 @@ mod tests {
             [RunEvent::Status { label, .. }] => assert!(label.starts_with("warning")),
             other => panic!("expected Status warning, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn gemini_assistant_array_content_is_flattened() {
+        // Part-array content (some CLI builds) must not drop the reply.
+        let evs = parse_gemini_event_line(
+            r#"{"type":"message","role":"assistant","content":[{"type":"text","text":"안녕"},"world"]}"#,
+        );
+        assert_eq!(evs, vec![RunEvent::TextDelta { delta: "안녕\nworld".into() }]);
+        // Empty array → nothing (no empty TextDelta).
+        assert!(parse_gemini_event_line(r#"{"type":"message","role":"assistant","content":[]}"#)
+            .is_empty());
+    }
+
+    #[test]
+    fn claude_assistant_bare_string_content_is_text() {
+        let evs = parse_claude_stream_line(
+            r#"{"type":"assistant","message":{"content":"평문 응답"}}"#,
+        );
+        assert_eq!(evs, vec![RunEvent::TextDelta { delta: "평문 응답".into() }]);
+    }
+
+    // ── lossy line streaming ──────────────────────────────────────────────────
+
+    #[test]
+    fn stream_lines_survives_invalid_utf8() {
+        // One bad byte mid-stream must not abort the remaining lines
+        // (`BufRead::lines` errors out and previously dropped the whole tail).
+        let data: Vec<u8> = [
+            &b"first\n"[..],
+            &[0x66, 0x6f, 0xFF, 0x6f, b'\n'][..], // "fo<invalid>o"
+            &b"last"[..],                          // no trailing newline
+        ]
+        .concat();
+        let mut lines = Vec::new();
+        stream_lines(std::io::Cursor::new(data), |l| lines.push(l.to_string()));
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "first");
+        assert_eq!(lines[1], "fo\u{FFFD}o");
+        assert_eq!(lines[2], "last");
+    }
+
+    #[test]
+    fn stream_lines_strips_crlf() {
+        let mut lines = Vec::new();
+        stream_lines(std::io::Cursor::new(&b"a\r\nb\n"[..]), |l| lines.push(l.to_string()));
+        assert_eq!(lines, vec!["a", "b"]);
     }
 }
