@@ -10,11 +10,140 @@ mod resolve;
 mod run;
 mod settings;
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde::Serialize;
 use tauri::Manager;
 
 use detect::DetectedAgent;
 use settings::{ConfluenceConfig, RagConfig, Settings, SkillDef, StepDef};
+
+// ---------------------------------------------------------------------------
+// Boot diagnostics (D56). In release builds `windows_subsystem = "windows"`
+// means a startup panic has no console to print to — the process just
+// vanishes. These helpers make that failure diagnosable: every boot error is
+// appended to a log file under the app's home root, and (on Windows, while
+// still booting) surfaced to the user via a best-effort message box.
+// ---------------------------------------------------------------------------
+
+/// True until the Tauri event loop reports `RunEvent::Ready`. Confines the
+/// failure dialog to boot-time death; post-boot worker panics only log.
+static BOOT_PHASE: AtomicBool = AtomicBool::new(true);
+
+/// `~/.operation-wizard/startup-error.log`, using the same home-root
+/// convention as `projects.rs`/`knowledge.rs`. The Tauri config dir is not an
+/// option here: it needs an `AppHandle`, which does not exist when the builder
+/// itself fails. Falls back to the temp dir if no home is resolvable.
+fn startup_log_path() -> PathBuf {
+    match std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+        Ok(home) => PathBuf::from(home)
+            .join(".operation-wizard")
+            .join("startup-error.log"),
+        Err(_) => std::env::temp_dir().join("operation-wizard-startup-error.log"),
+    }
+}
+
+/// Append one timestamped line to the log. Every error is swallowed —
+/// diagnostics must never become a second crash.
+fn append_startup_log(path: &Path, msg: &str) {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(
+            f,
+            "[{}] operation-wizard v{} — {}",
+            utc_timestamp(),
+            env!("CARGO_PKG_VERSION"),
+            msg
+        );
+    }
+}
+
+/// Log a boot/runtime diagnostic to `startup-error.log` (best-effort).
+pub(crate) fn log_startup_error(msg: &str) {
+    append_startup_log(&startup_log_path(), msg);
+}
+
+/// Zero-dep `YYYY-MM-DD HH:MM:SS Z` from the system clock (civil-from-days,
+/// Howard Hinnant's algorithm) — avoids pulling in `chrono` for one line.
+fn utc_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format_utc(secs)
+}
+
+fn format_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if mo <= 2 { 1 } else { 0 };
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02}Z")
+}
+
+/// Route panics through the log (and, during boot, the failure dialog) before
+/// delegating to the default hook so dev builds still print to stderr.
+fn install_startup_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic payload".into());
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown location".into());
+        let msg = format!("panic at {location}: {payload}");
+        log_startup_error(&msg);
+        if BOOT_PHASE.load(Ordering::Relaxed) {
+            show_boot_failure_dialog(&msg);
+        }
+        default_hook(info);
+    }));
+}
+
+/// Best-effort native alert for a boot failure. PowerShell keeps this at zero
+/// new dependencies (mshta is a corporate-blocked LOLBin, `rfd`/`windows-sys`
+/// would be new crates, and the dialog plugin needs the very `AppHandle` we
+/// failed to build). `exec::command_for` applies CREATE_NO_WINDOW, so only the
+/// WPF message box is visible. The log is always written first — if PowerShell
+/// is blocked this silently does nothing and the log remains the diagnostic.
+#[cfg(windows)]
+fn show_boot_failure_dialog(detail: &str) {
+    let detail: String = detail.chars().take(300).collect::<String>().replace(['\r', '\n'], " ");
+    let text = format!(
+        "Operation Wizard를 시작하지 못했습니다.\n\n가장 흔한 원인은 Microsoft Edge WebView2 런타임 부재/손상입니다. WebView2 런타임을 설치(복구)한 뒤 다시 실행해 주세요.\n\n오류: {detail}\n로그: {}",
+        startup_log_path().display()
+    );
+    // PowerShell single-quoted string: only `'` needs escaping (doubled).
+    let script = format!(
+        "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('{}','Operation Wizard','OK','Error')",
+        text.replace('\'', "''")
+    );
+    let mut cmd = exec::command_for(
+        "powershell.exe",
+        &["-NoProfile", "-NonInteractive", "-Command", script.as_str()],
+    );
+    let _ = cmd.status();
+}
+
+#[cfg(not(windows))]
+fn show_boot_failure_dialog(_detail: &str) {}
 
 /// Registry metadata for one agent. The frontend renders one card per entry,
 /// in registry order.
@@ -156,7 +285,19 @@ fn set_rag_config(app: tauri::AppHandle, config: Option<RagConfig>) -> Result<Se
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    install_startup_panic_hook();
+
+    // Debug-only escape hatch to exercise the failure path end-to-end
+    // (log line + dialog + exit) without breaking a real WebView2 runtime.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("OW_SIMULATE_BOOT_FAILURE").is_some() {
+        let msg = "simulated boot failure (OW_SIMULATE_BOOT_FAILURE)";
+        log_startup_error(msg);
+        show_boot_failure_dialog(msg);
+        std::process::exit(1);
+    }
+
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(run::RunRegistry::default())
@@ -188,6 +329,55 @@ pub fn run() {
             confluence::probe_confluence,
             rag::rag_search
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        // `build` + `run` split (instead of `.run(...).expect(...)`): webview /
+        // window creation failures — above all a missing or broken WebView2
+        // runtime — surface here as a typed `Err` we can log and explain,
+        // instead of an invisible panic in a console-less release build.
+        .build(tauri::generate_context!());
+
+    match app {
+        Ok(app) => app.run(|_handle, event| {
+            if matches!(event, tauri::RunEvent::Ready) {
+                BOOT_PHASE.store(false, Ordering::Relaxed);
+            }
+        }),
+        Err(e) => {
+            let msg = format!("failed to start: {e}");
+            log_startup_error(&msg);
+            show_boot_failure_dialog(&msg);
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_utc_known_epochs() {
+        assert_eq!(format_utc(0), "1970-01-01 00:00:00Z");
+        // Leap day of a century leap year.
+        assert_eq!(format_utc(951_782_400), "2000-02-29 00:00:00Z");
+        assert_eq!(format_utc(1_700_000_000), "2023-11-14 22:13:20Z");
+    }
+
+    #[test]
+    fn append_startup_log_appends_lines() {
+        let dir = std::env::temp_dir().join("ow-lib-test-startup-log");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("startup-error.log");
+
+        append_startup_log(&path, "first");
+        append_startup_log(&path, "second");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+        assert!(lines[0].ends_with("— first"));
+        assert!(lines[1].ends_with("— second"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

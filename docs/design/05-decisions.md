@@ -650,3 +650,43 @@
   ④ **파서 방어**: gemini/aipro `message.content`가 파트 배열이면 통째로 드롭되던 것을 평탄화해 수용하고,
   claude `message.content`가 bare string인 경우도 수용(`stringify_tool_content`가 배열 내 bare string 지원).
 - **근거**: 사용자 보고 두 증상(응답 소실·자동 진행 멈춤)의 코드 원인을 모두 제거. 신규 의존성 0.
+
+---
+
+### D56. 기동 안정성 패키지: 부트 진단 + 설정 백업 + poison 내성 + ErrorBoundary
+- **결정**: 기동(부팅)·초기 로드 실패가 **무음으로 사라지거나 무음으로 망가지는** 4가지 경로를 보강한다.
+  **신규 Cargo/npm 의존성 0.**
+  ① **부트 진단(lib.rs)**: 유일한 부팅 패닉 지점이던 `.run(ctx).expect(...)`를 **`build()` + `app.run()`
+  분리**로 바꾼다 — WebView2 런타임 부재/손상 등 웹뷰 생성 실패가 release(`windows_subsystem="windows"`,
+  콘솔 없음)에서 "더블클릭해도 아무 일 없음"으로 증발하던 것을, 타입 있는 `Err`로 받아 처리한다.
+  `run()` 첫 문장에서 **panic hook**을 설치해 모든 패닉을 로그로 남기고(기존 훅 위임으로 dev stderr 유지),
+  실패는 `%USERPROFILE%\.operation-wizard\startup-error.log`(홈 루트 관례 재사용 — config_dir은 AppHandle
+  없이는 해석 불가; fallback `HOME`→temp)로 기록한 뒤 **PowerShell 메시지박스**(`Add-Type
+  PresentationFramework; MessageBox`)로 한글 안내(원인=WebView2 + 로그 경로)를 띄운다.
+  `exec::command_for` 경유라 콘솔 깜빡임 없음. 다이얼로그는 `BOOT_PHASE`(AtomicBool,
+  `RunEvent::Ready`에서 해제) 동안만 — 부팅 후 워커 패닉은 로그만(다이얼로그 스팸 방지). 타임스탬프는
+  zero-dep civil-from-days 변환. debug 빌드 한정 `OW_SIMULATE_BOOT_FAILURE` env로 실패 경로를 리허설한다.
+  ② **설정 파손 백업(settings.rs)**: `load()`가 파손 JSON을 `unwrap_or_default()`로 무음 초기화 →
+  다음 save가 사용자 설정(에이전트 경로/스킬/워크플로우/RAG/Confluence) 전체를 지우던 것을,
+  기본값 폴백 전에 원본을 **`settings.json.corrupt`로 보존**(keep-first: 이미 있으면 덮지 않음)한다.
+  ③ **RunRegistry poison 내성(run.rs)**: `.lock().unwrap()` 5곳을
+  `.unwrap_or_else(PoisonError::into_inner)`로 교체 — 워커 패닉 1회로 mutex가 영구 poison되어
+  Stop(cancel_run)과 실행 북키핑이 전부 패닉하던 것을 복구한다.
+  ④ **프론트 격리(신규 `ErrorBoundary`)**: 렌더 예외 1건이 React root 전체를 unmount(영구 백지 화면)하던
+  것을, **root 바운더리(main.tsx) + 뷰 단위 keyed 바운더리(App.tsx, `key={view}`)**로 격리한다(한 뷰
+  크래시에도 셸 생존, 뷰 이동=리마운트 복구; 폴백 = 다시 시도/앱 새로고침). 부트 로드
+  (`getSettings`/`listAgents`)는 `.catch(() => {})` 무음 삼킴 → **`Promise.allSettled` + 실패 배너**
+  (fixed 오버레이, 다시 시도=부트 effect 재실행)로 교체. `WorkspaceView`의 localStorage 접근 try/catch,
+  `AgentCard`의 `settings?.agents?.[..]` 방어 체이닝.
+- **근거**: 사내 잠긴 Windows 환경에서 가장 현실적인 부팅 실패(WebView2 부재)가 진단 불가능했고,
+  설정 파손은 조용한 전체 데이터 손실이었다. 모두 표준 라이브러리/기존 패턴만으로 해결된다.
+- **대안 기각(부팅 실패 안내)**: mshta VBScript — 사내 AppLocker/WDAC가 차단하는 대표 LOLBin.
+  msg.exe — SKU 편차. `tauri-plugin-dialog` — 실패 시점에 AppHandle이 없음. `rfd`/`windows-sys` 직접
+  의존 — 신규 의존성(단, `windows-sys`는 tauri 전이 의존이라 비용이 거의 0 — 에스컬레이션 경로로 명시).
+- **대안 기각(poison 처리)**: IngestRegistry식 `Err("poisoned")` 반환 — mutex는 한 번 poison되면 계속
+  poison이라 이후 모든 Stop/북키핑이 영구 실패하고, `wait()`·child kill 사이트는 Err 채널 자체가 없다.
+  보호 데이터(HashMap/Child)에 패닉 중단으로 깨질 invariant가 없어 `into_inner` 복구가 안전하다.
+- **대안 기각(백업 정책)**: 덮어쓰기 — `load()`는 커맨드마다 호출되어 "파손→save가 기본값 기록→재파손"
+  시 사용자 원본이 기본값으로 클로버됨. 타임스탬프 다중 백업 — 파일 누적 대비 이득 없음(단순성 우선).
+- **재검토 조건**: PowerShell이 차단된 환경 보고가 나오면 `windows-sys` `MessageBoxW`로 승격.
+  백업 다중 세대가 필요해지면 타임스탬프 백업으로 확장.

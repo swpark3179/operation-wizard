@@ -51,7 +51,7 @@
 
 | 모듈 | 책임 |
 |------|------|
-| `lib.rs` | Tauri 커맨드 정의·등록(`invoke_handler`), `AgentInfo`, 플러그인 초기화, `RunRegistry` managed state, 앱 실행 진입 |
+| `lib.rs` | Tauri 커맨드 정의·등록(`invoke_handler`), `AgentInfo`, 플러그인 초기화, `RunRegistry` managed state, 앱 실행 진입 + **부트 진단**(panic hook, `~/.operation-wizard/startup-error.log`, 부팅 실패 시 한글 안내 다이얼로그 — D56) |
 | `agents.rs` | 에이전트 정의(`AgentDef`)와 정적 레지스트리(`AGENT_DEFS`), `find`/`all`, 실행 스펙(`RunSpec`/`StreamFormat`/`RunCtx`) |
 | `resolve.rs` | 에이전트 def 기반으로 실행 파일의 실제 경로를 찾음 (우선순위 기반) |
 | `exec.rs` | `.cmd`/`.bat` shim 래핑 + `CREATE_NO_WINDOW` 커맨드 빌더(`command_for`) + 타임아웃 프로브(`run_capture`) |
@@ -69,7 +69,8 @@
 
 | 영역 | 파일 | 책임 |
 |------|------|------|
-| 진입/상태 | `App.tsx` | 뷰 전환(`home`/`agents`/`flows`/`knowledge`), 에이전트/탐지/설정 상태, 초기 로드 |
+| 진입/상태 | `App.tsx` | 뷰 전환(`home`/`agents`/`flows`/`knowledge`), 에이전트/탐지/설정 상태, 초기 로드(실패 시 **재시도 가능한 배너** — D56) |
+| 안정성 | `components/ErrorBoundary` | 렌더 오류 격리: root(main.tsx) + 뷰 단위 keyed 바운더리 — 백지 화면 대신 폴백/복구 UI (D56) |
 | IPC 래퍼 | `lib/api.ts` | `invoke()`·`Channel` 래퍼 (`listAgents`/`detectAgent`/`runAgent`/`cancelRun`/`listDir`/`readFile`/`pickFolder` + `ensureProject`/`setProjectCodebase`/`saveSession`/`listSessions`/`loadSession`/`listProjects` + `ragSearch`/`listKnowledge`/`saveKnowledge`/`deleteKnowledge`/`setRagConfig`/`setConfluenceConfig`/`startConfluenceIngest`/`cancelIngest`/`probeConfluence`) |
 | 타입 | `lib/types.ts` | 백엔드 serde 구조체의 TS 미러(`AgentInfo`/`RunEvent`/`RunArgs`/`FileEntry` + `ProjectMeta`/`ProjectSummary`/`SessionMeta`/`StoredSession` + `RagHit`/`IngestEvent`/`KnowledgeEntry`/`ConfluenceConfig`/`RagConfig`) + 진단 힌트 맵 |
 | 셸 | `components/AppShell, TopBar, NavRail` | 상단바(로고·제목, 폴더 표시 없음) + 좌측 내비레일(Home/Agents/Flows/지식) + 본문 |

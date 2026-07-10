@@ -239,7 +239,16 @@ fn file_path(config_dir: &Path) -> std::path::PathBuf {
 
 pub fn load(config_dir: &Path) -> Settings {
     let mut s: Settings = match fs::read_to_string(file_path(config_dir)) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(s) => s,
+            Err(_) => {
+                // Falling back to defaults means the next `save` rewrites the
+                // file — without a backup that silently destroys every agent
+                // path, skill, workflow and RAG/Confluence config (D56).
+                backup_corrupt(config_dir, &raw);
+                Settings::default()
+            }
+        },
         Err(_) => Settings::default(),
     };
     // Migrate the legacy `opencodeBin` field into the per-agent map.
@@ -249,6 +258,26 @@ pub fn load(config_dir: &Path) -> Settings {
             .or_insert(AgentConfig { custom_bin: Some(bin) });
     }
     s
+}
+
+/// Preserve an unparseable settings.json as `settings.json.corrupt`.
+/// Keep-first: `load` runs on every command invocation, and an overwrite
+/// policy would let a *second* corruption (of the defaults a later `save`
+/// wrote) clobber the only copy of the user's original data. Best-effort —
+/// this must never turn a degraded load into a failure.
+fn backup_corrupt(config_dir: &Path, raw: &str) {
+    let backup = config_dir.join("settings.json.corrupt");
+    if backup.exists() {
+        return;
+    }
+    if fs::write(&backup, raw).is_ok() {
+        // cfg-gated so unit tests exercising corrupt loads stay hermetic
+        // (log_startup_error writes under the real home directory).
+        #[cfg(not(test))]
+        crate::log_startup_error(
+            "settings.json is corrupt — backed up to settings.json.corrupt, defaults in effect",
+        );
+    }
 }
 
 pub fn save(config_dir: &Path, settings: &Settings) -> Result<(), String> {
@@ -464,5 +493,47 @@ mod tests {
         assert!(!raw.contains("\"rag\""));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn backs_up_corrupt_settings_keep_first() {
+        let root = temp_root("corrupt-backup");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let backup = root.join("settings.json.corrupt");
+
+        // Corrupt file: load degrades to defaults and preserves the raw bytes.
+        fs::write(root.join("settings.json"), "{ not json").unwrap();
+        let s = load(&root);
+        assert!(s.agent_custom_bin("opencode").is_none());
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "{ not json");
+
+        // Keep-first: a second corrupt load must not clobber the first backup.
+        fs::write(root.join("settings.json"), "\"still broken").unwrap();
+        let _ = load(&root);
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "{ not json");
+
+        // Recovery: a valid save/load roundtrip leaves the backup untouched.
+        let mut s = Settings::default();
+        s.set_agent_bin("claude", Some("C:\\bin\\claude.cmd".into()));
+        save(&root, &s).unwrap();
+        let loaded = load(&root);
+        assert_eq!(
+            loaded.agent_custom_bin("claude").as_deref(),
+            Some("C:\\bin\\claude.cmd")
+        );
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "{ not json");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn missing_file_creates_no_backup() {
+        let root = temp_root("missing-no-backup");
+        let _ = fs::remove_dir_all(&root);
+
+        let s = load(&root);
+        assert!(s.agent_custom_bin("opencode").is_none());
+        assert!(!root.join("settings.json.corrupt").exists());
     }
 }

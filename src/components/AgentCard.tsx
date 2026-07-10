@@ -262,7 +262,7 @@ export function AgentCard({
       {/* Custom binary path (formerly the standalone Settings view) */}
       <PathConfig
         info={info}
-        initialValue={settings?.agents[info.id]?.customBin ?? ""}
+        initialValue={settings?.agents?.[info.id]?.customBin ?? ""}
         onSave={onSave}
       />
     </div>
