@@ -75,6 +75,22 @@ cargo test --manifest-path src-tauri\Cargo.toml
   네이티브 인스톨러). gemini/aipro도 유사 증상이 있으면 각 CLI 업데이트.
 - 앱 측 코드 변경은 없다([05](05-decisions.md) D54 — hidden desktop 재작성은 기각).
 
+## 무반응 부팅(창이 안 뜸) 진단 (D56)
+
+release 빌드는 콘솔이 없어(`windows_subsystem = "windows"`) 부팅 실패가 화면에 나타나지 않는다.
+더블클릭해도 창이 뜨지 않으면:
+
+1. **`%USERPROFILE%\.operation-wizard\startup-error.log`를 확인한다.** 모든 부팅 실패·패닉이
+   타임스탬프/버전과 함께 기록된다(부팅 중 실패면 PowerShell 메시지박스로도 같은 안내가 뜬다).
+2. **가장 흔한 원인은 WebView2 런타임 부재/손상**이다. Windows 11은 내장이지만 손상될 수 있다 —
+   `winget install Microsoft.EdgeWebView2Runtime` 또는 오프라인 인스톨러(Evergreen Standalone)로
+   설치/복구한다(사내망 제약은 위 "사내망 제약" 절의 winget 안내 참조).
+3. debug 빌드에서는 `OW_SIMULATE_BOOT_FAILURE=1`로 실패 경로(로그+메시지박스+종료)를 리허설할 수 있다.
+
+**설정이 초기화된 경우**: `settings.json` 파손 시 앱은 기본값으로 동작하되 원본을
+`%APPDATA%\com.shi.operationwizard\settings.json.corrupt`로 보존한다(keep-first — D56).
+필요한 값을 복사해 복구한 뒤 `.corrupt` 파일을 지우면 된다.
+
 ## CI 릴리즈 워크플로우 (GitHub Actions)
 
 `.github/workflows/release.yml`("Release")은 **Windows 단독 실행파일(exe, 설치파일 아님)**을

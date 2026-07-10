@@ -506,10 +506,18 @@ pub fn run_agent(
         let canceled = Arc::new(AtomicBool::new(false));
         let child_arc = Arc::new(Mutex::new(child));
         let reg = app2.state::<RunRegistry>();
-        reg.runs.lock().unwrap().insert(
-            run_id2.clone(),
-            RunHandle { child: child_arc.clone(), canceled: canceled.clone() },
-        );
+        // Poison tolerance (D56): recover the guard with `into_inner` instead
+        // of panicking. A mutex stays poisoned forever after one panic —
+        // erroring out here (IngestRegistry-style) would permanently break
+        // Stop and worker bookkeeping, and the map/child hold no invariant a
+        // mid-panic interruption can corrupt. Same at every lock site below.
+        reg.runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                run_id2.clone(),
+                RunHandle { child: child_arc.clone(), canceled: canceled.clone() },
+            );
 
         // Deliver the prompt. Claude uses one stream-json user message, then we
         // close stdin to signal end-of-turn.
@@ -567,13 +575,19 @@ pub fn run_agent(
 
         // stdout is closed → the child is exiting (or was killed). `wait` returns
         // promptly; the lock is held only briefly.
-        let status = child_arc.lock().unwrap().wait();
+        let status = child_arc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .wait();
         let code = status.as_ref().ok().and_then(|s| s.code());
         let succeeded = matches!(status, Ok(ref s) if s.success());
         let was_canceled = canceled.load(Ordering::Relaxed);
         let stderr_str = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
 
-        reg.runs.lock().unwrap().remove(&run_id2);
+        reg.runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&run_id2);
 
         let final_status = if was_canceled {
             "canceled"
@@ -601,9 +615,16 @@ pub fn run_agent(
 /// follows on the worker thread once stdout closes).
 #[tauri::command]
 pub fn cancel_run(registry: tauri::State<RunRegistry>, run_id: String) -> Result<(), String> {
-    if let Some(h) = registry.runs.lock().unwrap().get(&run_id) {
+    let runs = registry
+        .runs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(h) = runs.get(&run_id) {
         h.canceled.store(true, Ordering::Relaxed);
-        let mut child = h.child.lock().unwrap();
+        let mut child = h
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // On Windows the agent runs as a node grandchild under a `.cmd` shim, so
         // killing the direct child (cmd.exe) leaves it running. `taskkill /T`
         // terminates the entire tree.

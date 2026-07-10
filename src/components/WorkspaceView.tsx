@@ -28,7 +28,15 @@ const CHAT_MAX_WIDTH = 720;
 const CANVAS_MIN_WIDTH = 360;
 
 function initialChatWidth(): number {
-  const stored = Number(localStorage.getItem(CHAT_WIDTH_KEY));
+  // try/catch: localStorage access can throw (SecurityError) in a restricted
+  // WebView2 — this runs in a useState initializer, so an uncaught throw
+  // would take down the workspace render (D56).
+  let stored = 0;
+  try {
+    stored = Number(localStorage.getItem(CHAT_WIDTH_KEY));
+  } catch {
+    // fall through to the default width
+  }
   return Number.isFinite(stored) && stored > 0
     ? Math.min(CHAT_MAX_WIDTH, Math.max(CHAT_MIN_WIDTH, Math.round(stored)))
     : 412;
@@ -196,7 +204,11 @@ export function WorkspaceView({
     if (!resizing) return;
     setResizing(false);
     setChatWidth((w) => {
-      localStorage.setItem(CHAT_WIDTH_KEY, String(w));
+      try {
+        localStorage.setItem(CHAT_WIDTH_KEY, String(w));
+      } catch {
+        // storage unavailable — the width still applies in-memory
+      }
       return w;
     });
   };
