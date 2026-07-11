@@ -4,9 +4,11 @@
 // mermaid (~1.5 MB) is dynamically imported so Vite code-splits it and it only
 // loads when the first diagram appears.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Check, Copy } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { copyText } from "../lib/clipboard";
 
 type MermaidModule = typeof import("mermaid").default;
 
@@ -64,6 +66,44 @@ function MermaidDiagram({ code }: { code: string }) {
   return <span className="ow-mermaid block" dangerouslySetInnerHTML={{ __html: svg }} />;
 }
 
+/** Code-block wrapper with a hover copy button. Mermaid fences render as
+ * diagrams (no meaningful text to copy), so the button hides for them. */
+function CodeBlock({ children }: { children: ReactNode }) {
+  const preRef = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+  const [isDiagram, setIsDiagram] = useState(false);
+
+  useEffect(() => {
+    setIsDiagram(!!preRef.current?.querySelector(".ow-mermaid"));
+  }, [children]);
+
+  const copy = async () => {
+    const ok = await copyText(preRef.current?.innerText ?? "");
+    if (!ok) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <div className="group relative">
+      {!isDiagram && (
+        <button
+          type="button"
+          onClick={() => void copy()}
+          title="코드 복사"
+          className={
+            "absolute right-1.5 top-1.5 z-10 grid h-6 w-6 place-items-center rounded-md border border-line bg-panel text-ink-soft shadow-xs transition-opacity hover:text-ink " +
+            (copied ? "opacity-100" : "opacity-0 group-hover:opacity-100")
+          }
+        >
+          {copied ? <Check size={12} className="text-ok" /> : <Copy size={12} />}
+        </button>
+      )}
+      <pre ref={preRef}>{children}</pre>
+    </div>
+  );
+}
+
 /** Rendered markdown document (styling from `.markdown-body` in global.css). */
 export function MarkdownView({ content }: { content: string }) {
   return (
@@ -71,6 +111,9 @@ export function MarkdownView({ content }: { content: string }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          pre({ children }) {
+            return <CodeBlock>{children}</CodeBlock>;
+          },
           code({ className, children, ...props }) {
             const lang = /language-(\w+)/.exec(className ?? "")?.[1];
             if (lang === "mermaid") {

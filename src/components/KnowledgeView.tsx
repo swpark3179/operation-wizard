@@ -14,6 +14,7 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import {
   deleteKnowledge,
   listKnowledge,
@@ -23,6 +24,7 @@ import {
   setConfluenceConfig,
   setRagConfig,
 } from "../lib/api";
+import { ragUserError } from "../lib/foundation";
 import { startIngest, stopIngest, useIngestState } from "../lib/ingest";
 import { sessionTime } from "./workspace";
 import { useAutoGrow } from "../lib/useAutoGrow";
@@ -86,7 +88,8 @@ function RagSection({
       const hits = await ragSearch("연결 테스트", 1);
       setProbe({ ok: true, msg: `연결됨 (${hits.length}건 응답)` });
     } catch (e) {
-      setProbe({ ok: false, msg: String(e) });
+      // The rag.rs stub's developer message is rephrased for end users (D57).
+      setProbe({ ok: false, msg: ragUserError(String(e)) });
     }
   };
 
@@ -451,6 +454,15 @@ function KnowledgeCard({
   };
 
   const remove = async () => {
+    // Deleting a saved entry is immediate and has no undo — confirm first
+    // (D57). Unsaved drafts (never persisted) are dropped without asking.
+    if (entry.updatedAt > 0) {
+      const ok = await ask(
+        `'${title.trim() || "(제목 없음)"}' 지식 항목을 삭제할까요?\n삭제하면 되돌릴 수 없습니다.`,
+        { title: "지식 삭제", kind: "warning" },
+      );
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       await deleteKnowledge(entry.id);

@@ -25,9 +25,15 @@ function FolderAnswer({
   onChange: (v: string) => void;
   disabled?: boolean;
 }) {
+  const [error, setError] = useState<string | null>(null);
   const choose = async () => {
-    const folder = await pickFolder();
-    if (folder) onChange(folder);
+    try {
+      const folder = await pickFolder();
+      if (folder) onChange(folder);
+      setError(null);
+    } catch (e) {
+      setError(`폴더 선택에 실패했습니다 — ${String(e)}`);
+    }
   };
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -40,6 +46,7 @@ function FolderAnswer({
         <FolderOpen size={14} className="text-accent" />
         {value ? "다른 폴더 선택…" : "폴더 선택…"}
       </button>
+      {error && <span className="w-full text-[11.5px] text-bad">{error}</span>}
       {value && (
         <span
           title={value}

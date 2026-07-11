@@ -1,6 +1,17 @@
 import { useState } from "react";
-import { Sparkles, Wrench, Brain, ChevronRight, FilePlus2 } from "lucide-react";
+import {
+  Sparkles,
+  Wrench,
+  Brain,
+  Check,
+  ChevronRight,
+  Copy,
+  FilePlus2,
+  RotateCcw,
+} from "lucide-react";
+import { MarkdownView } from "./Markdown";
 import { errorHint, type ChatMessage, type TimelineEvent } from "./workspace";
+import { copyText } from "../lib/clipboard";
 
 function ToolRow({ ev }: { ev: Extract<TimelineEvent, { kind: "toolUse" }> }) {
   const [open, setOpen] = useState(false);
@@ -63,24 +74,58 @@ function Timeline({ events }: { events: TimelineEvent[] }) {
 
 export function AssistantMessage({
   message,
+  speaker,
   onNewSession,
+  onRetry,
 }: {
   message: ChatMessage;
+  /** The running agent's display name (e.g. "Claude Code"); the header shows it
+   * so the conversation log identifies who is speaking (D57). */
+  speaker?: string;
   /** Offer an inline "new session" recovery on failed turns. */
   onNewSession?: () => void;
+  /** Re-send the failed turn in the SAME session (primary recovery, D57).
+   * Only passed for the last message of the conversation. */
+  onRetry?: () => void;
 }) {
   const [showThinking, setShowThinking] = useState(false);
+  const [copied, setCopied] = useState(false);
   const empty =
     !message.content && !message.thinking && message.events.length === 0 && !message.error;
   const hint = errorHint(message.error);
 
+  const copy = async () => {
+    const ok = await copyText(message.content);
+    if (!ok) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
   return (
-    <div className="flex gap-2.5">
+    <div className="group flex gap-2.5">
       <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-accent text-white">
         <Sparkles size={15} />
       </span>
       <div className="min-w-0 flex-1">
-        <div className="mb-1 text-[11.5px] font-semibold text-ink-soft">Operation Wizard</div>
+        <div className="mb-1 flex items-center gap-2">
+          <span className="text-[11.5px] font-semibold text-ink-soft">
+            {speaker || "Operation Wizard"}
+          </span>
+          <span className="flex-1" />
+          {message.content && !message.streaming && (
+            <button
+              type="button"
+              onClick={() => void copy()}
+              title="응답 복사"
+              className={
+                "grid h-5 w-5 place-items-center rounded text-ink-faint transition-opacity hover:bg-subtle hover:text-ink " +
+                (copied ? "opacity-100" : "opacity-0 group-hover:opacity-100")
+              }
+            >
+              {copied ? <Check size={12} className="text-ok" /> : <Copy size={12} />}
+            </button>
+          )}
+        </div>
 
         {message.thinking && (
           <div className="mb-2">
@@ -100,11 +145,16 @@ export function AssistantMessage({
           </div>
         )}
 
-        {message.content && (
-          <div className="whitespace-pre-wrap text-[13.5px] leading-[1.55] text-ink">
-            {message.content}
-          </div>
-        )}
+        {message.content &&
+          // Plain text while streaming (partial markdown renders jumpily);
+          // full markdown once the turn completes (D57).
+          (message.streaming ? (
+            <div className="whitespace-pre-wrap text-[13.5px] leading-[1.55] text-ink">
+              {message.content}
+            </div>
+          ) : (
+            <MarkdownView content={message.content} />
+          ))}
 
         <Timeline events={message.events} />
 
@@ -112,15 +162,29 @@ export function AssistantMessage({
           <div className="mt-2 rounded-lg border border-bad-border bg-bad-bg px-2.5 py-2 text-[12.5px] leading-[1.5] text-bad">
             <div className="whitespace-pre-wrap break-words">{message.error}</div>
             {hint && <div className="mt-1.5 text-ink-muted">{hint}</div>}
-            {onNewSession && (
-              <button
-                type="button"
-                onClick={onNewSession}
-                className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-line bg-panel px-2 py-1 text-[11.5px] font-medium text-ink-muted transition-colors hover:bg-subtle"
-              >
-                <FilePlus2 size={13} />
-                새 세션으로 다시 시도
-              </button>
+            {(onRetry || onNewSession) && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                {onRetry && (
+                  <button
+                    type="button"
+                    onClick={onRetry}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-accent px-2 py-1 text-[11.5px] font-medium text-white transition-colors hover:bg-accent-strong"
+                  >
+                    <RotateCcw size={13} />
+                    다시 시도
+                  </button>
+                )}
+                {onNewSession && (
+                  <button
+                    type="button"
+                    onClick={onNewSession}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-line bg-panel px-2 py-1 text-[11.5px] font-medium text-ink-muted transition-colors hover:bg-subtle"
+                  >
+                    <FilePlus2 size={13} />
+                    새 세션으로 다시 시도
+                  </button>
+                )}
+              </div>
             )}
           </div>
         )}

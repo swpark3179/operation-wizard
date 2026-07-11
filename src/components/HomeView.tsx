@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { Sparkles, ArrowUp, ClipboardList, FolderOpen, X } from "lucide-react";
+import { Sparkles, ArrowUp, AlertTriangle, ClipboardList, FolderOpen, Loader2, X } from "lucide-react";
 import { CATEGORIES, sessionTime, type Category } from "./workspace";
 import { listProjects, loadSession, pickFolder } from "../lib/api";
 import { useAutoGrow } from "../lib/useAutoGrow";
-import type { ProjectSummary, StoredSession } from "../lib/types";
+import type { AgentInfo, DetectedAgent, ProjectSummary, StoredSession } from "../lib/types";
 
 /** Last path segment of a Windows/Unix path, for the folder chip. */
 function basename(p: string): string {
@@ -12,9 +12,17 @@ function basename(p: string): string {
 }
 
 export function HomeView({
+  agents,
+  detected,
+  onOpenAgents,
   onStart,
   onOpenSession,
 }: {
+  /** Detection registry/results for the no-agent onboarding banner (D57). */
+  agents: AgentInfo[];
+  detected: Record<string, DetectedAgent>;
+  /** Navigate to the Agents view (undetected-agent onboarding, D57). */
+  onOpenAgents?: () => void;
   /** Start a new project. `workdir` = a folder chosen on Home, or undefined → auto. */
   onStart: (category: Category, prompt: string, workdir?: string) => void;
   /** Open a recent project's latest session (adopts its id + resolved workdir
@@ -32,12 +40,25 @@ export function HomeView({
   // Optional folder for the project about to start (transient; reset each Home
   // visit). Unset → the new project runs in its own auto-created folder.
   const [chosenFolder, setChosenFolder] = useState<string | null>(null);
+  // Failures that used to be silently swallowed (project open, folder picker)
+  // now surface here (D57).
+  const [uiError, setUiError] = useState<string | null>(null);
+
+  // Agent detection rollup (D57): still detecting → subtle hint; every agent
+  // resolved but none available → onboarding banner (sending would only fail).
+  const detecting = agents.length === 0 || agents.some((a) => !detected[a.id]);
+  const noneAvailable =
+    !detecting && agents.length > 0 && agents.every((a) => !detected[a.id]?.available);
 
   const send = () => onStart("plan", prompt.trim(), chosenFolder ?? undefined);
 
   const chooseFolder = async () => {
-    const dir = await pickFolder();
-    if (dir) setChosenFolder(dir);
+    try {
+      const dir = await pickFolder();
+      if (dir) setChosenFolder(dir);
+    } catch (e) {
+      setUiError(`폴더 선택에 실패했습니다 — ${String(e)}`);
+    }
   };
 
   // All saved projects, newest activity first. Hide empty projects (a folder can
@@ -49,16 +70,19 @@ export function HomeView({
   }, []);
 
   // Open a project: open its latest session (the workspace adopts the project's
-  // id + resolved workdir), or start a fresh chat if it has none.
+  // id + resolved workdir), or start a fresh chat if it has none. A load
+  // failure stays on Home with a visible message instead of silently dropping
+  // into an unrelated empty chat (D57).
   const openProject = async (p: ProjectSummary) => {
+    setUiError(null);
     try {
       if (p.lastSessionId) {
         onOpenSession(await loadSession(p.id, p.lastSessionId), p.id, p.workdir, p.codebasePath);
       } else {
         onStart("plan", "");
       }
-    } catch {
-      onStart("plan", "");
+    } catch (e) {
+      setUiError(`프로젝트를 열지 못했습니다 — ${String(e)}`);
     }
   };
 
@@ -78,6 +102,48 @@ export function HomeView({
             업무 카테고리를 고르고 대화로 진행하세요. 첫 질문에서 요구사항을 함께 명확히 합니다.
           </p>
         </div>
+
+        {/* no-agent onboarding (D57) */}
+        {noneAvailable && (
+          <div className="mb-4 flex items-center gap-2 rounded-[12px] border border-line bg-warn-bg px-3.5 py-2.5 text-[12.5px] text-warn">
+            <AlertTriangle size={15} className="shrink-0" />
+            <span className="min-w-0 flex-1">
+              사용 가능한 CLI 에이전트가 없습니다. 대화를 시작해도 실행이 실패합니다 — 에이전트를
+              설치하거나 실행 파일 경로를 설정해 주세요.
+            </span>
+            {onOpenAgents && (
+              <button
+                type="button"
+                onClick={onOpenAgents}
+                className="shrink-0 rounded-md border border-line bg-panel px-2.5 py-1 font-medium text-ink-muted transition-colors hover:bg-subtle"
+              >
+                Agents에서 설정
+              </button>
+            )}
+          </div>
+        )}
+        {detecting && (
+          <div className="mb-4 flex items-center justify-center gap-1.5 text-[12px] text-ink-soft">
+            <Loader2 size={13} className="animate-spin" />
+            로컬 에이전트 탐지 중…
+          </div>
+        )}
+        {uiError && (
+          <div className="mb-4 flex items-center gap-2 rounded-[12px] border border-bad-border bg-bad-bg px-3.5 py-2.5 text-[12.5px] text-bad">
+            <AlertTriangle size={15} className="shrink-0" />
+            <span className="min-w-0 flex-1" title={uiError}>
+              {uiError}
+            </span>
+            <button
+              type="button"
+              onClick={() => setUiError(null)}
+              aria-label="닫기"
+              className="grid shrink-0 place-items-center rounded p-0.5 transition-opacity hover:opacity-70"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
 
         {/* prompt composer */}
         <div className="mb-3 rounded-[16px] border border-line-strong bg-panel px-4 pb-3 pt-3.5 shadow-md">

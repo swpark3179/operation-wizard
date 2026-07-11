@@ -13,6 +13,15 @@ function clip(text: string, max: number): string {
   return text.length > max ? text.slice(0, max) + " …(이하 생략)" : text;
 }
 
+/** Translate a raw RAG-adapter error into user-facing wording. The rag.rs
+ * stub's "미구현 — src-tauri/…를 채워 주세요" message is developer guidance; a
+ * non-developer user just needs to know the integration isn't wired up yet. */
+export function ragUserError(msg: string): string {
+  return msg.includes("미구현")
+    ? "이 빌드에는 RAG 연동 모듈이 아직 구성되지 않았습니다. 관리자(개발팀)에게 문의해 주세요."
+    : msg;
+}
+
 /** Build the RAG search query from the launcher prompt + option answers. */
 export function buildRagQuery(seed: string, answersWire: string): string {
   const combined = [seed.trim(), answersWire.trim()].filter(Boolean).join("\n");
