@@ -6,7 +6,7 @@
 // MermaidDiagram (same loader, same per-diagram failure fallback).
 
 import { useEffect, useState } from "react";
-import { Network, RefreshCw, X } from "lucide-react";
+import { Network, RefreshCw, X, ZoomIn, ZoomOut } from "lucide-react";
 import { MermaidDiagram } from "./Markdown";
 import { readFile } from "../lib/api";
 import {
@@ -44,7 +44,17 @@ export function DiagramGallery({
   const [items, setItems] = useState<DiagramItem[] | null>(null); // null = scanning
   const [sources, setSources] = useState(0);
   const [zoom, setZoom] = useState<DiagramItem | null>(null);
+  // Enlarge-modal magnification. CSS `zoom` (not transform) so the scaled
+  // diagram participates in layout and the scroll container tracks it.
+  const [scale, setScale] = useState(1);
   const [localNonce, setLocalNonce] = useState(0);
+
+  const openZoom = (item: DiagramItem) => {
+    setScale(1);
+    setZoom(item);
+  };
+  const zoomBy = (dir: 1 | -1) =>
+    setScale((s) => Math.min(4, Math.max(0.25, Math.round((s + dir * 0.25) * 100) / 100)));
 
   useEffect(() => {
     let cancelled = false;
@@ -138,7 +148,7 @@ export function DiagramGallery({
               <button
                 key={item.key}
                 type="button"
-                onClick={() => setZoom(item)}
+                onClick={() => openZoom(item)}
                 title="클릭하여 확대"
                 className="flex cursor-zoom-in flex-col gap-2 rounded-lg border border-line bg-panel p-3 text-left shadow-xs transition-colors hover:border-line-strong"
               >
@@ -161,28 +171,63 @@ export function DiagramGallery({
         </div>
       )}
 
-      {/* enlarge modal (backdrop click / X / Escape to close) */}
+      {/* enlarge modal (backdrop click / X / Escape to close): fills nearly the
+          whole window instead of hugging the diagram, with zoom controls. */}
       {zoom && (
         <div
-          className="fixed inset-0 z-50 grid place-items-center bg-ink/40 p-6"
+          className="fixed inset-0 z-50 flex bg-ink/40 p-4"
           onClick={() => setZoom(null)}
         >
           <div
-            className="relative max-h-full max-w-full overflow-auto rounded-xl border border-line-strong bg-panel p-6 shadow-lg"
+            className="flex h-full w-full flex-col overflow-hidden rounded-xl border border-line-strong bg-panel shadow-lg"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="mb-3 flex items-center gap-2 pr-8">
-              <span className="font-mono text-[12px] text-ink-soft">{zoom.label}</span>
+            {/* modal bar: source label + zoom controls + close */}
+            <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-panel px-3">
+              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink-soft">
+                {zoom.label}
+              </span>
+              <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-line">
+                <button
+                  type="button"
+                  onClick={() => zoomBy(-1)}
+                  title="축소"
+                  className="grid h-7 w-7 place-items-center text-ink-soft transition-colors hover:bg-subtle hover:text-ink"
+                >
+                  <ZoomOut size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScale(1)}
+                  title="원래 크기로"
+                  className="h-7 w-[52px] border-x border-line text-center font-mono text-[11.5px] text-ink-muted transition-colors hover:bg-subtle"
+                >
+                  {Math.round(scale * 100)}%
+                </button>
+                <button
+                  type="button"
+                  onClick={() => zoomBy(1)}
+                  title="확대"
+                  className="grid h-7 w-7 place-items-center text-ink-soft transition-colors hover:bg-subtle hover:text-ink"
+                >
+                  <ZoomIn size={14} />
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => setZoom(null)}
+                title="닫기"
+                className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink-soft transition-colors hover:bg-subtle hover:text-ink"
+              >
+                <X size={15} />
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => setZoom(null)}
-              title="닫기"
-              className="absolute right-3 top-3 grid h-7 w-7 place-items-center rounded-md text-ink-soft transition-colors hover:bg-subtle hover:text-ink"
-            >
-              <X size={15} />
-            </button>
-            <MermaidDiagram code={zoom.code} />
+            {/* diagram body: centered while it fits, scrollable once zoomed past */}
+            <div className="flex min-h-0 flex-1 overflow-auto bg-app">
+              <div className="m-auto p-6" style={{ zoom: scale }}>
+                <MermaidDiagram code={zoom.code} />
+              </div>
+            </div>
           </div>
         </div>
       )}

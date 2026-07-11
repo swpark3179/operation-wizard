@@ -164,6 +164,11 @@ export function setProjectCodebase(
   return invoke<ProjectMeta>("set_project_codebase", { projectId, codebasePath });
 }
 
+/** Rename an existing project (Home recent list inline edit). */
+export function setProjectTitle(projectId: string, title: string): Promise<ProjectMeta> {
+  return invoke<ProjectMeta>("set_project_title", { projectId, title });
+}
+
 /** Persist one session (project must already exist via {@link ensureProject}). */
 export function saveSession(projectId: string, session: StoredSession): Promise<void> {
   return invoke("save_session", { projectId, session });

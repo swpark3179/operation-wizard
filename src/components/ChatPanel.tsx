@@ -81,6 +81,8 @@ export function ChatPanel({
   onResolveWorkdir,
   category,
   seedPrompt,
+  initialAgentId,
+  initialModel,
   agents,
   detected,
   settings,
@@ -107,6 +109,10 @@ export function ChatPanel({
   onResolveWorkdir: (workdir: string) => void;
   category: Category;
   seedPrompt: string;
+  /** Agent/model picked in the Home composer (D60) — seeds a fresh chat's
+   * selection (still changeable before the first turn); null → auto default. */
+  initialAgentId?: string | null;
+  initialModel?: string | null;
   agents: AgentInfo[];
   detected: Record<string, DetectedAgent>;
   /** App settings: user-defined workflows/skills override the built-in
@@ -154,9 +160,14 @@ export function ChatPanel({
   const inputRef = useAutoGrow(input, 160);
   const [streaming, setStreaming] = useState(false);
   const [agentId, setAgentId] = useState<string>(
-    () => initialSession?.agentId ?? defaultAgentId(agents, detected),
+    () => initialSession?.agentId ?? initialAgentId ?? defaultAgentId(agents, detected),
   );
-  const [model, setModel] = useState<string>(() => initialSession?.model ?? "default");
+  const [model, setModel] = useState<string>(
+    () => initialSession?.model ?? initialModel ?? "default",
+  );
+  // A Home-picked agent is an explicit choice — the detection-sync effect below
+  // must not override it with the auto default (D60).
+  const agentPinnedRef = useRef(!!initialSession?.agentId || !!initialAgentId);
 
   const runIdRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(initialSession?.cliSessionId ?? null);
@@ -290,9 +301,10 @@ export function ChatPanel({
   }, []);
 
   // Keep the default agent in sync as detection results arrive (until the
-  // conversation starts — after that the agent is locked).
+  // conversation starts — after that the agent is locked). Skipped when the
+  // agent was explicitly picked (Home composer / loaded session / user select).
   useEffect(() => {
-    if (!started) setAgentId(defaultAgentId(agents, detected));
+    if (!started && !agentPinnedRef.current) setAgentId(defaultAgentId(agents, detected));
   }, [agents, detected, started]);
 
   // Reset session state whenever the (pre-conversation) agent changes: claude
@@ -1241,7 +1253,10 @@ export function ChatPanel({
         <div className="mb-2 flex items-center gap-2 text-[11.5px] text-ink-soft">
           <select
             value={agentId}
-            onChange={(e) => setAgentId(e.target.value)}
+            onChange={(e) => {
+              agentPinnedRef.current = true; // manual pick — stop auto-defaulting
+              setAgentId(e.target.value);
+            }}
             disabled={started}
             title={started ? "대화 중에는 에이전트를 바꿀 수 없습니다 (새 세션에서 변경)" : undefined}
             className="rounded-md border border-line bg-panel px-1.5 py-1 text-ink-muted outline-none disabled:opacity-60"

@@ -1,7 +1,18 @@
-import { useEffect, useState } from "react";
-import { Sparkles, ArrowUp, AlertTriangle, ClipboardList, FolderOpen, Loader2, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  ShieldCheck,
+  ArrowUp,
+  AlertTriangle,
+  Check,
+  ClipboardList,
+  FolderOpen,
+  Loader2,
+  Pencil,
+  X,
+} from "lucide-react";
+import { defaultAgentId } from "./ChatPanel";
 import { CATEGORIES, sessionTime, type Category } from "./workspace";
-import { listProjects, loadSession, pickFolder } from "../lib/api";
+import { listProjects, loadSession, pickFolder, setProjectTitle } from "../lib/api";
 import { useAutoGrow } from "../lib/useAutoGrow";
 import type { AgentInfo, DetectedAgent, ProjectSummary, StoredSession } from "../lib/types";
 
@@ -23,8 +34,16 @@ export function HomeView({
   detected: Record<string, DetectedAgent>;
   /** Navigate to the Agents view (undetected-agent onboarding, D57). */
   onOpenAgents?: () => void;
-  /** Start a new project. `workdir` = a folder chosen on Home, or undefined → auto. */
-  onStart: (category: Category, prompt: string, workdir?: string) => void;
+  /** Start a new project. `workdir` = a folder chosen on Home, or undefined →
+   * auto. `agentId`/`model` = the composer's picks, seeding the workspace
+   * ChatPanel (still changeable there before the first turn). */
+  onStart: (
+    category: Category,
+    prompt: string,
+    workdir?: string,
+    agentId?: string,
+    model?: string,
+  ) => void;
   /** Open a recent project's latest session (adopts its id + resolved workdir
    * + stored codebase path). */
   onOpenSession: (
@@ -44,13 +63,37 @@ export function HomeView({
   // now surface here (D57).
   const [uiError, setUiError] = useState<string | null>(null);
 
+  // Agent + model picked in the composer (start-anywhere with a chosen model).
+  // The default agent tracks detection results until the user picks one.
+  const [agentId, setAgentId] = useState(() => defaultAgentId(agents, detected));
+  const [model, setModel] = useState("default");
+  const agentTouchedRef = useRef(false);
+  // Inline project rename (Home recent list).
+  const [editing, setEditing] = useState<{ id: string; title: string } | null>(null);
+  const [renaming, setRenaming] = useState(false);
+
   // Agent detection rollup (D57): still detecting → subtle hint; every agent
   // resolved but none available → onboarding banner (sending would only fail).
   const detecting = agents.length === 0 || agents.some((a) => !detected[a.id]);
   const noneAvailable =
     !detecting && agents.length > 0 && agents.every((a) => !detected[a.id]?.available);
+  const availableAgents = agents.filter((a) => detected[a.id]?.available);
+  const models = detected[agentId]?.models ?? [];
 
-  const send = () => onStart("plan", prompt.trim(), chosenFolder ?? undefined);
+  useEffect(() => {
+    if (!agentTouchedRef.current) setAgentId(defaultAgentId(agents, detected));
+  }, [agents, detected]);
+
+  const pickAgent = (id: string) => {
+    agentTouchedRef.current = true;
+    setAgentId(id);
+    setModel("default"); // the previous agent's model id means nothing here
+  };
+
+  const start = (category: Category) =>
+    onStart(category, prompt.trim(), chosenFolder ?? undefined, agentId, model);
+
+  const send = () => start("plan");
 
   const chooseFolder = async () => {
     try {
@@ -86,20 +129,47 @@ export function HomeView({
     }
   };
 
+  // Commit the inline rename: persist to the manifest, then patch the local
+  // list (no reload). An unchanged/empty title just closes the editor.
+  const commitRename = async () => {
+    if (!editing || renaming) return;
+    const target = editing;
+    const title = target.title.trim();
+    const current = projects.find((p) => p.id === target.id)?.title;
+    if (!title || title === current) {
+      setEditing(null);
+      return;
+    }
+    setRenaming(true);
+    try {
+      await setProjectTitle(target.id, title);
+      setProjects((ps) => ps.map((p) => (p.id === target.id ? { ...p, title } : p)));
+      setEditing(null);
+    } catch (e) {
+      setUiError(`제목을 변경하지 못했습니다 — ${String(e)}`);
+    } finally {
+      setRenaming(false);
+    }
+  };
+
   return (
     <div className="h-full overflow-auto">
       <div className="mx-auto max-w-[820px] px-8 pb-14 pt-16">
-        {/* hero */}
+        {/* hero — a reliability-first ops-assistant framing instead of the
+            generic chat greeting (usability item, D60) */}
         <div className="mb-8 text-center">
           <div className="mb-4 inline-flex items-center gap-1.5 rounded-full bg-accent-tint px-3 py-1.5 text-[12px] font-semibold text-accent">
-            <Sparkles size={14} />
-            운영 업무 어시스턴트
+            <ShieldCheck size={14} />
+            Samsung SDS · Operation Wizard
           </div>
           <h1 className="mb-2 font-serif text-[30px] font-semibold tracking-[-0.02em] text-ink-strong">
-            무엇을 도와드릴까요?
+            운영 작업 도우미
           </h1>
-          <p className="text-[14px] text-ink-muted">
-            업무 카테고리를 고르고 대화로 진행하세요. 첫 질문에서 요구사항을 함께 명확히 합니다.
+          <p className="text-[14px] leading-[1.6] text-ink-muted">
+            로컬 CLI 에이전트로 운영 업무를 정해진 절차에 따라 진행합니다.
+            <br />
+            요구사항 확인 → 코드베이스 분석 → 사내 지식 반영 → 산출물 생성 순으로 진행되며, 모든
+            작업은 프로젝트로 기록됩니다.
           </p>
         </div>
 
@@ -163,16 +233,44 @@ export function HomeView({
             className="max-h-[200px] min-h-[52px] w-full resize-none overflow-y-auto bg-transparent text-[14.5px] leading-[1.55] text-ink outline-none placeholder:text-ink-faint"
           />
           <div className="mt-1.5 flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 text-[12px] text-ink-soft">
+            <span className="inline-flex shrink-0 items-center gap-1.5 text-[12px] text-ink-soft">
               <ClipboardList size={14} />
               개발 계획 수립
             </span>
+            {/* agent + model picked before starting (mirrors the ChatPanel
+                composer; the workspace opens with these — D60) */}
+            <select
+              value={agentId}
+              onChange={(e) => pickAgent(e.target.value)}
+              title="실행할 에이전트"
+              className="max-w-[150px] rounded-md border border-line bg-panel px-1.5 py-1 text-[11.5px] text-ink-muted outline-none"
+            >
+              {(availableAgents.length ? availableAgents : agents).map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                  {detected[a.id] ? (detected[a.id].available ? "" : " (미탐지)") : " (탐지 중…)"}
+                </option>
+              ))}
+            </select>
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              title="사용할 모델"
+              className="min-w-0 max-w-[190px] truncate rounded-md border border-line bg-panel px-1.5 py-1 text-[11.5px] text-ink-muted outline-none"
+            >
+              {models.length === 0 && <option value="default">Default</option>}
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
             <div className="flex-1" />
             <button
               type="button"
               onClick={send}
               title="전송"
-              className="grid h-9 w-9 place-items-center rounded-[10px] bg-accent text-white shadow-xs transition-colors hover:bg-accent-strong"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] bg-accent text-white shadow-xs transition-colors hover:bg-accent-strong"
             >
               <ArrowUp size={18} />
             </button>
@@ -213,7 +311,7 @@ export function HomeView({
             <button
               key={id}
               type="button"
-              onClick={() => onStart(id, prompt.trim(), chosenFolder ?? undefined)}
+              onClick={() => start(id)}
               className="flex gap-3 rounded-[14px] border border-line bg-panel p-4 text-left shadow-sm transition-[transform,box-shadow] duration-[120ms] hover:-translate-y-0.5 hover:shadow-md"
             >
               <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-[11px] ${tile}`}>
@@ -241,27 +339,84 @@ export function HomeView({
           </div>
         ) : (
           <div className="flex flex-col gap-2">
-            {projects.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => void openProject(p)}
-                title={p.workdir}
-                className="flex items-center gap-3 rounded-[12px] border border-line bg-panel px-3.5 py-3 text-left shadow-sm transition-[transform,box-shadow] duration-[120ms] hover:-translate-y-0.5 hover:shadow-md"
-              >
-                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] bg-accent-tint text-accent">
-                  <FolderOpen size={17} />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13.5px] font-medium text-ink-strong">
-                    {p.title}
+            {projects.map((p) => {
+              const isEditing = editing?.id === p.id;
+              return (
+                // A div with nested buttons (the fileTabPill precedent): the
+                // main button opens the project, the hover pencil renames it.
+                <div
+                  key={p.id}
+                  title={p.workdir}
+                  className="group flex items-center gap-3 rounded-[12px] border border-line bg-panel px-3.5 py-3 shadow-sm transition-[transform,box-shadow] duration-[120ms] hover:-translate-y-0.5 hover:shadow-md"
+                >
+                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] bg-accent-tint text-accent">
+                    <FolderOpen size={17} />
                   </span>
-                  <span className="mt-0.5 block truncate text-[12px] text-ink-soft">
-                    {p.sessionCount}개 세션 · {sessionTime(p.updatedAt)}
-                  </span>
-                </span>
-              </button>
-            ))}
+                  {isEditing ? (
+                    <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                      <input
+                        autoFocus
+                        value={editing.title}
+                        maxLength={100}
+                        disabled={renaming}
+                        onChange={(e) => setEditing({ id: p.id, title: e.target.value })}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void commitRename();
+                          } else if (e.key === "Escape") {
+                            setEditing(null);
+                          }
+                        }}
+                        placeholder="프로젝트 제목"
+                        className="min-w-0 flex-1 rounded-md border border-line-strong bg-panel px-2 py-1 text-[13px] text-ink outline-none disabled:opacity-60"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void commitRename()}
+                        disabled={renaming}
+                        title="저장"
+                        className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-accent text-white transition-colors hover:bg-accent-strong disabled:opacity-60"
+                      >
+                        <Check size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditing(null)}
+                        disabled={renaming}
+                        title="취소"
+                        className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line text-ink-soft transition-colors hover:bg-subtle disabled:opacity-60"
+                      >
+                        <X size={14} />
+                      </button>
+                    </span>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void openProject(p)}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <span className="block truncate text-[13.5px] font-medium text-ink-strong">
+                          {p.title}
+                        </span>
+                        <span className="mt-0.5 block truncate text-[12px] text-ink-soft">
+                          {p.sessionCount}개 세션 · {sessionTime(p.updatedAt)}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditing({ id: p.id, title: p.title })}
+                        title="제목 변경"
+                        className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-panel text-ink-soft opacity-0 shadow-xs transition-opacity hover:text-accent group-hover:opacity-100"
+                      >
+                        <Pencil size={13} />
+                      </button>
+                    </>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

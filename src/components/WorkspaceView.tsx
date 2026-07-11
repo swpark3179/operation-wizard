@@ -59,6 +59,8 @@ export function WorkspaceView({
   projectId,
   initialWorkdir,
   initialCodebasePath,
+  initialAgentId,
+  initialModel,
   category,
   seedPrompt,
   agents,
@@ -78,6 +80,9 @@ export function WorkspaceView({
   /** The project's stored codebase path when reopening (else null — chosen in
    * the requirements form's folder question, D45). */
   initialCodebasePath: string | null;
+  /** Agent/model picked in the Home composer (fresh chats — D60), or null. */
+  initialAgentId?: string | null;
+  initialModel?: string | null;
   category: Category;
   seedPrompt: string;
   agents: AgentInfo[];
@@ -357,6 +362,8 @@ export function WorkspaceView({
         onResolveWorkdir={setResolvedWorkdir}
         category={activeCategory}
         seedPrompt={activeSeed}
+        initialAgentId={initialAgentId}
+        initialModel={initialModel}
         agents={agents}
         detected={detected}
         settings={settings}

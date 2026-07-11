@@ -111,12 +111,18 @@ export function FileViewer({
   const showOutline = mode === "preview" && isMarkdown(path) && outline.length > 0;
 
   return (
-    <div className="relative flex min-w-0 flex-1 flex-col">
+    // min-h-0: without it this flex-column item grows to its content height
+    // inside the canvas column, so the body's overflow-auto never engages (no
+    // scrollbar) and the outline popover anchors against an overgrown box.
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       {/* file bar */}
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-line bg-panel px-3">
         <FileText size={13} className="shrink-0 text-ink-soft" />
-        <span className="truncate font-mono text-[12px] text-ink-muted">{path}</span>
-        <div className="flex-1" />
+        {/* min-w-0 flex-1: the path is the only shrinkable item — the toggle
+            buttons keep their size and never get squeezed/pushed out. */}
+        <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink-muted" title={path}>
+          {path}
+        </span>
         {showOutline && (
           <button
             type="button"
@@ -131,12 +137,12 @@ export function FileViewer({
           </button>
         )}
         {showPreviewToggle && (
-          <div className="flex overflow-hidden rounded-md border border-line">
+          <div className="flex shrink-0 overflow-hidden rounded-md border border-line">
             <button
               type="button"
               onClick={() => setMode("preview")}
               className={
-                "inline-flex items-center gap-1 px-2 py-1 text-[11.5px] " +
+                "inline-flex items-center gap-1 whitespace-nowrap px-2 py-1 text-[11.5px] " +
                 (mode === "preview" ? "bg-accent-tint text-accent" : "text-ink-soft hover:bg-subtle")
               }
             >
@@ -146,7 +152,7 @@ export function FileViewer({
               type="button"
               onClick={() => setMode("source")}
               className={
-                "inline-flex items-center gap-1 border-l border-line px-2 py-1 text-[11.5px] " +
+                "inline-flex items-center gap-1 whitespace-nowrap border-l border-line px-2 py-1 text-[11.5px] " +
                 (mode === "source" ? "bg-accent-tint text-accent" : "text-ink-soft hover:bg-subtle")
               }
             >
@@ -190,7 +196,7 @@ export function FileViewer({
             className="absolute inset-0 z-10 cursor-default"
             onClick={() => setOutlineOpen(false)}
           />
-          <div className="absolute right-2 top-[38px] z-20 max-h-[60%] w-[240px] overflow-y-auto rounded-xl border border-line-strong bg-elevated p-1.5 shadow-lg">
+          <div className="absolute right-2 top-[38px] z-20 max-h-[min(420px,calc(100%-48px))] w-[240px] overflow-y-auto rounded-xl border border-line-strong bg-elevated p-1.5 shadow-lg">
             {outline.map((h, i) => (
               <button
                 key={i}

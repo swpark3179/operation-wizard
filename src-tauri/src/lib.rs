@@ -321,6 +321,7 @@ pub fn run() {
             projects::load_session,
             projects::list_projects,
             projects::set_project_codebase,
+            projects::set_project_title,
             knowledge::list_knowledge,
             knowledge::save_knowledge,
             knowledge::save_knowledge_files,
