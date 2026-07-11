@@ -26,7 +26,7 @@ import {
 } from "../lib/api";
 import { ragUserError } from "../lib/foundation";
 import { startIngest, stopIngest, useIngestState } from "../lib/ingest";
-import { sessionTime } from "./workspace";
+import { categoryLabel, sessionTime, type Category } from "./workspace";
 import { useAutoGrow } from "../lib/useAutoGrow";
 import type { KnowledgeEntry, Settings } from "../lib/types";
 
@@ -453,12 +453,17 @@ function KnowledgeCard({
     }
   };
 
+  const isArtifact = entry.kind === "artifact";
+  const files = entry.files ?? [];
+
   const remove = async () => {
     // Deleting a saved entry is immediate and has no undo — confirm first
     // (D57). Unsaved drafts (never persisted) are dropped without asking.
+    // An artifact entry's copied documents go with it (D59).
     if (entry.updatedAt > 0) {
+      const fileNote = isArtifact && files.length ? `\n첨부 문서 ${files.length}개도 함께 삭제됩니다.` : "";
       const ok = await ask(
-        `'${title.trim() || "(제목 없음)"}' 지식 항목을 삭제할까요?\n삭제하면 되돌릴 수 없습니다.`,
+        `'${title.trim() || "(제목 없음)"}' 지식 항목을 삭제할까요?${fileNote}\n삭제하면 되돌릴 수 없습니다.`,
         { title: "지식 삭제", kind: "warning" },
       );
       if (!ok) return;
@@ -489,6 +494,11 @@ function KnowledgeCard({
           />
           <span className="truncate text-ink-strong">{title.trim() || "(제목 없음)"}</span>
         </button>
+        {isArtifact && (
+          <span className="shrink-0 rounded-full bg-accent-tint px-1.5 py-px text-[10.5px] font-medium text-accent">
+            산출물
+          </span>
+        )}
         {entry.updatedAt > 0 && (
           <span className="shrink-0 text-[11px] text-ink-faint">{sessionTime(entry.updatedAt)}</span>
         )}
@@ -505,6 +515,18 @@ function KnowledgeCard({
 
       {open && (
         <div className="mt-3">
+          {/* Artifact provenance (D59): where this entry came from. */}
+          {isArtifact && (entry.sourceCategory || entry.sourceTitle) && (
+            <div className="mb-2 text-[11.5px] text-ink-soft">
+              출처:{" "}
+              {[
+                entry.sourceCategory ? categoryLabel(entry.sourceCategory as Category) : null,
+                entry.sourceTitle,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </div>
+          )}
           <input
             value={title}
             onChange={(e) => {
@@ -525,10 +547,28 @@ function KnowledgeCard({
             disabled={busy}
             rows={4}
             placeholder={
-              "어떤 상황에서 · 어떤 테이블/모듈을 보고 · 어떤 방식으로 접근했는지 기록하세요.\n작업 계획 수립 시 에이전트에게 제약·관례로 주입됩니다."
+              isArtifact
+                ? "이 작업의 요약 — 이후 작업의 지식 주입 턴에 전달됩니다."
+                : "어떤 상황에서 · 어떤 테이블/모듈을 보고 · 어떤 방식으로 접근했는지 기록하세요.\n작업 계획 수립 시 에이전트에게 제약·관례로 주입됩니다."
             }
             className="max-h-[260px] w-full resize-none overflow-y-auto rounded-[6px] border border-line bg-elevated px-2.5 py-2 font-mono text-[12px] leading-[1.55] text-ink outline-none focus:border-accent"
           />
+          {/* Artifact documents (read-only — copied into the knowledge store,
+              injected as an absolute-path index in later tasks). */}
+          {isArtifact && files.length > 0 && (
+            <div className="mt-2 rounded-[6px] border border-line bg-subtle px-2.5 py-2">
+              <div className="mb-1 text-[11px] font-medium text-ink-soft">
+                첨부 문서 {files.length}개 — 이후 작업에서 에이전트가 원문을 직접 읽습니다.
+              </div>
+              <ul className="space-y-0.5">
+                {files.map((f) => (
+                  <li key={f} className="truncate font-mono text-[11.5px] text-ink-muted">
+                    {f}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="mt-2 flex items-center gap-2">
             <div className="flex-1" />
             {saved && <span className="text-[12.5px] text-ok">Saved.</span>}
@@ -583,7 +623,9 @@ function KnowledgeSection() {
       <div className="mb-2.5 flex items-center gap-2">
         <span className="text-[12.5px] text-ink-muted">
           과거 작업 방식(상황·참조 테이블·접근 방법)을 기록해 두면, 기반 단계의 '지식 주입' 턴에
-          에이전트에게 전달됩니다(총 16KB 상한, 최신순 우선).
+          에이전트에게 전달됩니다(총 16KB 상한, 최신순 우선). 워크스페이스에서 작업이 완료되면
+          산출물 문서를 '산출물' 지식으로 저장할 수 있고, 이 경우 요약이 주입되며 원문은
+          에이전트가 직접 읽습니다.
         </span>
       </div>
       {error && <div className="mb-2 text-[12px] text-bad">{error}</div>}

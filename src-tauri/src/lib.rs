@@ -323,6 +323,8 @@ pub fn run() {
             projects::set_project_codebase,
             knowledge::list_knowledge,
             knowledge::save_knowledge,
+            knowledge::save_knowledge_files,
+            knowledge::get_knowledge_root,
             knowledge::delete_knowledge,
             confluence::start_confluence_ingest,
             confluence::cancel_ingest,

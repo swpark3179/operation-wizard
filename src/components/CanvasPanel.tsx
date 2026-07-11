@@ -11,13 +11,14 @@ import {
 import { ArtifactsPanel } from "./ArtifactsPanel";
 import { DiagramGallery } from "./DiagramGallery";
 import { FileViewer } from "./FileViewer";
+import { KnowledgeSavePanel, type KnowledgeSaveRequest } from "./KnowledgeSavePanel";
 import { RequirementsForm } from "./RequirementsForm";
 import type { StepProgress } from "./WorkflowStepper";
 import { fileTabId, fileTabPath, type CanvasTab } from "./WorkspaceView";
 import { listDir } from "../lib/api";
 import type { ArtifactDef } from "../lib/artifacts";
 import type { ClarifyAnswer, ClarifyQuestion } from "../lib/clarify";
-import type { FileEntry } from "../lib/types";
+import type { FileEntry, KnowledgeEntry } from "../lib/types";
 
 function basename(p: string): string {
   const parts = p.split(/[\\/]/).filter(Boolean);
@@ -127,6 +128,10 @@ export function CanvasPanel({
   stepProgress,
   artifactSel,
   onSelectArtifact,
+  knowledgeSave,
+  onCloseKnowledgeSave,
+  onKnowledgeSaved,
+  onSaveArtifact,
   streaming,
 }: {
   workdir: string | null;
@@ -159,6 +164,12 @@ export function CanvasPanel({
   /** The 산출물 tab's selected artifact (stepId), or null → auto-pick. */
   artifactSel: string | null;
   onSelectArtifact: (stepId: string) => void;
+  /** The 지식 저장 tab's request (D59), or null → tab hidden. */
+  knowledgeSave: KnowledgeSaveRequest | null;
+  onCloseKnowledgeSave: () => void;
+  onKnowledgeSaved: (entry: KnowledgeEntry) => void;
+  /** Open the 지식 저장 panel pre-checked with one artifact (row action, D59). */
+  onSaveArtifact: (stepId: string) => void;
   /** True while a run is streaming (form submit disabled). */
   streaming: boolean;
 }) {
@@ -195,8 +206,9 @@ export function CanvasPanel({
   // The requirements tab exists only while the form awaits the user (a stale
   // `tab === "requirements"` can never render a pill-less view); the rag tab
   // exists once a search result arrived and stays for the session; the
-  // artifacts/diagrams tabs exist while `hasArtifacts` (D58); a file tab
-  // exists only while its path is in `openFiles` (D49).
+  // artifacts/diagrams tabs exist while `hasArtifacts` (D58); the 지식 저장
+  // tab exists while a save request is open (D59); a file tab exists only
+  // while its path is in `openFiles` (D49).
   const activeFilePath = fileTabPath(tab);
   const effectiveTab: CanvasTab =
     tab === "requirements"
@@ -211,11 +223,15 @@ export function CanvasPanel({
           ? hasArtifacts
             ? tab
             : "files"
-          : activeFilePath
-            ? openFiles.includes(activeFilePath)
+          : tab === "knowledge-save"
+            ? knowledgeSave && workdir
               ? tab
               : "files"
-            : tab;
+            : activeFilePath
+              ? openFiles.includes(activeFilePath)
+                ? tab
+                : "files"
+              : tab;
   const effectiveFilePath = fileTabPath(effectiveTab);
 
   const tabBtn = (id: CanvasTab, label: string, badge?: boolean) => (
@@ -277,6 +293,7 @@ export function CanvasPanel({
           {!!ragResult && tabBtn("rag", "검색 결과")}
           {hasArtifacts && tabBtn("artifacts", "산출물")}
           {hasArtifacts && tabBtn("diagrams", "다이어그램")}
+          {!!knowledgeSave && !!workdir && tabBtn("knowledge-save", "지식 저장")}
           {tabBtn("files", "파일")}
           {openFiles.map(fileTabPill)}
         </div>
@@ -351,6 +368,16 @@ export function CanvasPanel({
           refreshNonce={refreshNonce}
           selected={artifactSel}
           onSelect={onSelectArtifact}
+          onSaveToKnowledge={onSaveArtifact}
+        />
+      ) : effectiveTab === "knowledge-save" && knowledgeSave && workdir ? (
+        <KnowledgeSavePanel
+          workdir={workdir}
+          artifacts={artifacts}
+          refreshNonce={refreshNonce}
+          request={knowledgeSave}
+          onClose={onCloseKnowledgeSave}
+          onSaved={onKnowledgeSaved}
         />
       ) : effectiveTab === "diagrams" && workdir ? (
         <DiagramGallery workdir={workdir} artifacts={artifacts} refreshNonce={refreshNonce} />

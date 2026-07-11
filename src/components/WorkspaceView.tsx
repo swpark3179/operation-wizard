@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChatPanel } from "./ChatPanel";
+import { ChatPanel, defaultAgentId } from "./ChatPanel";
 import { CanvasPanel } from "./CanvasPanel";
+import type { KnowledgeSaveRequest } from "./KnowledgeSavePanel";
 import type { StepProgress } from "./WorkflowStepper";
-import type { Category } from "./workspace";
+import { categoryLabel, type Category } from "./workspace";
 import { artifactsFor, joinWorkdirPath, normalizePathKey } from "../lib/artifacts";
 import { formatClarifyAnswers, type ClarifyAnswer, type ClarifyQuestion } from "../lib/clarify";
 import { ragResultHtml } from "../lib/foundation";
 import type { AgentInfo, DetectedAgent, RagHit, Settings, StoredSession } from "../lib/types";
 
 /** Canvas views: the fixed tabs (산출물/다이어그램 aggregate the workflow's
- * document artifacts — D58) plus one `file:<path>` viewer tab per open file
+ * document artifacts — D58; 지식 저장 turns them into a knowledge entry — D59)
+ * plus one `file:<path>` viewer tab per open file
  * (the 파일 tab is the list; opening a file spawns its own closable tab — D49). */
 export type CanvasTab =
   | "files"
@@ -17,6 +19,7 @@ export type CanvasTab =
   | "rag"
   | "artifacts"
   | "diagrams"
+  | "knowledge-save"
   | `file:${string}`;
 
 export function fileTabId(path: string): CanvasTab {
@@ -136,6 +139,12 @@ export function WorkspaceView({
   const [stepProgress, setStepProgress] = useState<StepProgress[] | null>(null);
   // The 산출물 tab's selected artifact (stepId), or null → auto-pick.
   const [artifactSel, setArtifactSel] = useState<string | null>(null);
+  // The 지식 저장 tab's request (D59), or null → tab hidden. The entry id is
+  // minted once per session and survives a save, so saving twice in the same
+  // session upserts one entry (staged-swap file replace) instead of
+  // duplicating; new/opened sessions reset it.
+  const [knowledgeSave, setKnowledgeSave] = useState<KnowledgeSaveRequest | null>(null);
+  const kbEntryIdRef = useRef<string | null>(null);
   // The category workflow's document artifacts. Frozen per session like
   // ChatPanel's WF (settings intentionally omitted from the deps — both
   // recompute together on the sessionNonce remount).
@@ -175,6 +184,8 @@ export function WorkspaceView({
     setRagResult(null); // codebasePath stays — it is project-scoped
     setOpenFiles([]);
     setArtifactSel(null);
+    setKnowledgeSave(null); // next save is a new entry (D59)
+    kbEntryIdRef.current = null;
     setStepProgress(null); // the remounted ChatPanel re-mirrors its fresh value
     setSessionNonce((n) => n + 1);
   };
@@ -187,6 +198,8 @@ export function WorkspaceView({
     setRagResult(null);
     setOpenFiles([]);
     setArtifactSel(null);
+    setKnowledgeSave(null);
+    kbEntryIdRef.current = null;
     setStepProgress(null);
     setSessionNonce((n) => n + 1);
   };
@@ -241,6 +254,52 @@ export function WorkspaceView({
   const handleCloseFile = (path: string) => {
     setOpenFiles((f) => f.filter((p) => p !== path));
     setCanvasTab((t) => (t === fileTabId(path) ? "files" : t));
+  };
+
+  // ── 지식 저장 (D59) ─────────────────────────────────────────────────────────
+  // Shared opener for both entry points: the ChatPanel completion banner
+  // (agent/model of the running session, all artifacts pre-checked) and the
+  // 산출물-tab row action (that artifact pre-checked; loaded sessions pick a
+  // fallback agent for the summary turn).
+  const openKnowledgeSave = (ctx: {
+    agentId: string;
+    model: string | null;
+    preselect: string[] | null;
+  }) => {
+    if (!kbEntryIdRef.current) kbEntryIdRef.current = crypto.randomUUID();
+    const baseTitle =
+      activeSeed.trim() || loadedSession?.title?.trim() || categoryLabel(activeCategory);
+    setKnowledgeSave({
+      entryId: kbEntryIdRef.current,
+      agentId: ctx.agentId,
+      model: ctx.model,
+      preselect: ctx.preselect,
+      defaultTitle: `${baseTitle.slice(0, 40)} — 작업 정리`,
+      request: baseTitle,
+      source: {
+        projectId,
+        category: activeCategory,
+        title: baseTitle.slice(0, 60),
+      },
+    });
+    setCanvasTab("knowledge-save");
+  };
+
+  const handleOpenKnowledgeSave = (ctx: { agentId: string; model: string | null }) =>
+    openKnowledgeSave({ ...ctx, preselect: null });
+
+  const handleSaveArtifact = (stepId: string) => {
+    const model = loadedSession?.model;
+    openKnowledgeSave({
+      agentId: loadedSession?.agentId ?? defaultAgentId(agents, detected),
+      model: model && model !== "default" ? model : null,
+      preselect: [stepId],
+    });
+  };
+
+  const closeKnowledgeSave = () => {
+    setKnowledgeSave(null);
+    setCanvasTab((t) => (t === "knowledge-save" ? "artifacts" : t));
   };
 
   // Drag-to-resize the chat/canvas split (D49). Pointer capture keeps the
@@ -316,6 +375,7 @@ export function WorkspaceView({
           onStreamingChange={handleStreamingChange}
           onStepProgress={setStepProgress}
           onOpenAgents={onOpenAgents}
+          onOpenKnowledgeSave={handleOpenKnowledgeSave}
         />
       </div>
       <div
@@ -351,6 +411,10 @@ export function WorkspaceView({
         stepProgress={stepProgress}
         artifactSel={artifactSel}
         onSelectArtifact={setArtifactSel}
+        knowledgeSave={knowledgeSave}
+        onCloseKnowledgeSave={closeKnowledgeSave}
+        onKnowledgeSaved={closeKnowledgeSave}
+        onSaveArtifact={handleSaveArtifact}
         streaming={streaming}
       />
       {/* While dragging, a full-window shield keeps the canvas iframes (HTML/

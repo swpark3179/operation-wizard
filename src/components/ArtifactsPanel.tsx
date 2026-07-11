@@ -6,17 +6,12 @@
 // ChatPanel's step cursor, and file existence is probed with listDir so loaded
 // sessions (no live workflow) still show what's on disk.
 
-import { useEffect, useMemo, useState } from "react";
-import { FileText } from "lucide-react";
+import { useMemo } from "react";
+import { BookmarkPlus, FileText } from "lucide-react";
 import { FileViewer } from "./FileViewer";
 import { StatusIcon, type StepProgress, type StepProgressStatus } from "./WorkflowStepper";
-import { listDir } from "../lib/api";
-import {
-  artifactParentDir,
-  joinWorkdirPath,
-  normalizePathKey,
-  type ArtifactDef,
-} from "../lib/artifacts";
+import { joinWorkdirPath, normalizePathKey, type ArtifactDef } from "../lib/artifacts";
+import { useArtifactExistence } from "../lib/useArtifactExistence";
 
 /** Row status: the live workflow status when a workflow is running, else an
  * existence-derived one (loaded sessions / reopened projects). */
@@ -75,6 +70,7 @@ export function ArtifactsPanel({
   refreshNonce,
   selected,
   onSelect,
+  onSaveToKnowledge,
 }: {
   workdir: string;
   /** The workflow's document artifacts, in step order (≥1 — gated by the tab pill). */
@@ -87,28 +83,13 @@ export function ArtifactsPanel({
   /** The selected artifact's stepId, or null → auto-pick. */
   selected: string | null;
   onSelect: (stepId: string) => void;
+  /** Open the 지식 저장 panel pre-checked with this artifact (D59). Only
+   * offered for artifacts that exist on disk. */
+  onSaveToKnowledge?: (stepId: string) => void;
 }) {
-  // Which artifact files exist on disk: list the (few, unique) parent folders
-  // and collect their file paths. A missing folder just means "nothing there
-  // yet". Null while the first probe is in flight.
-  const [existing, setExisting] = useState<Set<string> | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const dirs = [...new Set(artifacts.map((a) => artifactParentDir(workdir, a.file)))];
-    void Promise.allSettled(dirs.map((d) => listDir(d))).then((results) => {
-      if (cancelled) return;
-      const set = new Set<string>();
-      for (const r of results) {
-        if (r.status !== "fulfilled") continue;
-        for (const e of r.value) if (!e.isDir) set.add(normalizePathKey(e.path));
-      }
-      setExisting(set);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [workdir, artifacts, refreshNonce]);
+  // Which artifact files exist on disk (shared probe hook — D59). A missing
+  // folder just means "nothing there yet". Null while the first probe runs.
+  const existing = useArtifactExistence(workdir, artifacts, refreshNonce);
 
   const rows = useMemo(
     () =>
@@ -134,41 +115,57 @@ export function ArtifactsPanel({
         {rows.map((r) => {
           const active = effective?.artifact.stepId === r.artifact.stepId;
           return (
-            <button
+            // A div with nested buttons (the fileTabPill precedent) — the row
+            // selects, the hover action saves to knowledge (D59).
+            <div
               key={r.artifact.stepId}
-              type="button"
-              onClick={() => onSelect(r.artifact.stepId)}
               title={r.abs}
               className={
-                "flex flex-col gap-0.5 rounded-md px-2 py-1.5 text-left transition-colors " +
+                "group relative rounded-md transition-colors " +
                 (active ? "bg-accent-tint" : "hover:bg-subtle")
               }
             >
-              <span className="flex items-center gap-1.5">
-                <StatusIcon status={iconStatus(r.status)} />
-                <span
-                  className={
-                    "min-w-0 flex-1 truncate text-[12px] font-medium " +
-                    (active ? "text-accent" : "text-ink-muted")
-                  }
+              <button
+                type="button"
+                onClick={() => onSelect(r.artifact.stepId)}
+                className="flex w-full flex-col gap-0.5 px-2 py-1.5 text-left"
+              >
+                <span className="flex items-center gap-1.5">
+                  <StatusIcon status={iconStatus(r.status)} />
+                  <span
+                    className={
+                      "min-w-0 flex-1 truncate text-[12px] font-medium " +
+                      (active ? "text-accent" : "text-ink-muted")
+                    }
+                  >
+                    {r.artifact.name}
+                  </span>
+                </span>
+                <span className="flex min-w-0 items-center gap-1.5 pl-[20px]">
+                  <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-ink-faint">
+                    {basename(r.artifact.file)}
+                  </span>
+                  <span
+                    className={
+                      "shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium " +
+                      STATUS_CHIP[r.status]
+                    }
+                  >
+                    {STATUS_LABEL[r.status]}
+                  </span>
+                </span>
+              </button>
+              {onSaveToKnowledge && r.exists && (
+                <button
+                  type="button"
+                  onClick={() => onSaveToKnowledge(r.artifact.stepId)}
+                  title="지식으로 저장"
+                  className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded border border-line bg-panel text-ink-soft opacity-0 shadow-xs transition-opacity hover:text-accent group-hover:opacity-100"
                 >
-                  {r.artifact.name}
-                </span>
-              </span>
-              <span className="flex min-w-0 items-center gap-1.5 pl-[20px]">
-                <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-ink-faint">
-                  {basename(r.artifact.file)}
-                </span>
-                <span
-                  className={
-                    "shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium " +
-                    STATUS_CHIP[r.status]
-                  }
-                >
-                  {STATUS_LABEL[r.status]}
-                </span>
-              </span>
-            </button>
+                  <BookmarkPlus size={12} />
+                </button>
+              )}
+            </div>
           );
         })}
       </div>

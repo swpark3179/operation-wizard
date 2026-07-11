@@ -190,7 +190,8 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 | `load_session` | `projectId: string`, `sessionId: string` | `StoredSession` | 세션 전체 로드 |
 | `list_projects` | — | `ProjectSummary[]` | 모든 프로젝트 요약(최근 활동순). 홈 최근목록용 |
 | `rag_search` | `query: string`, `topK?: number` | `RagHit[]` | rag 기반 단계의 검색(사용자 RAG 어댑터 `rag.rs`; 미구현/미설정 시 한글 Err → 프론트가 "건너뜀"으로 처리 — D48) |
-| `list_knowledge` / `save_knowledge` / `delete_knowledge` | — / `entry` / `id` | `KnowledgeEntry[]` / `KnowledgeEntry` / — | 지식 베이스 CRUD(`~/.operation-wizard/knowledge/<id>.json`; knowledge 단계 주입용) |
+| `list_knowledge` / `save_knowledge` / `delete_knowledge` | — / `entry` / `id` | `KnowledgeEntry[]` / `KnowledgeEntry` / — | 지식 베이스 CRUD(`~/.operation-wizard/knowledge/<id>.json`; knowledge 단계 주입용. 삭제는 artifact 폴더 동반 제거 — D59) |
+| `save_knowledge_files` / `get_knowledge_root` | `entry`, `sources: string[]` / — | `KnowledgeEntry` / `string` | 산출물 지식 저장(D59): 산출물 파일을 `knowledge/artifacts/<id>/`로 staged-swap 복사 + artifact 엔트리 upsert / 지식 루트 절대경로(주입 인덱스·extraDirs용) |
 | `set_confluence_config` / `set_rag_config` | `config \| null` | `Settings` | 지식 뷰의 수집/검색 설정 저장·해제 |
 | `start_confluence_ingest` | `onEvent: Channel<IngestEvent>` | `ingestId: string` | BFS 크롤 + 페이지 원문을 RAG로 전달(워커 스레드, `IngestEvent` 스트리밍: `started`/`pageFetched`/`pageIngested`/`pageFailed`/`error`/`end`) |
 | `cancel_ingest` / `probe_confluence` | `ingestId` / — | — / `string` | 수집 취소(`IngestRegistry` 플래그) / 연결 테스트(루트 페이지 제목) |
@@ -239,7 +240,9 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     스트리밍 중 홈/새 세션/기록 열기는 **확인 다이얼로그**(`plugin-dialog` `ask`; NavRail 이동은
     App 레벨에서 동일 가드 — busy 상태 리프트), 모든 정지·중단 경로의 **통일된 시스템 노트**,
     rag/knowledge preflight 동안 "검색 중…" 일시 노트, **하단 고정형 자동 스크롤 + '최신으로' 버튼**,
-    미탐지 에이전트 선택 시 경고 라인(+Agents 이동), 세션 열기 실패 배너.
+    미탐지 에이전트 선택 시 경고 라인(+Agents 이동), 세션 열기 실패 배너. **지식 저장(D59)**: 워크플로우가
+    종단 chat에 도달하면(파일을 생성한 단계 ≥1, 세션당 1회) 컴포저 위에 **완료 배너**를 띄워 캔버스
+    '지식 저장' 탭을 제안한다(dismissible; 캔버스 탭 자동 전환 없음).
   - `AssistantMessage`: 텍스트 + reasoning(접이식) + 도구 행 + usage + 에러 렌더. **완료된 턴의
     텍스트는 마크다운(mermaid 포함)으로 렌더**하고(스트리밍 중에는 평문 — D57), 응답/코드블록 **복사
     버튼**과 헤더의 **실행 에이전트명**을 표시한다. 에러에는 원문 +
@@ -247,8 +250,8 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     (같은 세션 재전송 — 실패 쌍 제거 + 워크플로우 커서 복원, D57) + 2차 액션 **"새 세션으로 다시
     시도"**를 함께 노출한다. codex의 `invalid peer certificate: BadSignature`는 codex CLI 자체의 사내
     TLS 프록시 인증서 불신 오류로, 앱은 안내+새 세션 복구만 제공한다([05](05-decisions.md) D28).
-  - `CanvasPanel`: 툴바에 **요구사항 / 검색 결과 / 산출물 / 다이어그램 / 파일 + 열린 파일별 뷰어 탭**
-    토글(D49/D58). **'파일' 탭은 파일 트리 목록 전용**(`listDir`, 지연 확장, `refreshNonce`로 문서 생성 후
+  - `CanvasPanel`: 툴바에 **요구사항 / 검색 결과 / 산출물 / 다이어그램 / 지식 저장 / 파일 + 열린
+    파일별 뷰어 탭** 토글(D49/D58/D59). **'파일' 탭은 파일 트리 목록 전용**(`listDir`, 지연 확장, `refreshNonce`로 문서 생성 후
     리로드)이고, 트리에서 파일을 클릭하면 그 파일의 **`file:<path>` 뷰어 탭**(`FileViewer`, 닫기 × 버튼)이
     생성·활성화된다 — 파일 목록과 문서 내용을 동시에 볼 필요 없이 탭으로 오간다. **워크플로우 단계가
     생성한 산출물은 파일 탭 대신 '산출물' 탭으로 라우팅**된다(D58 — D49 개정). 닫힌/없는 파일 탭은
@@ -256,7 +259,12 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     **'산출물' 탭**(`ArtifactsPanel`, D58)은 런타임 워크플로우의 문서 산출물을 좌측 목록(단계 상태 칩:
     대기/생성 중/완료/건너뜀/중단, 로드 세션은 생성됨/미생성) + 우측 미리보기(`FileViewer` 재사용)로
     집계하고, **'다이어그램' 탭**(`DiagramGallery`, D58)은 산출물 md의 ` ```mermaid ` 펜스를 lazy 스캔해
-    카드 갤러리(+클릭 확대 모달)로 렌더한다. 두 pill은 workdir 확정 + 산출물 ≥1일 때만 표시된다. 또는 요구사항 폼(`RequirementsForm`, **accent 카드 그리드** — [05](05-decisions.md) D35).
+    카드 갤러리(+클릭 확대 모달)로 렌더한다. 두 pill은 workdir 확정 + 산출물 ≥1일 때만 표시된다.
+    산출물 탭 행에는 **hover '지식으로 저장' 액션**(존재하는 산출물만)이 있고, **'지식 저장' 탭**
+    (`KnowledgeSavePanel`, D59)은 완료 배너/행 액션으로 열리는 조건부 탭이다 — 산출물 체크박스(존재
+    프로브 `useArtifactExistence` 공용 훅, 미생성은 disabled)+제목+**격리 요약 턴**(오픈 시 자동 시작,
+    ` ```summary ` 펜스 계약+평문 폴백, 편집 가능·저장 비블록)+저장(`save_knowledge_files`). entryId는
+    세션당 고정이라 같은 세션 재저장은 upsert. 또는 요구사항 폼(`RequirementsForm`, **accent 카드 그리드** — [05](05-decisions.md) D35).
     **'요구사항' 탭 pill은 폼이 사용자 답변을 기다리는 동안만 렌더**되고, 제출/초기화로 `clarify`가 비면
     탭이 사라진다(`effectiveTab` 파생으로 pill 없는 상태 방어 — D41). **'검색 결과' 탭**은 rag 기반 단계가
     결과를 얻으면 나타나 세션 동안 유지되며, 클라이언트가 `RagHit[]`에서 생성한 이스케이프된 자립형
@@ -291,7 +299,9 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   `codebase`(코드베이스 분석 — 매 턴 `extraDirs`로 접근 부여(claude `--add-dir`, gemini/aipro
   `--include-directories` — D52) + 절대경로 컨텍스트(`pathContext`)가 "이 폴더에서 탐색 시작"을 지시) →
   `rag`(preflight가 `rag_search`로 사내 문서 발췌를 조회해 wire에 첨부 +
-  캔버스 '검색 결과' 탭 표시) → `knowledge`(preflight가 `list_knowledge` 항목을 16KB 상한으로 주입).
+  캔버스 '검색 결과' 탭 표시) → `knowledge`(preflight가 `list_knowledge` 항목을 16KB 상한으로 주입;
+  **artifact 엔트리(D59)는 요약+첨부 문서 절대경로 인덱스로 주입**되고 `knowledge/artifacts` 루트가
+  extraDirs에 등록되어 에이전트가 원문 전체를 직접 읽는다).
   rag/knowledge는 미설정·0건·실패 시 **에이전트 턴 없이 건너뛴다**(system 안내 + 커서 전진 + 다음
   생성형 단계로 체인; preflight 중 Stop은 취소 폴백). `plan`은 항상 활성, 그 외 카테고리는 Flows
   토글(저장 배열에 기반 kind 존재 = 플래그). 이후 기존 설정 단계들이 오늘과 동일하게 이어진다.
