@@ -1,14 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { CanvasPanel } from "./CanvasPanel";
+import type { StepProgress } from "./WorkflowStepper";
 import type { Category } from "./workspace";
+import { artifactsFor, joinWorkdirPath, normalizePathKey } from "../lib/artifacts";
 import { formatClarifyAnswers, type ClarifyAnswer, type ClarifyQuestion } from "../lib/clarify";
 import { ragResultHtml } from "../lib/foundation";
 import type { AgentInfo, DetectedAgent, RagHit, Settings, StoredSession } from "../lib/types";
 
-/** Canvas views: the fixed tabs plus one `file:<path>` viewer tab per open file
+/** Canvas views: the fixed tabs (산출물/다이어그램 aggregate the workflow's
+ * document artifacts — D58) plus one `file:<path>` viewer tab per open file
  * (the 파일 tab is the list; opening a file spawns its own closable tab — D49). */
-export type CanvasTab = "files" | "requirements" | "rag" | `file:${string}`;
+export type CanvasTab =
+  | "files"
+  | "requirements"
+  | "rag"
+  | "artifacts"
+  | "diagrams"
+  | `file:${string}`;
 
 export function fileTabId(path: string): CanvasTab {
   return `file:${path}`;
@@ -122,6 +131,19 @@ export function WorkspaceView({
   const [prefillNonce, setPrefillNonce] = useState(0);
   const [canvasTab, setCanvasTab] = useState<CanvasTab>("files");
   const [streaming, setStreaming] = useState(false);
+  // Workflow step progress mirrored up from ChatPanel (ownership stays there —
+  // D57/D58); feeds the 산출물 tab's per-artifact status chips.
+  const [stepProgress, setStepProgress] = useState<StepProgress[] | null>(null);
+  // The 산출물 tab's selected artifact (stepId), or null → auto-pick.
+  const [artifactSel, setArtifactSel] = useState<string | null>(null);
+  // The category workflow's document artifacts. Frozen per session like
+  // ChatPanel's WF (settings intentionally omitted from the deps — both
+  // recompute together on the sessionNonce remount).
+  const artifacts = useMemo(
+    () => artifactsFor(activeCategory, settings),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeCategory, sessionNonce],
+  );
 
   // Mirror the streaming state up (D57): app-level navigation asks before
   // unmounting a busy workspace; the cleanup clears the flag on leave.
@@ -152,6 +174,8 @@ export function WorkspaceView({
     resetClarify();
     setRagResult(null); // codebasePath stays — it is project-scoped
     setOpenFiles([]);
+    setArtifactSel(null);
+    setStepProgress(null); // the remounted ChatPanel re-mirrors its fresh value
     setSessionNonce((n) => n + 1);
   };
 
@@ -162,6 +186,8 @@ export function WorkspaceView({
     resetClarify();
     setRagResult(null);
     setOpenFiles([]);
+    setArtifactSel(null);
+    setStepProgress(null);
     setSessionNonce((n) => n + 1);
   };
 
@@ -194,7 +220,23 @@ export function WorkspaceView({
     if (opts?.refresh) setRefreshNonce((n) => n + 1);
   };
 
-  const handleOpenFile = (path: string) => openFile(path, { refresh: true });
+  // Workflow-produced files route to the 산출물 hub instead of spawning a file
+  // tab (D58, amends D49) — the hub is where the "구획별 여러 계획" documents
+  // live. Non-artifact files (and all tree clicks) keep their D49 file tabs.
+  const handleOpenFile = (path: string) => {
+    const hit = resolvedWorkdir
+      ? artifacts.find(
+          (a) => normalizePathKey(joinWorkdirPath(resolvedWorkdir, a.file)) === normalizePathKey(path),
+        )
+      : undefined;
+    if (hit) {
+      setArtifactSel(hit.stepId);
+      setCanvasTab("artifacts");
+      setRefreshNonce((n) => n + 1); // tree reload + viewer re-read + probe/scan re-run
+    } else {
+      openFile(path, { refresh: true });
+    }
+  };
 
   const handleCloseFile = (path: string) => {
     setOpenFiles((f) => f.filter((p) => p !== path));
@@ -272,6 +314,7 @@ export function WorkspaceView({
           onPrefill={handlePrefill}
           onRagResult={handleRagResult}
           onStreamingChange={handleStreamingChange}
+          onStepProgress={setStepProgress}
           onOpenAgents={onOpenAgents}
         />
       </div>
@@ -304,6 +347,10 @@ export function WorkspaceView({
         prefillNonce={prefillNonce}
         onSubmitAnswers={handleSubmitAnswers}
         ragResult={ragResult}
+        artifacts={artifacts}
+        stepProgress={stepProgress}
+        artifactSel={artifactSel}
+        onSelectArtifact={setArtifactSel}
         streaming={streaming}
       />
       {/* While dragging, a full-window shield keeps the canvas iframes (HTML/

@@ -32,6 +32,7 @@ import {
   parsePrefill,
   type ClarifyQuestion,
 } from "../lib/clarify";
+import { joinWorkdirPath } from "../lib/artifacts";
 import { buildRagQuery, formatKnowledgeContext, formatRagContext, ragUserError } from "../lib/foundation";
 import { optionsFor } from "../lib/options";
 import { resolveSkills } from "../lib/skills";
@@ -72,11 +73,6 @@ function buildTranscript(prev: ChatMessage[], latest: string): string {
   return lines.join("\n\n");
 }
 
-/** Join a Windows workdir with a relative file path (for opening produced files). */
-function joinPath(dir: string, rel: string): string {
-  return `${dir.replace(/[\\/]+$/, "")}\\${rel.replace(/\//g, "\\")}`;
-}
-
 export function ChatPanel({
   projectId,
   onResolveWorkdir,
@@ -98,6 +94,7 @@ export function ChatPanel({
   onPrefill,
   onRagResult,
   onStreamingChange,
+  onStepProgress,
   onOpenAgents,
 }: {
   /** The active project id (folder key for persistence). */
@@ -137,10 +134,12 @@ export function ChatPanel({
   onRagResult: (query: string, hits: RagHit[]) => void;
   /** Mirror streaming state up (canvas form disables while streaming). */
   onStreamingChange: (streaming: boolean) => void;
+  /** Mirror the workflow step progress up (canvas 산출물 tab shows per-artifact
+   * status, D58) — ownership stays here, same pattern as onStreamingChange. */
+  onStepProgress?: (progress: StepProgress[] | null) => void;
   /** Navigate to the Agents view (undetected-agent onboarding, D57). */
   onOpenAgents?: () => void;
 }) {
-  void onOpenFile; // reserved for future produced-file chips
   const [messages, setMessages] = useState<ChatMessage[]>(
     () => (initialSession?.messages as ChatMessage[] | undefined) ?? [],
   );
@@ -259,6 +258,10 @@ export function ChatPanel({
   useEffect(() => {
     onStreamingChange(streaming);
   }, [streaming, onStreamingChange]);
+
+  useEffect(() => {
+    onStepProgress?.(stepProgress);
+  }, [stepProgress, onStepProgress]);
 
   // Cancel any in-flight run when this panel unmounts (new session, open a saved
   // session, or leave home) so we don't leak a background agent process.
@@ -443,7 +446,7 @@ export function ChatPanel({
             // stop before a terminal chat step.
             setStepStatusAt(stepIdx, "done");
             if (step.file && resolvedWorkdirRef.current) {
-              onOpenFile(joinPath(resolvedWorkdirRef.current, step.file));
+              onOpenFile(joinWorkdirPath(resolvedWorkdirRef.current, step.file));
             }
             const nextIdx = stepIdx + 1;
             stepIndexRef.current = nextIdx;

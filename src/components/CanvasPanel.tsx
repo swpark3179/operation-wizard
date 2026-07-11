@@ -8,10 +8,14 @@ import {
   ChevronRight,
   X,
 } from "lucide-react";
+import { ArtifactsPanel } from "./ArtifactsPanel";
+import { DiagramGallery } from "./DiagramGallery";
 import { FileViewer } from "./FileViewer";
 import { RequirementsForm } from "./RequirementsForm";
+import type { StepProgress } from "./WorkflowStepper";
 import { fileTabId, fileTabPath, type CanvasTab } from "./WorkspaceView";
 import { listDir } from "../lib/api";
+import type { ArtifactDef } from "../lib/artifacts";
 import type { ClarifyAnswer, ClarifyQuestion } from "../lib/clarify";
 import type { FileEntry } from "../lib/types";
 
@@ -119,6 +123,10 @@ export function CanvasPanel({
   prefillNonce,
   onSubmitAnswers,
   ragResult,
+  artifacts,
+  stepProgress,
+  artifactSel,
+  onSelectArtifact,
   streaming,
 }: {
   workdir: string | null;
@@ -144,6 +152,13 @@ export function CanvasPanel({
   onSubmitAnswers: (answers: ClarifyAnswer[]) => void;
   /** The latest RAG search result (in-memory HTML for the "검색 결과" tab, D46). */
   ragResult: { query: string; html: string } | null;
+  /** The workflow's document artifacts (D58) — gates the 산출물/다이어그램 tabs. */
+  artifacts: ArtifactDef[];
+  /** Live workflow status mirrored from ChatPanel (null → existence-only). */
+  stepProgress: StepProgress[] | null;
+  /** The 산출물 tab's selected artifact (stepId), or null → auto-pick. */
+  artifactSel: string | null;
+  onSelectArtifact: (stepId: string) => void;
   /** True while a run is streaming (form submit disabled). */
   streaming: boolean;
 }) {
@@ -173,9 +188,14 @@ export function CanvasPanel({
     void load();
   }, [load, refreshNonce]);
 
+  // The 산출물/다이어그램 tabs exist while the workflow has document artifacts
+  // and the workdir is resolved (D58 — plain-chat categories never show them).
+  const hasArtifacts = !!workdir && artifacts.length > 0;
+
   // The requirements tab exists only while the form awaits the user (a stale
   // `tab === "requirements"` can never render a pill-less view); the rag tab
-  // exists once a search result arrived and stays for the session; a file tab
+  // exists once a search result arrived and stays for the session; the
+  // artifacts/diagrams tabs exist while `hasArtifacts` (D58); a file tab
   // exists only while its path is in `openFiles` (D49).
   const activeFilePath = fileTabPath(tab);
   const effectiveTab: CanvasTab =
@@ -187,11 +207,15 @@ export function CanvasPanel({
         ? ragResult
           ? "rag"
           : "files"
-        : activeFilePath
-          ? openFiles.includes(activeFilePath)
+        : tab === "artifacts" || tab === "diagrams"
+          ? hasArtifacts
             ? tab
             : "files"
-          : tab;
+          : activeFilePath
+            ? openFiles.includes(activeFilePath)
+              ? tab
+              : "files"
+            : tab;
   const effectiveFilePath = fileTabPath(effectiveTab);
 
   const tabBtn = (id: CanvasTab, label: string, badge?: boolean) => (
@@ -251,6 +275,8 @@ export function CanvasPanel({
         <div className="flex min-w-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-line bg-subtle p-0.5">
           {!!clarify?.length && tabBtn("requirements", "요구사항", true)}
           {!!ragResult && tabBtn("rag", "검색 결과")}
+          {hasArtifacts && tabBtn("artifacts", "산출물")}
+          {hasArtifacts && tabBtn("diagrams", "다이어그램")}
           {tabBtn("files", "파일")}
           {openFiles.map(fileTabPill)}
         </div>
@@ -317,6 +343,17 @@ export function CanvasPanel({
           srcDoc={ragResult.html}
           className="h-full w-full flex-1 border-0 bg-white"
         />
+      ) : effectiveTab === "artifacts" && workdir ? (
+        <ArtifactsPanel
+          workdir={workdir}
+          artifacts={artifacts}
+          stepProgress={stepProgress}
+          refreshNonce={refreshNonce}
+          selected={artifactSel}
+          onSelect={onSelectArtifact}
+        />
+      ) : effectiveTab === "diagrams" && workdir ? (
+        <DiagramGallery workdir={workdir} artifacts={artifacts} refreshNonce={refreshNonce} />
       ) : !treeRoot ? (
         <div className="flex flex-1 flex-col items-center justify-center px-6 text-center text-ink-soft">
           <div className="mb-4 grid h-16 w-16 place-items-center rounded-[18px] bg-subtle text-ink-faint">

@@ -30,7 +30,8 @@ const SEGMENT_CLS: Record<StepProgressStatus, string> = {
   halted: "bg-warn",
 };
 
-function StatusIcon({ status }: { status: StepProgressStatus }) {
+/** Per-status icon — also reused by the canvas 산출물 tab's artifact rows (D58). */
+export function StatusIcon({ status }: { status: StepProgressStatus }) {
   switch (status) {
     case "done":
       return <CheckCircle2 size={14} className="shrink-0 text-ok" />;

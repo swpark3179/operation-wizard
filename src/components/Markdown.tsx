@@ -28,8 +28,9 @@ function loadMermaid(): Promise<MermaidModule> {
 }
 
 /** One ```mermaid fence → SVG. A render failure falls back to the raw code
- * plus a small note, so the viewer never breaks on a malformed diagram. */
-function MermaidDiagram({ code }: { code: string }) {
+ * plus a small note, so the viewer never breaks on a malformed diagram.
+ * Also reused standalone by the canvas 다이어그램 gallery (D58). */
+export function MermaidDiagram({ code }: { code: string }) {
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
