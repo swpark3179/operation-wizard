@@ -162,6 +162,55 @@ const QUERY_SQL_STEP = `[시스템 지시: 참고 SQL 작성 단계]
 - **읽기 전용 SELECT만** 작성하고, ERD에서 확인된 테이블·컬럼만 사용하세요(미확인은 주석으로 표시).
 - 파일 저장 후, 무엇을 조회하는 SQL인지 한두 문장으로만 보고하세요.`;
 
+// ── change(데이터 변경·권한) 단계별 기본 지시문 ──────────────────────────────────
+// 데이터 변경·권한 카테고리도 query처럼 기반 3단계를 변경 관점 지시문으로 쓴다.
+// 코드베이스 분석·ERD 정리는 조회와 거의 동일하고, 마지막 산출물이 운영 반영용
+// DC Manager 신청양식(HTML)이라는 점에서 차이가 난다(D62).
+
+const CHANGE_CODEBASE_STEP = `[시스템 지시: 변경 대상·영향 탐색 단계]
+프롬프트에 명시된 "분석 대상 코드베이스 폴더"(절대경로)를 **읽기 전용으로 탐색**해, 이번 변경 대상 객체와
+그 변경이 미치는 영향(참조·수정 지점)을 찾고 결과를 파일로 작성하세요.
+- **모든 탐색·검색·읽기를 그 코드베이스 폴더의 절대경로에서 시작하세요.** 작업 폴더는 산출물 저장 전용이며
+  분석 대상이 아닙니다. 코드베이스 폴더의 파일은 절대 수정·생성·삭제하지 마세요(읽기·검색만).
+- 대상 테이블/객체의 정의(DDL·모델·매퍼 매핑)와, 그 테이블을 삽입(C)·조회(R)·수정(U)·삭제(D)하는
+  SQL·DAO/매퍼·리포지토리·배치를 찾습니다. 유사한 기존 변경/마이그레이션 스크립트도 참고로 수집합니다.
+- 결과는 **작업 폴더**에 \`docs/change-references.md\`로 저장하세요(없으면 docs 폴더도 생성). 각 항목은
+  실제 파일 경로 / 무엇을 하는지 / 참조 유형(C·R·U·D) / 이번 변경과의 관계를 함께 표기하세요.
+- 아직 신청양식이나 변경 SQL을 작성하지 마세요. 이번 턴은 "대상·영향 탐색과 기록"만 합니다.
+- 파일 저장 후, 영향이 큰 지점 한두 건만 한 문장으로 보고하세요.`;
+
+const CHANGE_RAG_STEP = `[시스템 지시: 사내 문서 RAG 검색 단계]
+아래에 첨부된 사내 문서(Confluence) 발췌는 사전 임베딩된 지식베이스에서 검색된 결과입니다.
+- 이번 변경과 관련된 **표준 절차·승인 규칙·명명 규칙·과거 변경 이력**을 발췌에서 정리하고, 각 항목에
+  출처(제목/URL)를 인용하세요.
+- 발췌에 없는 내용을 지어내지 마세요. 부족한 부분은 "추가 확인 필요"로 명시하세요.
+- 아직 신청양식을 작성하지 마세요. 이번 턴은 "변경 기준·절차 근거 정리"만 합니다.`;
+
+const CHANGE_KNOWLEDGE_STEP = `[시스템 지시: 지식 베이스 반영 단계]
+아래에 첨부된 사내 지식 항목들은 과거 변경 작업 방식(대상 테이블·표준 절차·승인 흐름·주의사항)의 기록입니다.
+- 이번 요청에 적용되는 항목(예: 대상 테이블의 특성·주의점, 과거 유사 변경, DC Manager 신청 관례)을 골라
+  무엇을 어떻게 반영할지 정리하세요.
+- 이후 ERD·신청양식 단계에서 이 관례를 제약으로 준수하세요.
+- 적용할 항목이 없으면 없다고 보고하세요.`;
+
+const CHANGE_TABLE_INFO_STEP = `[시스템 지시: 테이블 정보·ERD 정리 단계]
+지금까지의 요구사항·영향 탐색·문서·지식을 종합해, 변경 대상 및 관련 테이블 정보를 **파일로 작성**하세요.
+- 작업 폴더에 \`docs/change-table-info.md\` 파일을 만들어(없으면 docs 폴더도 생성) 파일 쓰기 도구로 저장하세요.
+- 문서에는 다음을 포함하세요:
+  - **테이블 상관관계 ERD**: \`\`\`mermaid\`\`\` \`erDiagram\` (엔티티의 PK/주요 컬럼 + 관계선에 조인 키·카디널리티).
+  - **대상 테이블 정보 표**(테이블 / 설명 / 저장소·DBMS / 주요 컬럼·제약 / 담당 — 확인 안 되면 "미확인").
+  - **영향 프로그램 표**(프로그램 ID·명 / 참조 테이블 / 참조 유형 C·R·U·D / 변경 시 후속 조치).
+- 근거 없는 컬럼·관계·값을 지어내지 마세요(불확실은 "미확인"). 파일 저장 후 핵심만 한두 문장으로 보고하세요.`;
+
+const CHANGE_DC_MANAGER_STEP = `[시스템 지시: DC Manager 신청양식 생성 단계]
+요구사항에서 고른 **변경 종류**에 맞춰, 운영서버 반영용 **DC Manager 신청양식을 HTML 파일로 작성**하세요.
+- 작업 폴더에 \`docs/dc-manager-form.html\` 파일을 만들어(없으면 docs 폴더도 생성) 파일 쓰기 도구로 저장하세요.
+- 앞 단계의 ERD·영향 정보에서 **확인된 테이블·컬럼·프로그램만** 사용하고, 확인되지 않은 값은 "[확인 필요]"로
+  표시하세요. 스키마를 지어내지 마세요.
+- 스킬 지시대로 **인라인 style 속성 + 시맨틱 표** 중심의 자립형 HTML을 만드세요(붙여넣기 시 서식 유지).
+  본문은 앱의 "본문 복사" 버튼으로 그대로 복사되어 DC Manager 편집기에 붙습니다.
+- 파일 저장 후, 어떤 종류의 신청서를 만들었는지 한 문장으로만 보고하세요.`;
+
 /** The mandatory foundation trio, in canonical order (D44). These are the
  * defaults merged/pinned by `coerceSteps`; the Flows editor shows them as
  * non-deletable cards whose instruction/skills/file stay editable. */
@@ -280,7 +329,50 @@ export const DEFAULT_WORKFLOWS: Record<Category, StepDef[]> = {
     { id: "chat", name: "마무리 대화", kind: "chat", instruction: "", skillIds: ["query-safe"] },
   ],
   change: [
-    { id: "change", name: "대화", kind: "chat", instruction: "", skillIds: ["change-safe"] },
+    {
+      id: "change-codebase",
+      name: "변경 대상·영향 탐색",
+      kind: "codebase",
+      instruction: CHANGE_CODEBASE_STEP,
+      file: "docs/change-references.md",
+      // codebase 기본 output은 "chat"(파일 스트립)이므로, 참조·영향 목록을
+      // 산출물로 남기려면 "file"을 명시한다(D61/D62 패턴).
+      output: "file",
+      skillIds: ["change-impact-explore"],
+    },
+    {
+      id: "rag-search",
+      name: "사내 문서 RAG 검색",
+      kind: "rag",
+      instruction: CHANGE_RAG_STEP,
+      skillIds: [],
+    },
+    {
+      id: "knowledge",
+      name: "지식 베이스 반영",
+      kind: "knowledge",
+      instruction: CHANGE_KNOWLEDGE_STEP,
+      skillIds: [],
+    },
+    {
+      id: "change-table-info",
+      name: "테이블 정보·ERD 정리",
+      kind: "document",
+      instruction: CHANGE_TABLE_INFO_STEP,
+      file: "docs/change-table-info.md",
+      skillIds: ["table-erd"],
+    },
+    {
+      // document + .html이라 output이 "file"로 파생 → 합성 html-render substep 없이
+      // 에이전트가 HTML을 직접 저술한다(붙여넣기용 폼이라 범용 렌더러 chrome를 피함, D62).
+      id: "dc-manager",
+      name: "DC Manager 신청양식 생성",
+      kind: "document",
+      instruction: CHANGE_DC_MANAGER_STEP,
+      file: "docs/dc-manager-form.html",
+      skillIds: ["dc-manager-form"],
+    },
+    { id: "chat", name: "마무리 대화", kind: "chat", instruction: "", skillIds: ["change-safe"] },
   ],
 };
 

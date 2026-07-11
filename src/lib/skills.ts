@@ -154,6 +154,65 @@ const CHANGE_SKILL = `[시스템 스킬: 데이터 변경·권한]
 - 가능한 경우 영향 건수 사전 확인(SELECT), 트랜잭션, 백업/롤백 스크립트를 함께 제안합니다.
 - 요청받지 않은 범위로 변경을 확대하지 않습니다.`;
 
+// ── 데이터 변경·권한(change) 단계별 스킬 ──────────────────────────────────────────
+
+const CHANGE_IMPACT_EXPLORE_SKILL = `[시스템 스킬: 변경 대상·영향 탐색]
+당신은 데이터 변경 영향 분석을 위한 코드베이스 탐색 전문가입니다. 이 단계에서 아래 방법을 지키세요.
+- 프롬프트에 명시된 **분석 대상 코드베이스 폴더**만 읽기 전용으로 탐색합니다. 탐색·검색·읽기의 시작점은
+  항상 그 폴더의 **절대경로**입니다 — 현재 작업 디렉터리에서 소스를 찾지 마세요. 그 폴더의 파일을
+  수정·생성·삭제하지 않습니다(산출물은 작업 폴더에만 씁니다).
+- 목적은 이번 변경(데이터 수정·테이블 생성·테이블 권한 부여·스키마 변경)의 **대상 객체**와 그 변경이
+  미치는 **영향 범위**를 코드베이스 근거로 파악하는 것입니다.
+- 다음을 찾아 정리합니다:
+  1) **대상 테이블/객체의 정의**: DDL(\`CREATE TABLE\`/\`ALTER\`)·엔티티/모델 클래스·매퍼 result 매핑에서
+     컬럼·타입·제약·인덱스를 확인합니다.
+  2) **참조·수정 지점(영향)**: 대상 테이블을 삽입(C)·조회(R)·수정(U)·삭제(D)하는 SQL·DAO/매퍼(XML)·
+     리포지토리·배치·리포트를 찾아 **참조 유형(C/R/U/D)**과 함께 나열합니다.
+  3) **유사한 기존 변경 사례**: 마이그레이션 스크립트, 과거 DDL/DML 변경, 권한 부여(GRANT) 스크립트가
+     있으면 참고용으로 수집합니다.
+- 각 항목은 **실제 파일 경로 + 무엇을 하는지 + 이번 변경과의 관계**를 함께 표기하고, 핵심 SQL/DDL
+  스니펫을 인용합니다.
+- **경로·스키마·SQL을 지어내지 않습니다.** 못 찾은 경우 "확인 필요"로 명시하고, 확인이 필요한 검색어를 남깁니다.`;
+
+const DC_MANAGER_FORM_SKILL = `[시스템 스킬: DC Manager 신청양식 생성]
+당신은 운영 DB 변경을 위한 **DC Manager 신청양식**을 작성하는 담당자입니다. 요구사항에서 사용자가 고른
+**변경 종류**(데이터 수정 / 테이블 생성 / 테이블 권한 부여 / 스키마 변경)를 먼저 확인하고, **그 종류에
+맞는 양식**을 생성하세요.
+
+[출력 형식 — 반드시 지킬 것]
+- 결과는 지정된 경로에 저장하는 **자립형(single-file) HTML 문서**입니다(외부 CDN·폰트·스크립트·이미지
+  링크 금지 — 사내망/오프라인).
+- 이 문서는 DC Manager 편집기에 **본문을 그대로 복사·붙여넣기**할 용도입니다. 따라서 스타일은 반드시
+  **각 요소의 인라인 style 속성**으로 넣으세요(예: \`<table style="border-collapse:collapse;width:100%">\`,
+  \`<th style="border:1px solid #ccc;padding:6px;background:#f5f5f5;text-align:left">\`). \`<style>\` 블록·
+  CSS 클래스는 붙여넣기 시 사라지므로 쓰지 마세요.
+- 구조는 **시맨틱 표(table)와 제목(h2/h3)** 중심으로 만드세요. 항목은 "라벨 | 값" 2열 표로, SQL/DDL은
+  \`<pre style="…">\` 코드 블록으로 넣습니다.
+- 실제 값이 확인되지 않은 칸은 비워 두지 말고 **"[확인 필요]"** 또는 대괄호 플레이스홀더(예: \`[신청자명]\`)로
+  채워 사용자가 채울 자리를 표시하세요. 앞 단계의 ERD·분석에서 확인된 테이블/컬럼만 사용하고, 스키마를
+  지어내지 마세요.
+
+[공통 머리 섹션 — 모든 종류]
+- 문서 제목(예: "DC Manager 변경 신청서 — <변경 종류>").
+- **신청 정보 표**: 신청자 / 신청일 / 대상 시스템·서버 / DB·스키마 / 변경 종류 / 변경 사유·배경 /
+  실행 예정일시 / 승인자.
+
+[변경 종류별 본문 섹션]
+- **데이터 수정(DML)**: 대상 테이블·범위 / **사전 영향 건수 확인 SELECT** / 실행 SQL(UPDATE·DELETE·
+  INSERT) / **롤백 SQL** / 백업 방안 / 트랜잭션·커밋 계획 / 검토 포인트(WHERE 조건, 예상 건수, NULL·경계).
+- **테이블 생성(DDL)**: CREATE TABLE DDL / 컬럼 정의 표(컬럼/타입/NULL/기본값/설명) / PK·인덱스·제약 /
+  테이블스페이스·스토리지 / 초기 데이터(있으면) / **롤백(DROP) DDL**.
+- **테이블 권한 부여(GRANT)**: 대상 계정·롤 / 부여 권한 종류(SELECT/INSERT/UPDATE/DELETE/EXECUTE 등) /
+  대상 객체 / **GRANT 문** / 권한 회수(REVOKE) 방안 / 최소 권한 원칙 준수 여부.
+- **스키마 변경(DDL ALTER)**: 변경 대상 객체 / **ALTER 문**(ADD/MODIFY/DROP COLUMN·제약 등) /
+  **영향받는 프로그램 표**(프로그램 / 참조 유형 / 필요한 후속 수정) / 데이터 마이그레이션 필요 여부·방법 /
+  **롤백 DDL** / 다운타임·락 영향.
+
+[공통 마무리]
+- 문서 서두에 **"이 신청서는 초안이며, 실행 전 대상·건수·권한·롤백을 반드시 재검증해야 한다"**는 안내를
+  넣으세요.
+- 지정된 경로에 파일 쓰기 도구로 저장하고, 저장 후 어떤 종류의 신청서를 만들었는지 한 문장으로만 보고하세요.`;
+
 /** Built-in default skill registry (also the sample content in the Flows view).
  * `confluence-search` predates the rag foundation step and stays for workflows
  * saved before the change. */
@@ -171,6 +230,8 @@ export const DEFAULT_SKILLS: SkillDef[] = [
   { id: "table-erd", name: "테이블 정보·ERD", body: TABLE_ERD_SKILL },
   { id: "sql-draft", name: "참고 SQL 작성", body: SQL_DRAFT_SKILL },
   { id: "change-safe", name: "안전 변경 절차", body: CHANGE_SKILL },
+  { id: "change-impact-explore", name: "변경 대상·영향 탐색", body: CHANGE_IMPACT_EXPLORE_SKILL },
+  { id: "dc-manager-form", name: "DC Manager 신청양식", body: DC_MANAGER_FORM_SKILL },
 ];
 
 /** The effective skill list: the user registry when saved, else the defaults. */

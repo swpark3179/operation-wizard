@@ -74,6 +74,18 @@ codebase 단계는 `output:"file"`을 명시해 참조 목록(`docs/query-refere
 (codebase 기본 output은 "chat"이라 file이 스트립되므로 — D61). 스킬은 `reference-sql-explore`/
 `table-erd`/`sql-draft`(+`query-safe`).
 
+**`change`(데이터 변경·권한) 기본값(D62)**도 같은 뼈대다 — 초반 폼에서 **변경 종류**(데이터 수정 /
+테이블 생성 / 테이블 권한 부여 / 스키마 변경)를 고른 뒤, 기반 3단계(codebase=변경 대상·영향 탐색 /
+rag=변경 기준·절차 / knowledge=대상 특성·관례)에 이어 `테이블 정보·ERD 정리(document,
+docs/change-table-info.md — mermaid erDiagram)` → `DC Manager 신청양식 생성(document,
+docs/dc-manager-form.html)` → chat. **종류별 결과 분기는 워크플로우 분기가 아니라 스킬 분기**다: 고른
+종류가 wire에 계속 주입되고, `dc-manager-form` 스킬이 4종 템플릿 중 맞는 폼을 생성한다. DC Manager
+단계는 `document`가 **`.html`을 직접 저술**(output 파생 "file", `output:"html"`의 합성 `html-render`
+서브스텝을 쓰지 않음) — **인라인 style + 시맨틱 표**로 만들어 캔버스 FileViewer의 **"본문 복사"**
+버튼(D62)으로 서식째 붙여넣을 수 있게 한다. codebase 단계는 query처럼 `output:"file"`로 참조·영향 목록
+(`docs/change-references.md`)을 남긴다. 스킬은 `change-impact-explore`/`table-erd`/`dc-manager-form`
+(+`change-safe`).
+
 ## 변경 지점 쿡북 ("무엇을 하려면 어디를 고치나")
 
 ### A. 카테고리의 선택지(옵션)를 추가·수정
@@ -105,16 +117,18 @@ codebase 단계는 `output:"file"`을 명시해 참조 목록(`docs/query-refere
     성공 시 자동으로 다음 생성형 단계로 전진(`file` 지정 시 캔버스에 그 파일을 연다). 진행 노트는
     `name`에서 파생("N/M단계 · <name> 중…").
   - **기반 3단계(D44)는 고정(pinned)**: 편집기에서 삭제·이동·kind 변경 불가(지시문·스킬·file은 편집
-    가능). `plan`은 항상 강제(`coerceSteps`가 프리펜드·보충), **`query`는 기본값에 트리오를 포함**(D61 —
-    `foundationEnabled`가 stored 없으면 `DEFAULT_WORKFLOWS`로 폴백해 인식), guide/change는 "기반 3단계
-    사용" 토글로 트리오를 삽입/제거(저장 배열의 기반 kind 존재 = 활성 플래그). rag/knowledge 단계는 지시문 아래에
+    가능). `plan`은 항상 강제(`coerceSteps`가 프리펜드·보충), **`query`(D61)·`change`(D62)는 기본값에
+    트리오를 포함**(`foundationEnabled`가 stored 없으면 `DEFAULT_WORKFLOWS`로 폴백해 인식), guide는 "기반
+    3단계 사용" 토글로 트리오를 삽입/제거(저장 배열의 기반 kind 존재 = 활성 플래그). rag/knowledge 단계는 지시문 아래에
     **preflight 컨텍스트**(검색 발췌/지식 본문)가 자동 첨부되며, 미설정·0건이면 턴 없이 건너뛴다.
   - `kind: "chat"` = **종단**: 전진 없이 사용자 입력 대기. **마지막 단계는 반드시 `chat`**(저장 검증 +
     `coerceSteps` 자동 보강).
   - **결과 형태 `output`(D47)**: search/document/codebase 단계의 "결과 형태" 셀렉트 — `대화만`(산출물
     없음)/`파일`(기존 동작)/`HTML 캔버스`(런타임에 `html-render` 스킬을 단 합성 렌더 서브스텝이 붙어
     `.html` 재생성 → 캔버스 sandbox 미리보기). 설정에는 `output`만 저장되고 합성 단계는
-    `runtimeWorkflowFor`에서만 존재한다.
+    `runtimeWorkflowFor`에서만 존재한다. **대안**: document 단계의 `file`을 직접 `.html`로 두면(output은
+    "file"로 파생) 합성 서브스텝 없이 **에이전트가 HTML을 직접 저술**한다 — 폼처럼 특정 마크업/인라인
+    스타일이 필요할 때 쓴다(change의 DC Manager 신청양식, D62). 이 경우 전용 스킬이 마크업을 지시한다.
 - 커서 로직은 `ChatPanel`의 `stepIndexRef`/`stepArmedRef`/`injectedSkillIdsRef`/`inflightStepRef` + `end`
   핸들러 분기 + `autoTurn`(생성형→생성형 자동 발사). **새 kind를 추가하면** `StepKind`/`STEP_KINDS`
   (workflow.ts + settings.rs)와 `ChatPanel`의 `end` 분기, Flows 편집기의 kind 셀렉트를 함께 확장한다.

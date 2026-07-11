@@ -912,3 +912,57 @@
 - **한계/재검토**: 세션리스(gemini/aipro)·plain(opencode/antigravity)의 degrade는 D34/D40과 동일.
   실제 조회 실행·결과 표시는 범위 밖(참고용 SQL 산출까지). ERD·SQL 품질은 코드베이스에 참조 SQL이
   있는지에 크게 좌우된다(없으면 스킬이 "미확인"으로 표기).
+
+---
+
+### D62. 데이터 변경·권한(change) 카테고리 다단계 기본 플로우 + DC Manager 신청양식(HTML) + 본문 HTML 복사
+- **배경**: `change`(데이터 변경·권한)는 단일 `chat` 단계뿐이었다(가이드 플로우 없음). 사용자 요구 —
+  이 카테고리를 `query`(D61)처럼 다단계로 만들되 **초반에 변경 종류**(데이터 수정 / 테이블 생성 /
+  테이블 권한 부여 / 스키마 변경)를 고르게 하고, **그 종류에 따라 결과 양식이 달라지게**, 최종적으로
+  **운영서버 반영용 DC Manager 신청양식**을 **HTML로 생성해 본문을 서식째 복사**할 수 있게 한다.
+- **핵심 판단**: query가 그대로 템플릿이라 **새 컴포넌트/StepKind/백엔드/의존성이 없다** — 콘텐츠 카탈로그
+  정비(options/skills/workflow) + FileViewer/clipboard 1건뿐. 매핑: 초반 종류 선택 = 옵션 프리플로우(D36),
+  코드베이스·ERD 파악 = 기반 3단계 + `table-erd`(query와 거의 동일, 사용자 명시), **차이 지점 = DC Manager
+  신청양식 단계**.
+- **결정 요점**:
+  1. **종류별 결과 분기 = 워크플로우 분기가 아니라 스킬 분기.** 단계 배열은 카테고리당 고정이다(조건
+     분기 미지원, D30/D34). `changeType` 답변은 폼 제출 시 wire에 주입되어 이후 턴에 계속 보이므로,
+     **`dc-manager-form` 스킬이 4종 템플릿을 담고 주입된 종류에 맞는 폼을 생성**한다. 초반 탐색/ERD 단계는
+     종류 무관하게 동일.
+  2. **`DEFAULT_WORKFLOWS.change` 다단계화(`lib/workflow.ts`)**: `[change-codebase(codebase, output:file,
+     docs/change-references.md) → rag-search(rag) → knowledge(knowledge) → change-table-info(document,
+     docs/change-table-info.md — mermaid erDiagram) → dc-manager(document, docs/dc-manager-form.html) →
+     chat]`. 기반 3단계는 change 맞춤 지시문(`CHANGE_*_STEP`)으로 배열에 직접 포함(coerceSteps가 kind별로
+     stored를 기본 트리오보다 우선 — plan/query 패턴). codebase는 `output:"file"` 명시(기본 "chat"이면
+     파일 스트립 — D61 패턴). `foundationEnabled`가 `?? DEFAULT_WORKFLOWS`로 트리오를 인식해 change도
+     기반 3단계·`codebasePath` folder 질문(D45)이 자동 활성.
+  3. **DC Manager 폼은 `document` 단계가 `.html`을 직접 저술**(`file: docs/dc-manager-form.html`, output은
+     document 기본값 `"file"`로 파생). **`output:"html"`을 쓰지 않는다** — 그건 범용 `html-render` 스킬로
+     "직전 md를 예쁘게 재렌더"하는 용도라 섹션 카드 chrome가 붙어 붙여넣기용 폼에 부적합. 전용
+     `dc-manager-form` 스킬이 **인라인 style 속성 + 시맨틱 표** 중심의 자립형 HTML을 직접 만들어, `<body>`만
+     복사해도 서식이 살아 붙게 한다(`<style>`/CSS 클래스는 리치 텍스트 붙여넣기 시 사라지므로 금지).
+  4. **스킬 2종 추가(`lib/skills.ts`)**: `change-impact-explore`(대상 객체 DDL·참조/수정 지점 C·R·U·D·
+     기존 변경 스크립트 탐색; 지어내기 금지), `dc-manager-form`(공통 신청정보 + 종류별 섹션 — DML:
+     사전 건수 SELECT/실행 SQL/롤백 SQL, DDL 생성: CREATE·롤백 DROP, 권한: GRANT·REVOKE 방안, ALTER:
+     영향 프로그램·마이그레이션·롤백 DDL; "신청 초안·재검증" 경고). 기존 `table-erd`/`change-safe` 재사용.
+  5. **옵션 정비(`lib/options.ts`)**: `changeType`를 4종으로 교체(권한은 **부여만** — 사용자 확정), 프리필용
+     `knownObjects`(이미 아는 대상 테이블·컬럼·객체) text 추가. `codebasePath` folder 질문은 `optionsFor`가
+     기반 활성 시 자동 프리펜드.
+  6. **본문 HTML 복사(`FileViewer`/`clipboard.ts`)**: FileViewer HTML 미리보기 파일바에 **"본문 복사"**
+     버튼(`isHtml && content!==null`, `shrink-0`, Copy→Check 1500ms). 샌드박스 iframe은 `allow-scripts`뿐이라
+     읽을 수 없으므로, 부모가 가진 원본 `content`를 `DOMParser`로 파싱해 `body.innerHTML`을 추출한다.
+     `clipboard.ts`에 **`copyHtml(html, plain?)`** 추가 — `ClipboardItem`로 `text/html`+`text/plain` 동시
+     기록, 실패 시 **hidden contenteditable 선택 + `execCommand("copy")`** 폴백(WebView2/Chromium). 기존
+     `copyText`는 무변경. **모든 `.html` 미리보기에 공통** 제공(기존 `output:"html"` 산출물에도 이득).
+- **백엔드 무변경**: `change`는 유효 카테고리, `html`은 유효 output, `validate_steps`는 카테고리별/기반순서
+  제약이 없다(마지막 `chat`만 요구). `STEP_KINDS`에 codebase/rag/knowledge가 이미 있어 **새 kind도 없음**.
+  serde/타입 미러 변경 0. **신규 의존성 0.**
+- **대안 기각**: `output:"html"` + 범용 `html-render`(폼 대신 스타일된 문서 chrome, 붙여넣기 부적합) /
+  종류별 워크플로우 분기(조건 분기 미지원 — 아키텍처 위배) / 종류별 스킬 4개(중복; 1개 스킬 4-템플릿 분기가
+  단순) / iframe 안에서 복사(opaque origin이라 clipboard 접근 불가 → 부모 문자열 파싱).
+- **하위호환**: change 워크플로우를 이미 저장한 사용자는 stored override가 우선(전체 교체형 — D39). 개편된
+  기본값은 Flows "기본값으로 되돌리기"로만 반영. guide 카테고리는 무변경.
+- **한계/재검토**: 세션리스(gemini/aipro)·plain(opencode/antigravity) degrade는 D34/D40과 동일. 실제 변경
+  실행·승인 연동은 범위 밖(신청양식 산출까지). 붙여넣기 서식 보존은 인라인 스타일 사용에 의존(에이전트가
+  `<style>`을 쓰면 body-복사 시 유실 — 스킬이 인라인을 강제하나 완전 보장은 아님). 종류가 늘면 스킬
+  템플릿을 확장.
