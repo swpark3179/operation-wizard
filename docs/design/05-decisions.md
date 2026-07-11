@@ -738,3 +738,42 @@
   스테퍼 상태의 WorkspaceView 리프트 — ChatPanel 지역 state로 충분(리마운트=리셋이 D27 관례와 일치).
 - **한계/재검토**: 언어 한글 통일(P2-12)·다크모드 토글·Escape 닫기·전체 재탐지 등 잔여 P2는 후속
   (보고서 로드맵 참조). 자동 연쇄의 턴 사이 짧은 비스트리밍 순간에는 이탈 확인이 걸리지 않는다(수용).
+
+---
+
+### D58. 캔버스 산출물 허브 · 문서 목차 · 다이어그램 갤러리 (프론트 전용)
+- **결정**: 캔버스에 워크플로우 산출물 중심의 두 고정 탭과 뷰어 목차를 추가한다 — ① **'산출물' 탭**
+  (`ArtifactsPanel`): 런타임 워크플로우의 `file` 있는 단계들을 좌측 산출물 목록(단계 상태 칩) + 우측
+  미리보기(`FileViewer` 재사용)로 집계해, "구획별 여러 계획" 문서를 파일 탭 사냥 없이 한 곳에서 오간다.
+  ② **'다이어그램' 탭**(`DiagramGallery`): 산출물 md 문서의 ` ```mermaid ` 펜스를 추출해 카드 갤러리
+  (+확대 모달)로 렌더한다. ③ **md 미리보기 목차**(`FileViewer`): 렌더된 DOM에서 h1~h3을 추출한
+  드롭다운으로 섹션 점프. **신규 Tauri 커맨드/의존성 0**(전부 프론트).
+- **세부 결정**:
+  - **산출물 데이터 = 파생 + 미러 + 프로브**: 목록은 `WorkspaceView`가 `artifactsFor(category, settings)`
+    (`lib/artifacts.ts` — `runtimeWorkflowFor`의 file 있는 단계, 합성 `-html` 서브스텝 포함)로 파생한다
+    (세션당 고정 — ChatPanel의 WF 고정과 동일 의미). 라이브 상태는 ChatPanel 소유의 `stepProgress`(D57)를
+    새 `onStepProgress` 콜백으로 **미러만** 올리고(`onStreamingChange` 패턴), 파일 존재는 부모 폴더
+    `list_dir` 프로브로 판정한다(`refreshNonce`로 재실행). 로드 세션(stepProgress 없음)은
+    생성됨/미생성 존재 기반 칩으로 degrade하되 미리보기는 그대로 동작한다.
+  - **산출물 라우팅(D49 개정)**: 워크플로우가 생성한 파일(`ChatPanel`의 `onOpenFile`)은 파일 탭을 만들지
+    않고 산출물 탭에서 해당 항목을 선택한다(경로 비교는 `normalizePathKey` — Windows 대소문자/구분자
+    정규화). 트리 클릭과 비산출물 파일은 기존 D49 파일 탭을 유지한다.
+  - **목차 = DOM 쿼리**: 헤딩 id/슬러그를 만들지 않고 미리보기 커밋 후 DOM에서 추출, 클릭 시 재쿼리해
+    엘리먼트 인덱스로 `scrollIntoView`. 한글 슬러그·중복 헤딩·원문/렌더 불일치 문제가 원천적으로 없고
+    코드펜스 안 헤딩은 자동 제외된다.
+  - **다이어그램 소스 = 산출물 md만**: 탭이 열릴 때 lazy 스캔(`read_file` + 펜스 추적 라인 스캐너
+    `extractMermaidBlocks` — 다른 펜스 안에 중첩된 mermaid는 제외), 동일 코드는 dedupe("외 N곳" 칩).
+    렌더는 마크다운 미리보기의 `MermaidDiagram`을 export해 재사용(다이어그램별 실패 폴백 포함).
+  - **탭 수명**: 두 pill은 `workdir 확정 && 산출물 ≥1`일 때만 렌더(기본 chat-only인 guide/query/change는
+    미표시), `effectiveTab` 가드는 rag 탭과 동형. 새 세션/기록 열기 시 `artifactSel`/`stepProgress` 초기화.
+- **근거**: plan 워크플로우가 문서 4~5개를 만들면서 개별 파일 탭이 쌓여 문서 간 이동이 사용성 병목이었다.
+  기존 인프라(파일 뷰어·mermaid 렌더러·stepProgress·refreshNonce)를 재사용하면 신규 백엔드 없이 집계
+  뷰가 성립한다. [01](01-overview.md)의 "범위 밖"이던 아티팩트 집계 뷰의 부분 구현.
+- **대안 기각**: `stepProgress`의 WorkspaceView 전체 리프트 — D57의 기각 유지(미러 콜백으로 충분).
+  헤딩 anchor/슬러그 방식 목차 — 한글 슬러그·충돌 처리·ReactMarkdown 커스텀 renderer 비용 대비 이득 없음.
+  workdir `docs/*.md` 전체 디스크 스캔 — 워크플로우 정의가 명확한 계약(사용자 편집 파일까지 끌어오면
+  노이즈). 신규 Tauri 커맨드 — `list_dir`/`read_file`로 충분.
+- **한계/재검토**: 과거 세션이 현 워크플로우 정의에 없는 산출물 파일을 남긴 경우 허브 목록에는 안 보인다
+  (파일 트리/탭으로 열람 가능). `read_file` 2MiB 상한을 넘는 산출물은 다이어그램 스캔에서 조용히 스킵된다.
+  다이어그램 스캔은 탭 오픈 시점 기준(백그라운드 감시 없음 — 재스캔 버튼/`refreshNonce`로 갱신). 산출물
+  단계가 수십 개로 늘면 허브 목록 가상화/그룹화를 검토.

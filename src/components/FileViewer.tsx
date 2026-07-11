@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Eye, Code2, FileText } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Eye, Code2, FileText, ListTree } from "lucide-react";
 import { MarkdownView } from "./Markdown";
 import { readFile } from "../lib/api";
 
@@ -30,6 +30,12 @@ export function FileViewer({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<"preview" | "source">("preview");
+  // Heading outline for the markdown preview (D58): extracted from the
+  // rendered DOM (no slugs/anchors — jumps go by element index), so Korean
+  // headings, duplicates and headings inside code fences all behave.
+  const previewRef = useRef<HTMLDivElement | null>(null);
+  const [outline, setOutline] = useState<{ level: number; text: string }[]>([]);
+  const [outlineOpen, setOutlineOpen] = useState(false);
 
   useEffect(() => {
     if (!path) {
@@ -64,6 +70,34 @@ export function FileViewer({
     [content, path],
   );
 
+  // Extract the outline after the preview commits (ReactMarkdown renders
+  // synchronously; the async mermaid swaps add no headings). `loading` is a
+  // dep because the preview div only mounts once loading flips false — a
+  // separate render where content/mode/path don't change — so without it the
+  // query would run against a not-yet-mounted previewRef.
+  useEffect(() => {
+    setOutlineOpen(false);
+    if (loading || mode !== "preview" || !path || !isMarkdown(path) || content === null) {
+      setOutline([]);
+      return;
+    }
+    const els = previewRef.current?.querySelectorAll<HTMLElement>("h1, h2, h3");
+    setOutline(
+      Array.from(els ?? []).map((el, i) => ({
+        level: Number(el.tagName[1]),
+        text: el.textContent?.trim() || `제목 ${i + 1}`,
+      })),
+    );
+  }, [content, mode, path, loading]);
+
+  // Jump by index, re-querying at click time (immune to re-renders).
+  const jumpTo = (index: number) => {
+    previewRef.current
+      ?.querySelectorAll<HTMLElement>("h1, h2, h3")
+      [index]?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setOutlineOpen(false);
+  };
+
   if (!path) {
     return (
       <div className="flex flex-1 items-center justify-center text-[12.5px] text-ink-faint">
@@ -74,13 +108,28 @@ export function FileViewer({
 
   const showPreviewToggle = isHtml(path) || isMarkdown(path);
 
+  const showOutline = mode === "preview" && isMarkdown(path) && outline.length > 0;
+
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
+    <div className="relative flex min-w-0 flex-1 flex-col">
       {/* file bar */}
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-line bg-panel px-3">
         <FileText size={13} className="shrink-0 text-ink-soft" />
         <span className="truncate font-mono text-[12px] text-ink-muted">{path}</span>
         <div className="flex-1" />
+        {showOutline && (
+          <button
+            type="button"
+            onClick={() => setOutlineOpen((o) => !o)}
+            title="목차"
+            className={
+              "grid h-6 w-6 shrink-0 place-items-center rounded-md border border-line transition-colors " +
+              (outlineOpen ? "bg-accent-tint text-accent" : "text-ink-soft hover:bg-subtle")
+            }
+          >
+            <ListTree size={13} />
+          </button>
+        )}
         {showPreviewToggle && (
           <div className="flex overflow-hidden rounded-md border border-line">
             <button
@@ -120,7 +169,7 @@ export function FileViewer({
               className="h-full w-full border-0 bg-white"
             />
           ) : mode === "preview" && isMarkdown(path) ? (
-            <div className="mx-auto max-w-[760px] px-6 py-5">
+            <div ref={previewRef} className="mx-auto max-w-[760px] px-6 py-5">
               <MarkdownView content={content} />
             </div>
           ) : (
@@ -130,6 +179,33 @@ export function FileViewer({
           )
         )}
       </div>
+
+      {/* outline popover (D58) — same pattern as ChatPanel's history popover:
+          a transparent full-cover close layer + an anchored dropdown. */}
+      {outlineOpen && showOutline && (
+        <>
+          <button
+            type="button"
+            aria-label="목차 닫기"
+            className="absolute inset-0 z-10 cursor-default"
+            onClick={() => setOutlineOpen(false)}
+          />
+          <div className="absolute right-2 top-[38px] z-20 max-h-[60%] w-[240px] overflow-y-auto rounded-xl border border-line-strong bg-elevated p-1.5 shadow-lg">
+            {outline.map((h, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => jumpTo(i)}
+                title={h.text}
+                style={{ paddingLeft: 8 + (h.level - 1) * 12 }}
+                className="block w-full truncate rounded-md py-1 pr-2 text-left text-[12px] text-ink-muted transition-colors hover:bg-subtle hover:text-ink"
+              >
+                {h.text}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
