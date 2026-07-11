@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Eye, Code2, FileText, ListTree } from "lucide-react";
+import { Eye, Code2, FileText, ListTree, ClipboardCopy, Check } from "lucide-react";
 import { MarkdownView } from "./Markdown";
 import { readFile } from "../lib/api";
+import { copyHtml } from "../lib/clipboard";
 
 function isHtml(path: string): boolean {
   return /\.html?$/i.test(path);
@@ -36,6 +37,7 @@ export function FileViewer({
   const previewRef = useRef<HTMLDivElement | null>(null);
   const [outline, setOutline] = useState<{ level: number; text: string }[]>([]);
   const [outlineOpen, setOutlineOpen] = useState(false);
+  const [copiedHtml, setCopiedHtml] = useState(false);
 
   useEffect(() => {
     if (!path) {
@@ -98,6 +100,23 @@ export function FileViewer({
     setOutlineOpen(false);
   };
 
+  // Copy the HTML file's <body> content as rich text/html (DC Manager form
+  // paste target — D62). The sandbox iframe is opaque (allow-scripts, no
+  // same-origin) so we parse the source string the parent already holds.
+  const copyBody = async () => {
+    if (content === null) return;
+    let body = content;
+    try {
+      body = new DOMParser().parseFromString(content, "text/html").body?.innerHTML ?? content;
+    } catch {
+      // fall back to the raw source
+    }
+    const ok = await copyHtml(body);
+    if (!ok) return;
+    setCopiedHtml(true);
+    setTimeout(() => setCopiedHtml(false), 1500);
+  };
+
   if (!path) {
     return (
       <div className="flex flex-1 items-center justify-center text-[12.5px] text-ink-faint">
@@ -134,6 +153,20 @@ export function FileViewer({
             }
           >
             <ListTree size={13} />
+          </button>
+        )}
+        {isHtml(path) && content !== null && (
+          <button
+            type="button"
+            onClick={copyBody}
+            title="본문을 HTML로 복사 — DC Manager 등 편집기에 붙여넣으면 서식이 유지됩니다"
+            className={
+              "inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-line px-2 py-1 text-[11.5px] transition-colors " +
+              (copiedHtml ? "border-ok text-ok" : "text-ink-soft hover:bg-subtle")
+            }
+          >
+            {copiedHtml ? <Check size={12} /> : <ClipboardCopy size={12} />}
+            {copiedHtml ? "복사됨" : "본문 복사"}
           </button>
         )}
         {showPreviewToggle && (

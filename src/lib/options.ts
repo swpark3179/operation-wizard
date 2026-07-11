@@ -108,7 +108,7 @@ export const CATEGORY_OPTIONS: Record<Category, ClarifyQuestion[]> = {
       id: "changeType",
       label: "어떤 변경 작업인가요?",
       type: "single",
-      options: ["데이터 수정", "스키마 변경", "권한 부여·회수"],
+      options: ["데이터 수정", "테이블 생성", "테이블 권한 부여", "스키마 변경"],
       required: true,
     },
     {
@@ -123,6 +123,11 @@ export const CATEGORY_OPTIONS: Record<Category, ClarifyQuestion[]> = {
       label: "실행 전 승인이 필요한가요?",
       type: "single",
       options: ["필요", "불필요"],
+    },
+    {
+      id: "knownObjects",
+      label: "이미 알고 있는 대상 테이블·컬럼·객체가 있다면 알려주세요.",
+      type: "text",
     },
     {
       id: "target",
