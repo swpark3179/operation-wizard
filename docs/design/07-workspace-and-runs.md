@@ -327,8 +327,11 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   사내 문서 RAG 검색(rag) → 지식 베이스 반영(knowledge) → 소스코드 분석(document,
   docs/source-analysis.md) → 계획 생성(document, docs/plan.md) → 변경영향분석서 생성(document,
   docs/impact-analysis.md) → 테스트 계획서 생성(document, docs/test-plan.md) → 마무리 대화(chat)]`
-  (기존 컨플루언스 search 단계는 rag 기반 단계로 대체). guide/query/change = `chat` 1개(+기존 카테고리
-  스킬을 그 단계에 부착; Flows 토글로 기반 3단계 opt-in). `kind`: `search`·`document`·기반 3종(생성형,
+  (기존 컨플루언스 search 단계는 rag 기반 단계로 대체). 기본 `query`(데이터 조회, D61) = `[참조 SQL·
+  테이블 사용처 탐색(codebase, output:file, docs/query-references.md) → 사내 문서 RAG 검색(rag) →
+  지식 베이스 반영(knowledge) → 테이블 정보·ERD 정리(document, docs/table-info.md — mermaid erDiagram)
+  → 참고 SQL 작성(document, docs/query-sql.md) → 마무리 대화(chat)]`(기반 3단계 기본 활성). guide/change =
+  `chat` 1개(+기존 카테고리 스킬을 그 단계에 부착; Flows 토글로 기반 3단계 opt-in). `kind`: `search`·`document`·기반 3종(생성형,
   `isGenerative`) / `chat`(종단). **`output`("chat"/"file"/"html", D47)**: 미지정 시 kind에서 파생;
   오케스트레이터는 `runtimeWorkflowFor` = `expandOutputSteps(workflowFor(...))`를 실행해 `"html"` 단계
   뒤에 `html-render` 스킬을 단 합성 렌더 서브스텝(`<file>.html`)을 삽입한다(편집기는 미확장 뷰만 봄).
@@ -376,9 +379,10 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 
 - 디자인의 5개 캔버스 아티팩트 탭(저장소 분석/영향도/변경 가이드 등 전용 뷰) — **산출물 허브·다이어그램
   탭으로 집계 뷰는 구현됨(D58)**; 아티팩트별 전용 뷰/오케스트레이션은 후속. (요구사항 명확화·소스 조사·계획서
-  생성은 `plan`에 한해 위 "카테고리 워크플로우"로 구현됨.)
-- plan 외 카테고리의 **기본** 다단계 플로우(기본값은 chat 1개+스킬; 사용자는 Flows 설정에서 어느 카테고리든
-  단계를 추가할 수 있음 — D39).
+  생성은 `plan`, 참조 SQL·ERD·참고 SQL 산출은 `query`에 한해 위 "카테고리 워크플로우"로 구현됨.)
+- guide/change 카테고리의 **기본** 다단계 플로우(기본값은 chat 1개+스킬; plan·query는 다단계 기본값을
+  가짐 — D40/D61; 사용자는 Flows 설정에서 어느 카테고리든 단계를 추가할 수 있음 — D39).
+- 실제 데이터 조회 실행·결과 표시(현재 `query`는 참고용 SQL 산출까지 — D61).
 - 대화는 파일(JSON)로 영구화된다(위 "세션/프로젝트 영속화"). SQLite/전문 검색/여러 프로젝트 목록
   화면은 후속 증분.
 - opencode·antigravity의 1급 실행 파서(현재 plain 폴백). codex/gemini/aipro는 1급 지원됨.

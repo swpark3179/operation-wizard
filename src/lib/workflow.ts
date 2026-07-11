@@ -113,6 +113,55 @@ const TEST_PLAN_STEP = `[시스템 지시: 테스트 계획서 작성 단계]
   경계·실패·롤백 시나리오 / 테스트 데이터·환경 준비 / 완료 기준.
 - 파일을 저장한 뒤에는 케이스 구성 요약만 한두 문장으로 보고하세요.`;
 
+// ── query(데이터 조회) 단계별 기본 지시문 ────────────────────────────────────────
+// 데이터 조회 카테고리의 기반 3단계는 "참조 SQL·테이블 정보 탐색"에 맞춘 맞춤 지시문을
+// 쓴다(coerceSteps가 kind별로 stored/기본 항목을 병합할 때 이 지시문이 채택됨, D61).
+
+const QUERY_CODEBASE_STEP = `[시스템 지시: 참조 SQL·테이블 사용처 탐색 단계]
+프롬프트에 명시된 "분석 대상 코드베이스 폴더"(절대경로)를 **읽기 전용으로 탐색**해, 이번 조회 요청과
+관련된 **참조할 만한 기존 SQL과 테이블 사용처**를 찾고 결과를 파일로 작성하세요.
+- **모든 탐색·검색·읽기를 그 코드베이스 폴더의 절대경로에서 시작하세요.** 작업 폴더는 산출물 저장 전용이며
+  분석 대상이 아닙니다. 코드베이스 폴더의 파일은 절대 수정·생성·삭제하지 마세요(읽기·검색만).
+- 요청/요구사항에 언급된 테이블명·컬럼명·업무 용어로 검색하고, SQL 파일·DAO/매퍼(XML)·리포지토리·
+  리포트·배치에서 유사한 조회/집계 패턴을 찾습니다.
+- 결과는 **작업 폴더**에 \`docs/query-references.md\`로 저장하세요(없으면 docs 폴더도 생성). 각 후보는
+  실제 파일 경로 / 무엇을 조회하는지 / 이번 요청과 유사한 이유를 함께 표기하고, 핵심 SQL 스니펫을 인용하세요.
+- 아직 새 SQL을 작성하지 마세요. 이번 턴은 "참조 후보 탐색과 기록"만 합니다.
+- 파일 저장 후, 가장 유사한 참조 한두 건만 한 문장으로 보고하세요.`;
+
+const QUERY_RAG_STEP = `[시스템 지시: 사내 문서 RAG 검색 단계]
+아래에 첨부된 사내 문서(Confluence) 발췌는 사전 임베딩된 지식베이스에서 검색된 결과입니다.
+- 이번 조회의 **산출/집계 기준**(포함·제외 규칙, 기준일 정의, 표준코드 값의 의미 등)과 관련된 내용을
+  발췌에서 정리하고, 각 항목에 출처(제목/URL)를 인용하세요.
+- 발췌에 없는 내용을 지어내지 마세요. 부족한 부분은 "추가 확인 필요"로 명시하세요.
+- 아직 SQL을 작성하지 마세요. 이번 턴은 "조회 기준 근거 정리"만 합니다.`;
+
+const QUERY_KNOWLEDGE_STEP = `[시스템 지시: 지식 베이스 반영 단계]
+아래에 첨부된 사내 지식 항목들은 과거 조회 방식(용어→테이블 매핑·표준코드·참조 테이블·조회 패턴)의 기록입니다.
+- 이번 요청에 적용되는 항목(예: 업무 용어가 가리키는 실제 테이블, 표준코드 정의, 과거 유사 조회)을 골라
+  무엇을 어떻게 반영할지 정리하세요.
+- 이후 ERD·SQL 단계에서 이 매핑과 관례를 제약으로 준수하세요.
+- 적용할 항목이 없으면 없다고 보고하세요.`;
+
+const QUERY_TABLE_INFO_STEP = `[시스템 지시: 테이블 정보·ERD 정리 단계]
+지금까지의 요구사항·참조 SQL·문서·지식을 종합해, 조회 대상 테이블들의 정보를 **파일로 작성**하세요.
+- 작업 폴더에 \`docs/table-info.md\` 파일을 만들어(없으면 docs 폴더도 생성) 파일 쓰기 도구로 저장하세요.
+- 문서에는 다음을 포함하세요:
+  - **테이블 상관관계 ERD**: \`\`\`mermaid\`\`\` \`erDiagram\` (엔티티의 PK/주요 컬럼 + 관계선에 조인 키·카디널리티).
+  - **테이블 마스터 정보 표**(테이블 / 설명 / 저장소·DBMS / 건수·갱신 / 담당 — 확인 안 되면 "미확인").
+  - **관련 프로그램 표**(프로그램 ID·명 / 참조 테이블 / 참조 유형 R·U·D).
+  - 동일·유사 집계를 이미 제공하는 화면/리포트가 있으면 맨 앞에 안내.
+- 근거 없는 컬럼·관계·값을 지어내지 마세요(불확실은 "미확인"). 파일 저장 후 핵심만 한두 문장으로 보고하세요.`;
+
+const QUERY_SQL_STEP = `[시스템 지시: 참고 SQL 작성 단계]
+확정된 요구사항과 앞 단계의 ERD·테이블 정보를 근거로 **참고용 조회 SQL을 파일로 작성**하세요.
+- 작업 폴더에 \`docs/query-sql.md\` 파일을 만들어 파일 쓰기 도구로 저장하세요.
+- 문서 구성: ① 이 SQL이 **참고용 초안이며 실행 결과를 보장하지 않는다**는 경고, ② \`\`\`sql\`\`\` 펜스로 감싼
+  SELECT 문(맨 위에 [참고용]/참조 출처/기준을 머리 주석으로), ③ **검토 포인트**(포함·제외 가정, NULL·경계값,
+  중복 가능성, 대량 조회 범위 한정), ④ 필요 시 변형 쿼리(예: 휴직자 포함 버전).
+- **읽기 전용 SELECT만** 작성하고, ERD에서 확인된 테이블·컬럼만 사용하세요(미확인은 주석으로 표시).
+- 파일 저장 후, 무엇을 조회하는 SQL인지 한두 문장으로만 보고하세요.`;
+
 /** The mandatory foundation trio, in canonical order (D44). These are the
  * defaults merged/pinned by `coerceSteps`; the Flows editor shows them as
  * non-deletable cards whose instruction/skills/file stay editable. */
@@ -187,7 +236,48 @@ export const DEFAULT_WORKFLOWS: Record<Category, StepDef[]> = {
     { id: "guide", name: "대화", kind: "chat", instruction: "", skillIds: ["guide-author"] },
   ],
   query: [
-    { id: "query", name: "대화", kind: "chat", instruction: "", skillIds: ["query-safe"] },
+    {
+      id: "query-codebase",
+      name: "참조 SQL·테이블 사용처 탐색",
+      kind: "codebase",
+      instruction: QUERY_CODEBASE_STEP,
+      file: "docs/query-references.md",
+      // codebase 기본 output은 "chat"(파일 스트립)이므로, 참조 목록을 산출물로
+      // 남기려면 "file"을 명시한다(D61).
+      output: "file",
+      skillIds: ["reference-sql-explore"],
+    },
+    {
+      id: "rag-search",
+      name: "사내 문서 RAG 검색",
+      kind: "rag",
+      instruction: QUERY_RAG_STEP,
+      skillIds: [],
+    },
+    {
+      id: "knowledge",
+      name: "지식 베이스 반영",
+      kind: "knowledge",
+      instruction: QUERY_KNOWLEDGE_STEP,
+      skillIds: [],
+    },
+    {
+      id: "table-info",
+      name: "테이블 정보·ERD 정리",
+      kind: "document",
+      instruction: QUERY_TABLE_INFO_STEP,
+      file: "docs/table-info.md",
+      skillIds: ["table-erd"],
+    },
+    {
+      id: "sql-draft",
+      name: "참고 SQL 작성",
+      kind: "document",
+      instruction: QUERY_SQL_STEP,
+      file: "docs/query-sql.md",
+      skillIds: ["sql-draft", "query-safe"],
+    },
+    { id: "chat", name: "마무리 대화", kind: "chat", instruction: "", skillIds: ["query-safe"] },
   ],
   change: [
     { id: "change", name: "대화", kind: "chat", instruction: "", skillIds: ["change-safe"] },
@@ -235,8 +325,11 @@ export function coerceSteps(steps: StepDef[], opts?: { foundation?: boolean }): 
  * toggle inserts/removes the trio — presence IS the flag, D44). */
 export function foundationEnabled(category: Category, settings: Settings | null): boolean {
   if (category === "plan") return true;
-  const stored = settings?.workflows?.[category];
-  return !!stored?.some((s) => FOUNDATION_KINDS.includes(s?.kind));
+  // Fall back to the built-in default so categories whose DEFAULT_WORKFLOWS
+  // ship the foundation trio (e.g. query, D61) enable it out of the box; a
+  // user-saved override (incl. the Flows toggle turning it off) still wins.
+  const steps = settings?.workflows?.[category] ?? DEFAULT_WORKFLOWS[category];
+  return !!steps?.some((s) => FOUNDATION_KINDS.includes(s?.kind));
 }
 
 /** Derive a step's effective output mode (D47). */

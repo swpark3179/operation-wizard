@@ -868,3 +868,47 @@
   라이브니스는 "스트림 이벤트 수신" 기준이라 CLI가 이벤트 없이 내부 작업하는 구간은 idle로
   보인다(수용 — 그래서 경고 문구가 중지/재시도를 안내). 홈에서 고른 에이전트/모델은 새 세션
   리마운트에도 초기값으로 유지된다(첫 턴 전 컴포저에서 재선택 가능).
+
+---
+
+### D61. 데이터 조회(query) 카테고리 다단계 기본 플로우 (Data Query Assistant 디자인 반영)
+- **배경**: claude.ai/design의 "Data Query Assistant" 프로토타입(요구사항 명확화 → 정보 탐색 →
+  참고 SQL → 테이블 정보 → 완료)을 데이터 조회 카테고리에 반영한다. 사용자 목표는 디자인 복제가 아니라
+  **조회 단계 정비 + 도움이 되는 산출물(테이블 ERD·참고 SQL) 제공**이다.
+- **핵심 판단**: 이 디자인은 기존 아키텍처에 거의 1:1로 매핑되어 **새 컴포넌트/StepKind/백엔드/의존성이
+  전혀 없다** — plan과 동일한 클라이언트 오케스트레이션(D34/D36/D44) 위에서 **콘텐츠 카탈로그 정비**로
+  구현한다. 매핑: STEP1 요구사항 명확화 = 옵션 프리플로우(D36), STEP2 정보 탐색 = **기반 3단계 그 자체**
+  (codebase=참조 SQL 탐색 / rag=산출 기준 문서 / knowledge=용어→테이블 매핑, D44), STEP3 참고 SQL =
+  `document` 단계, STEP4 테이블 정보/상관관계 = `document` + mermaid `erDiagram`(D42 미리보기 · D58
+  다이어그램 갤러리), STEP5 완료·메모리 저장 = 종단 chat + 완료 배너 → 지식 저장 탭(D59, 기구현).
+- **결정 요점**:
+  1. **`DEFAULT_WORKFLOWS.query` 다단계화(`lib/workflow.ts`)**: 기존 `[chat]` 1개를
+     `[query-codebase(codebase) → rag-search(rag) → knowledge(knowledge) → table-info(document,
+     docs/table-info.md) → sql-draft(document, docs/query-sql.md) → chat]`로 교체. 기반 3단계는
+     query 맞춤 지시문(참조 SQL 탐색·조회 기준 정리·용어 매핑)으로 배열에 직접 포함한다 —
+     `coerceSteps`가 kind별로 stored 항목을 기본 트리오보다 우선하므로 카테고리별 맞춤 지시문이 성립
+     (plan과 동일 패턴).
+  2. **codebase 단계 `output:"file"` 명시**: `stepOutput`은 document가 아닌 kind(codebase 포함)의
+     기본 output을 `"chat"`으로 파생하고 `expandOutputSteps`가 그 file을 스트립한다. 참조 SQL 후보
+     목록(`docs/query-references.md`)을 **산출물로 보존**하려면 codebase 단계에 `output:"file"`을
+     명시해야 한다. → 산출물 3종(참조목록 + ERD + 참고 SQL)이 산출물 허브·다이어그램 갤러리에 노출.
+  3. **`foundationEnabled` 폴백 보정(`lib/workflow.ts`)**: 기존엔 `settings.workflows[category]`
+     (저장된 override)만 보아, query처럼 **기본 워크플로우가 트리오를 갖는** 카테고리가 override 없으면
+     false → `optionsFor`가 필수 `codebasePath` folder 질문(D45)을 프리펜드하지 않아 codebase 단계가
+     경로 없이 실행됐다. `?? DEFAULT_WORKFLOWS[category]`로 폴백해 기본값의 트리오도 인식한다.
+     Flows 토글 off 저장 시엔 stored에 기반 kind가 없어 false → 해제가 유지된다.
+  4. **스킬 3종 추가(`lib/skills.ts`)**: `reference-sql-explore`(코드베이스에서 대상 테이블 참조
+     SQL/DAO/매퍼 탐색, 지어내기 금지), `table-erd`(근거 기반 mermaid `erDiagram`·마스터 정보 표·관련
+     프로그램 표·동일 집계 기존 화면 안내, 불확실은 "미확인"), `sql-draft`(읽기 전용 SELECT만, 머리
+     주석 출처·기준, ERD 확인 컬럼만, 검토 포인트 필수, "참고용 초안" 경고). 기존 `query-safe`는 유지해
+     sql-draft·종단 chat에 부착.
+  5. **옵션 정비(`lib/options.ts`)**: `CATEGORY_OPTIONS.query`에 `knownTables`(text — 이미 아는
+     테이블·컬럼·프로그램, 프리필 대상) 추가, `target` 문구를 조회 대상·기간·필터 중심으로 다듬음.
+     codebasePath folder 질문은 (3)의 보정으로 자동 프리펜드.
+- **백엔드 무변경**: `STEP_KINDS`/`STEP_OUTPUTS`/`CATEGORIES`(settings.rs) 모두 기존 값으로 충분,
+  `validate_steps` 통과(마지막 chat + 기반 트리오 선두 순서). serde/타입 미러 변경 0. **신규 의존성 0.**
+- **하위호환**: query 워크플로우를 이미 저장한 사용자는 stored override가 그대로 우선(전체 교체형 — D39).
+  개편된 기본값은 Flows의 "기본값으로 되돌리기"로만 반영된다. guide/change 카테고리는 무변경.
+- **한계/재검토**: 세션리스(gemini/aipro)·plain(opencode/antigravity)의 degrade는 D34/D40과 동일.
+  실제 조회 실행·결과 표시는 범위 밖(참고용 SQL 산출까지). ERD·SQL 품질은 코드베이스에 참조 SQL이
+  있는지에 크게 좌우된다(없으면 스킬이 "미확인"으로 표기).
