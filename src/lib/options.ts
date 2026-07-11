@@ -93,8 +93,13 @@ export const CATEGORY_OPTIONS: Record<Category, ClarifyQuestion[]> = {
       options: ["표·목록", "집계·통계", "단건 확인"],
     },
     {
+      id: "knownTables",
+      label: "이미 알고 있는 테이블·컬럼·프로그램이 있다면 알려주세요.",
+      type: "text",
+    },
+    {
       id: "target",
-      label: "조회 대상과 조건을 알려주세요.",
+      label: "무엇을, 어떤 조건으로 조회하고 싶은가요? (대상·기간·필터)",
       type: "text",
     },
   ],
