@@ -170,8 +170,8 @@ export function ArtifactsPanel({
         })}
       </div>
 
-      {/* preview */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      {/* preview (min-h-0 so the nested FileViewer scrolls instead of growing) */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {effective?.exists ? (
           <FileViewer path={effective.abs} refreshNonce={refreshNonce} />
         ) : (

@@ -39,6 +39,10 @@ export function HomeArea({
   // The reopened project's stored codebase path (fresh chats pick one in the
   // requirements form instead — D45).
   const [initialCodebasePath, setInitialCodebasePath] = useState<string | null>(null);
+  // The agent/model picked in the Home composer (fresh chats only — a loaded
+  // session carries its own; D60).
+  const [initialAgentId, setInitialAgentId] = useState<string | null>(null);
+  const [initialModel, setInitialModel] = useState<string | null>(null);
 
   // Reset to the launcher whenever Home is (re)selected in the nav rail.
   useEffect(() => {
@@ -49,6 +53,8 @@ export function HomeArea({
     setProjectId(null);
     setInitialWorkdir(null);
     setInitialCodebasePath(null);
+    setInitialAgentId(null);
+    setInitialModel(null);
   }, [resetNonce]);
 
   if (screen === "workspace" && category && projectId) {
@@ -57,6 +63,8 @@ export function HomeArea({
         projectId={projectId}
         initialWorkdir={initialWorkdir}
         initialCodebasePath={initialCodebasePath}
+        initialAgentId={initialAgentId}
+        initialModel={initialModel}
         category={category}
         seedPrompt={seedPrompt}
         agents={agents}
@@ -85,21 +93,26 @@ export function HomeArea({
       onOpenAgents={onOpenAgents}
       // New chat / category → a brand-new project. `workdir` is the folder the
       // user optionally picked on Home; null → auto (own workspace/ subfolder).
-      onStart={(cat, prompt, workdir) => {
+      // `agentId`/`model` seed the ChatPanel composer (D60).
+      onStart={(cat, prompt, workdir, agentId, model) => {
         setProjectId(crypto.randomUUID());
         setInitialWorkdir(workdir ?? null);
         setInitialCodebasePath(null);
+        setInitialAgentId(agentId ?? null);
+        setInitialModel(model ?? null);
         setLoadedSession(null);
         setCategory(cat);
         setSeedPrompt(prompt);
         setScreen("workspace");
       }}
       // Recent project → adopt its id + resolved workdir/codebase, open the
-      // given session.
+      // given session (which carries its own agent/model).
       onOpenSession={(session, id, projectWorkdir, codebasePath) => {
         setProjectId(id);
         setInitialWorkdir(projectWorkdir);
         setInitialCodebasePath(codebasePath ?? null);
+        setInitialAgentId(null);
+        setInitialModel(null);
         setLoadedSession(session);
         setCategory((session.category as Category) ?? "plan");
         setSeedPrompt("");

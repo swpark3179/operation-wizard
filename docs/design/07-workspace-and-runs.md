@@ -185,6 +185,7 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 | `read_file` | `path: string` | `string` | 파일 내용(상한 2 MiB) |
 | `ensure_project` | `projectId: string`, `workdir: string`(빈값 허용), `title: string`, `category: string`, `codebasePath?: string` | `Project` | 프로젝트 폴더+매니페스트 생성(idempotent). workdir 빈값→`workspace/` 하위폴더 resolve해 반환. 홈에서 지정한 폴더면 그 경로 |
 | `set_project_codebase` | `projectId: string`, `codebasePath: string \| null` | `Project` | 기존 매니페스트의 코드베이스 경로 갱신/해제(D45) |
+| `set_project_title` | `projectId: string`, `title: string` | `Project` | 프로젝트 제목 변경(홈 최근 목록 인라인 편집 — D60; 빈 제목 거부, trim + 100자 상한) |
 | `save_session` | `projectId: string`, `session: StoredSession` | — | `session.json` 기록(세션 폴더 자동 생성; 매니페스트는 생성 안 함) |
 | `list_sessions` | `projectId: string` | `SessionMeta[]` | 프로젝트 세션 목록(최근 갱신 순, 없으면 `[]`) |
 | `load_session` | `projectId: string`, `sessionId: string` | `StoredSession` | 세션 전체 로드 |
@@ -203,12 +204,17 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   (별도 Settings 뷰는 폐지되고 경로 설정이 Agents 카드로 통합됨 — [05](05-decisions.md) D38.
   Flows는 워크플로우 단계·스킬 설정 화면 — D39; 지식 뷰는 RAG 연결·Confluence 수집·지식 베이스
   CRUD — D48, [04](04-ui-and-design-system.md).)
-- **HOME**(`HomeView`): 히어로 + 프롬프트 컴포저 + 4개 업무 카테고리(개발 계획 수립/운영 가이드
+- **HOME**(`HomeView`): 히어로(운영 도구 프레이밍 — "운영 작업 도우미" + 진행 절차 안내, D60) +
+  프롬프트 컴포저 + 4개 업무 카테고리(개발 계획 수립/운영 가이드
   생성/데이터 조회/데이터 변경·권한) + **최근 작업 = 프로젝트 목록**(`listProjects`, 전역·모든 프로젝트,
   최근 활동순, **세션 0인 프로젝트는 숨김**). 각 항목은 **프로젝트 제목** + 세션 수·시각을 보여주고,
   클릭 시 그 프로젝트의 **id + 저장된 workdir**로 워크스페이스에 진입해 **가장 마지막 세션**
-  (`lastSessionId`→`loadSession(projectId)`)을 연다(세션이 없으면 새 대화). 카테고리/전송(새 채팅) →
-  **새 프로젝트**(id mint) + 워크스페이스 진입(첫 턴 프롬프트 seed). 컴포저 **바로 아래에 작업 폴더 지정
+  (`lastSessionId`→`loadSession(projectId)`)을 연다(세션이 없으면 새 대화). 행 hover의 **연필 버튼 →
+  인라인 제목 편집**(Enter 저장/Escape 취소, `set_project_title` — D60). 카테고리/전송(새 채팅) →
+  **새 프로젝트**(id mint) + 워크스페이스 진입(첫 턴 프롬프트 seed). 컴포저 하단에 **에이전트·모델
+  셀렉트**가 있어 시작 전에 실행 조합을 고른다(선택값은 `initialAgentId`/`initialModel`로 ChatPanel에
+  시드되고 첫 턴 전까지 변경 가능; 명시 선택은 탐지 기반 자동 기본값이 덮어쓰지 않음 — D60). 컴포저
+  **바로 아래에 작업 폴더 지정
   버튼**(`pickFolder`)이 있어, 지정 시 그 폴더가 프로젝트 폴더가 되고 **미지정 시 자동 생성**된다(프로젝트별
   transient 선택; [05](05-decisions.md) D33 R1). Home nav 재선택 시 런처로 리셋(`resetNonce`). 프롬프트
   컴포저는 입력에 따라 자동 확장 후 상한(≈200px)에서 스크롤(`useAutoGrow`).
@@ -245,7 +251,10 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     '지식 저장' 탭을 제안한다(dismissible; 캔버스 탭 자동 전환 없음).
   - `AssistantMessage`: 텍스트 + reasoning(접이식) + 도구 행 + usage + 에러 렌더. **완료된 턴의
     텍스트는 마크다운(mermaid 포함)으로 렌더**하고(스트리밍 중에는 평문 — D57), 응답/코드블록 **복사
-    버튼**과 헤더의 **실행 에이전트명**을 표시한다. 에러에는 원문 +
+    버튼**과 헤더의 **실행 에이전트명**을 표시한다. **스트리밍 중에는 하단 라이브니스 상태줄**(D60)이
+    경과 시간을 1초 단위로 보여주고, 스트림이 15초 이상 조용하면 "마지막 응답 N초 전", 90초 이상이면
+    "오래 걸리는 작업일 수 있음 — 멈춘 것 같으면 중지 후 재시도" 안내를 덧붙인다(장시간 코드베이스
+    분석과 행을 구분). 에러에는 원문 +
     **한글 안내 힌트**(`errorHint`: TLS/인증서/스트림 끊김 시그니처 인식) + 1차 액션 **"다시 시도"**
     (같은 세션 재전송 — 실패 쌍 제거 + 워크플로우 커서 복원, D57) + 2차 액션 **"새 세션으로 다시
     시도"**를 함께 노출한다. codex의 `invalid peer certificate: BadSignature`는 codex CLI 자체의 사내
@@ -259,7 +268,8 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     **'산출물' 탭**(`ArtifactsPanel`, D58)은 런타임 워크플로우의 문서 산출물을 좌측 목록(단계 상태 칩:
     대기/생성 중/완료/건너뜀/중단, 로드 세션은 생성됨/미생성) + 우측 미리보기(`FileViewer` 재사용)로
     집계하고, **'다이어그램' 탭**(`DiagramGallery`, D58)은 산출물 md의 ` ```mermaid ` 펜스를 lazy 스캔해
-    카드 갤러리(+클릭 확대 모달)로 렌더한다. 두 pill은 workdir 확정 + 산출물 ≥1일 때만 표시된다.
+    카드 갤러리로 렌더한다 — 카드 클릭 시 **창 전체를 덮는 확대 모달**(확대/축소 컨트롤 0.25×~4×,
+    CSS `zoom` 배율 + 스크롤, D60)이 열린다. 두 pill은 workdir 확정 + 산출물 ≥1일 때만 표시된다.
     산출물 탭 행에는 **hover '지식으로 저장' 액션**(존재하는 산출물만)이 있고, **'지식 저장' 탭**
     (`KnowledgeSavePanel`, D59)은 완료 배너/행 액션으로 열리는 조건부 탭이다 — 산출물 체크박스(존재
     프로브 `useArtifactExistence` 공용 훅, 미생성은 disabled)+제목+**격리 요약 턴**(오픈 시 자동 시작,
@@ -274,7 +284,8 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     보내면 폴더가 자동 생성됨" 안내만(버튼 없음 — 폴더 지정은 홈에서). 홈에서 폴더를 지정했으면 진입
     즉시 그 폴더의 파일을 표시.
 - **TopBar**: 로고·제목·배지만 표시하며 **작업 폴더는 표시하지 않는다**(R1). 활성 프로젝트 폴더는 캔버스
-  툴바의 폴더 칩이 보여준다.
+  툴바의 폴더 칩이 보여준다 — **실제 절대경로**를 좌측 말줄임으로 표시하고 툴팁이 전체 경로를
+  보여준다(D60; basename만 보이던 "workspace" 표기 대체).
 
 ## 카테고리 워크플로우 (`lib/options.ts` + `lib/skills.ts` + `lib/workflow.ts` + `lib/clarify.ts` + 캔버스)
 

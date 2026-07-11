@@ -221,6 +221,28 @@ fn set_project_codebase_at(
     Ok(p)
 }
 
+/// Rename an existing project (the Home recent list's inline edit). Mutates the
+/// manifest in place like `set_project_codebase_at`; an empty title is rejected
+/// so a project never becomes unnamed.
+fn set_project_title_at(root: &Path, project_id: &str, title: &str) -> Result<Project, String> {
+    if !valid_project_id(project_id) {
+        return Err(format!("invalid project id: {project_id:?}"));
+    }
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("프로젝트 제목이 비어 있습니다.".to_string());
+    }
+    let manifest = project_dir(root, project_id).join("project.json");
+    let txt = fs::read_to_string(&manifest)
+        .map_err(|_| format!("project not found: {project_id}"))?;
+    let mut p: Project =
+        serde_json::from_str(&txt).map_err(|e| format!("invalid project manifest: {e}"))?;
+    p.title = title.chars().take(100).collect();
+    let json = serde_json::to_string_pretty(&p).map_err(|e| e.to_string())?;
+    fs::write(&manifest, json).map_err(|e| e.to_string())?;
+    Ok(p)
+}
+
 /// Write one session. The project must already exist (the frontend calls
 /// `ensure_project` before the first save); this only creates the session
 /// folder and writes it. Does not create the manifest.
@@ -352,6 +374,12 @@ pub fn set_project_codebase(
     set_project_codebase_at(&projects_root()?, &project_id, codebase_path)
 }
 
+/// Rename an existing project (Home recent list inline edit).
+#[tauri::command]
+pub fn set_project_title(project_id: String, title: String) -> Result<Project, String> {
+    set_project_title_at(&projects_root()?, &project_id, &title)
+}
+
 /// Write one session to disk (project must already exist via `ensure_project`).
 #[tauri::command]
 pub fn save_session(project_id: String, session: StoredSession) -> Result<(), String> {
@@ -450,6 +478,30 @@ mod tests {
         // Missing project / bad id are rejected.
         assert!(set_project_codebase_at(&root, "nope", Some("x".into())).is_err());
         assert!(set_project_codebase_at(&root, "../evil", None).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn title_rename_roundtrip() {
+        let root = std::env::temp_dir().join("ow-test-title");
+        let _ = fs::remove_dir_all(&root);
+
+        let p = ensure_project_at(&root, "proj-t", "", "Original", "plan", None).unwrap();
+        let renamed = set_project_title_at(&root, "proj-t", "  운영 배치 개선  ").unwrap();
+        assert_eq!(renamed.title, "운영 배치 개선"); // trimmed
+        assert_eq!(renamed.created_at, p.created_at); // rest of the manifest kept
+        assert_eq!(renamed.workdir, p.workdir);
+
+        // Persisted: the rollup sees the new title.
+        save_session_at(&root, "proj-t", StoredSession { meta: meta("s1"), messages: json!([]) })
+            .unwrap();
+        assert_eq!(list_projects_at(&root).unwrap()[0].title, "운영 배치 개선");
+
+        // Empty / missing / bad ids are rejected.
+        assert!(set_project_title_at(&root, "proj-t", "   ").is_err());
+        assert!(set_project_title_at(&root, "nope", "x").is_err());
+        assert!(set_project_title_at(&root, "../evil", "x").is_err());
 
         let _ = fs::remove_dir_all(&root);
     }

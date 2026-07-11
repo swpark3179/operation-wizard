@@ -58,7 +58,7 @@
 | `detect.rs` | def 기반 resolve→version→models 파이프라인, `DetectedAgent` 조립, 모델 파서, 진단 분류 |
 | `run.rs` | 에이전트 실행 엔진: 자식 spawn + stdout 스트림 파싱 → `RunEvent`를 Tauri `Channel`로. `RunRegistry`(취소). ([07](07-workspace-and-runs.md)) |
 | `files.rs` | 캔버스 파일 뷰어용 read-only 커맨드(`list_dir`/`read_file`) |
-| `projects.rs` | 대화 영속화: `~/.operation-wizard/projects/<projectId>/{workspace,sessions/<sessionId>}`. **projectId=프론트 mint**(workdir와 분리), `ensure_project`(workdir resolve)/`save_session`/`list_sessions`/`load_session`. 모두 projectId-keyed. ([07](07-workspace-and-runs.md)) |
+| `projects.rs` | 대화 영속화: `~/.operation-wizard/projects/<projectId>/{workspace,sessions/<sessionId>}`. **projectId=프론트 mint**(workdir와 분리), `ensure_project`(workdir resolve)/`save_session`/`list_sessions`/`load_session` + 매니페스트 갱신(`set_project_codebase`/`set_project_title` — D45/D60). 모두 projectId-keyed. ([07](07-workspace-and-runs.md)) |
 | `settings.rs` | 앱 설정(`settings.json`) 로드/저장: 에이전트별 경로 맵 + **스킬 레지스트리(`SkillDef`, `dir?` 리소스 폴더 포함)·카테고리별 워크플로우(`StepDef`, `output?` 포함) override**(D39/D45/D47) + **`ConfluenceConfig`/`RagConfig`**(D48; `RagConfig`는 endpoint+secretKey+passKey 헤더 값 — D50. PAT/키는 평문 저장 — 읽기 전용 키 권장) + 저장 시 검증(`validate_skills`/`validate_steps` — `STEP_KINDS` 6종·`STEP_OUTPUTS`). `CATEGORIES` 상수는 프론트 `workspace.ts`와 동기화 |
 | `knowledge.rs` | 지식 베이스 CRUD: `~/.operation-wizard/knowledge/<id>.json`(항목당 1파일, upsert 타임스탬프 스탬프). knowledge 기반 단계 주입용 (D48). **산출물 지식(D59)**: `kind`/`files`/출처 필드 + `save_knowledge_files`(산출물 파일을 `knowledge/artifacts/<id>/`로 staged-swap 복사) + `get_knowledge_root`(주입 인덱스·extraDirs용 절대경로); 삭제 시 폴더 동반 제거 |
 | `rag.rs` | **사용자가 채우는 RAG API 어댑터**: `RagClient::{ingest_page, search}` TODO(user) 스텁(미구현 시 한글 안내 Err) + `rag_search` 커맨드(spawn_blocking). 요약·임베딩은 사용자 RAG 서비스 담당 (D48) |
@@ -71,7 +71,7 @@
 |------|------|------|
 | 진입/상태 | `App.tsx` | 뷰 전환(`home`/`agents`/`flows`/`knowledge`), 에이전트/탐지/설정 상태, 초기 로드(실패 시 **재시도 가능한 배너** — D56) |
 | 안정성 | `components/ErrorBoundary` | 렌더 오류 격리: root(main.tsx) + 뷰 단위 keyed 바운더리 — 백지 화면 대신 폴백/복구 UI (D56) |
-| IPC 래퍼 | `lib/api.ts` | `invoke()`·`Channel` 래퍼 (`listAgents`/`detectAgent`/`runAgent`/`cancelRun`/`listDir`/`readFile`/`pickFolder` + `ensureProject`/`setProjectCodebase`/`saveSession`/`listSessions`/`loadSession`/`listProjects` + `ragSearch`/`listKnowledge`/`saveKnowledge`/`deleteKnowledge`/`setRagConfig`/`setConfluenceConfig`/`startConfluenceIngest`/`cancelIngest`/`probeConfluence`) |
+| IPC 래퍼 | `lib/api.ts` | `invoke()`·`Channel` 래퍼 (`listAgents`/`detectAgent`/`runAgent`/`cancelRun`/`listDir`/`readFile`/`pickFolder` + `ensureProject`/`setProjectCodebase`/`setProjectTitle`/`saveSession`/`listSessions`/`loadSession`/`listProjects` + `ragSearch`/`listKnowledge`/`saveKnowledge`/`deleteKnowledge`/`setRagConfig`/`setConfluenceConfig`/`startConfluenceIngest`/`cancelIngest`/`probeConfluence`) |
 | 타입 | `lib/types.ts` | 백엔드 serde 구조체의 TS 미러(`AgentInfo`/`RunEvent`/`RunArgs`/`FileEntry` + `ProjectMeta`/`ProjectSummary`/`SessionMeta`/`StoredSession` + `RagHit`/`IngestEvent`/`KnowledgeEntry`/`ConfluenceConfig`/`RagConfig`) + 진단 힌트 맵 |
 | 셸 | `components/AppShell, TopBar, NavRail` | 상단바(로고·제목, 폴더 표시 없음) + 좌측 내비레일(Home/Agents/Flows/지식) + 본문 |
 | 화면 | `components/AgentsView` | 에이전트 관리 뷰(카드당 탐지 표시 + 경로 설정 통합; 별도 Settings 뷰 폐지 — [05](05-decisions.md) D38) |
@@ -106,6 +106,7 @@
 | `load_session` | `projectId: string`, `sessionId: string` | `StoredSession` | 세션 전체(메타+메시지) 로드 |
 | `list_projects` | — | `ProjectSummary[]` | 모든 프로젝트 요약, 최근 활동순. 홈 최근목록용 |
 | `set_project_codebase` | `projectId: string`, `codebasePath: string \| null` | `Project` | 매니페스트의 코드베이스 경로 갱신/해제(D45) |
+| `set_project_title` | `projectId: string`, `title: string` | `Project` | 프로젝트 제목 변경(홈 최근 목록 인라인 편집 — D60). 빈 제목 거부, 100자 상한 |
 | `set_confluence_config` | `config: ConfluenceConfig \| null` | `Settings` | Confluence 수집 설정 저장/해제(빈 baseUrl=해제, D48) |
 | `set_rag_config` | `config: RagConfig \| null` | `Settings` | RAG endpoint 설정 저장/해제 |
 | `rag_search` | `query: string`, `topK?: number` | `RagHit[]` | rag 기반 단계 검색(사용자 어댑터 `rag.rs`; 미구현/미설정 시 한글 Err) |

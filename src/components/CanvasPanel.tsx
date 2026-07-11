@@ -334,10 +334,14 @@ export function CanvasPanel({
             </button>
             <span
               title={treeRoot}
-              className="inline-flex max-w-[220px] items-center gap-1.5 rounded-md border border-line bg-subtle px-2 py-1 font-mono text-[11.5px] text-ink-soft"
+              className="inline-flex max-w-[340px] items-center gap-1.5 rounded-md border border-line bg-subtle px-2 py-1 font-mono text-[11.5px] text-ink-soft"
             >
               <Folder size={12} className="shrink-0" />
-              <span className="truncate">{basename(treeRoot)}</span>
+              {/* Full path, ellipsized from the LEFT (dir=rtl trick) so the
+                  meaningful tail stays visible; the tooltip has the whole path. */}
+              <span className="truncate" dir="rtl">
+                &lrm;{treeRoot}&lrm;
+              </span>
             </span>
           </>
         )}
