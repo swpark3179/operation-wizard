@@ -14,12 +14,18 @@ export function HomeArea({
   agents,
   detected,
   settings,
+  onOpenAgents,
+  onBusyChange,
 }: {
   resetNonce: number;
   agents: AgentInfo[];
   detected: Record<string, DetectedAgent>;
   /** App settings (user workflows/skills), threaded down to the workspace. */
   settings: Settings | null;
+  /** Navigate to the Agents view (undetected-agent onboarding, D57). */
+  onOpenAgents?: () => void;
+  /** Workspace busy (streaming) mirror for app-level navigation guards (D57). */
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [screen, setScreen] = useState<"home" | "workspace">("home");
   const [category, setCategory] = useState<Category | null>(null);
@@ -57,6 +63,8 @@ export function HomeArea({
         detected={detected}
         settings={settings}
         initialSession={loadedSession}
+        onOpenAgents={onOpenAgents}
+        onBusyChange={onBusyChange}
         onHome={() => {
           setScreen("home");
           setCategory(null);
@@ -72,6 +80,9 @@ export function HomeArea({
 
   return (
     <HomeView
+      agents={agents}
+      detected={detected}
+      onOpenAgents={onOpenAgents}
       // New chat / category → a brand-new project. `workdir` is the folder the
       // user optionally picked on Home; null → auto (own workspace/ subfolder).
       onStart={(cat, prompt, workdir) => {

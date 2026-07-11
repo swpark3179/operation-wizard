@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { CanvasPanel } from "./CanvasPanel";
 import type { Category } from "./workspace";
@@ -54,6 +54,8 @@ export function WorkspaceView({
   settings,
   initialSession,
   onHome,
+  onOpenAgents,
+  onBusyChange,
 }: {
   /** The active project's id (stable across the D27 remount). */
   projectId: string;
@@ -73,6 +75,11 @@ export function WorkspaceView({
   /** A saved session to open on entry (from Home's recent list), or null. */
   initialSession: StoredSession | null;
   onHome: () => void;
+  /** Navigate to the Agents view (undetected-agent onboarding, D57). */
+  onOpenAgents?: () => void;
+  /** Mirror the busy (streaming) state up so app-level navigation can confirm
+   * before killing an in-flight run (D57). */
+  onBusyChange?: (busy: boolean) => void;
 }) {
   // Paths with an open file viewer tab (insertion order = tab order, D49).
   const [openFiles, setOpenFiles] = useState<string[]>([]);
@@ -115,6 +122,17 @@ export function WorkspaceView({
   const [prefillNonce, setPrefillNonce] = useState(0);
   const [canvasTab, setCanvasTab] = useState<CanvasTab>("files");
   const [streaming, setStreaming] = useState(false);
+
+  // Mirror the streaming state up (D57): app-level navigation asks before
+  // unmounting a busy workspace; the cleanup clears the flag on leave.
+  const handleStreamingChange = useCallback(
+    (s: boolean) => {
+      setStreaming(s);
+      onBusyChange?.(s);
+    },
+    [onBusyChange],
+  );
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
   const [answerSubmission, setAnswerSubmission] = useState<{
     wire: string;
     display: string;
@@ -253,7 +271,8 @@ export function WorkspaceView({
           onClarify={handleClarify}
           onPrefill={handlePrefill}
           onRagResult={handleRagResult}
-          onStreamingChange={setStreaming}
+          onStreamingChange={handleStreamingChange}
+          onOpenAgents={onOpenAgents}
         />
       </div>
       <div

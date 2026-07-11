@@ -1,6 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ArrowUp, Square, ClipboardList, FilePlus2, History } from "lucide-react";
+import {
+  ChevronLeft,
+  ArrowUp,
+  ArrowDown,
+  AlertTriangle,
+  Square,
+  ClipboardList,
+  FilePlus2,
+  History,
+  X,
+} from "lucide-react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { AssistantMessage } from "./AssistantMessage";
+import { WorkflowStepper, type StepProgress, type StepProgressStatus } from "./WorkflowStepper";
 import { categoryLabel, sessionTime, type Category, type ChatMessage } from "./workspace";
 import {
   Channel,
@@ -20,7 +32,7 @@ import {
   parsePrefill,
   type ClarifyQuestion,
 } from "../lib/clarify";
-import { buildRagQuery, formatKnowledgeContext, formatRagContext } from "../lib/foundation";
+import { buildRagQuery, formatKnowledgeContext, formatRagContext, ragUserError } from "../lib/foundation";
 import { optionsFor } from "../lib/options";
 import { resolveSkills } from "../lib/skills";
 import { isGenerative, progressLabel, runtimeWorkflowFor } from "../lib/workflow";
@@ -86,6 +98,7 @@ export function ChatPanel({
   onPrefill,
   onRagResult,
   onStreamingChange,
+  onOpenAgents,
 }: {
   /** The active project id (folder key for persistence). */
   projectId: string;
@@ -124,6 +137,8 @@ export function ChatPanel({
   onRagResult: (query: string, hits: RagHit[]) => void;
   /** Mirror streaming state up (canvas form disables while streaming). */
   onStreamingChange: (streaming: boolean) => void;
+  /** Navigate to the Agents view (undetected-agent onboarding, D57). */
+  onOpenAgents?: () => void;
 }) {
   void onOpenFile; // reserved for future produced-file chips
   const [messages, setMessages] = useState<ChatMessage[]>(
@@ -200,6 +215,36 @@ export function ChatPanel({
   const [autoTurn, setAutoTurn] = useState<{ display: string; nonce: number } | null>(null);
   const lastAutoNonceRef = useRef(0);
 
+  // Persistent workflow progress for the stepper strip (D57): one status per
+  // runtime step, kept in lockstep with the step cursor. Null when there is no
+  // multi-step workflow to show (loaded sessions, plain chat categories).
+  const [stepProgress, setStepProgress] = useState<StepProgress[] | null>(() =>
+    initialSession || !WF.some((s) => isGenerative(s.kind))
+      ? null
+      : WF.map((s) => ({ id: s.id, name: s.name?.trim() || s.id, status: "pending" as const })),
+  );
+  const setStepStatusAt = (i: number, status: StepProgressStatus) =>
+    setStepProgress((prev) =>
+      prev ? prev.map((s, idx) => (idx === i ? { ...s, status } : s)) : prev,
+    );
+
+  // The last real (non-prefill) turn, kept for same-session retry after a
+  // failed turn (D57). `stepIndex` restores the workflow cursor on retry.
+  const lastTurnRef = useRef<{
+    text: string;
+    opts?: { display?: string; system?: boolean };
+    stepIndex: number | null;
+  } | null>(null);
+
+  // Transient UI-level failure line (e.g. a session that failed to open) —
+  // shown under the header instead of being silently swallowed (D57).
+  const [uiError, setUiError] = useState<string | null>(null);
+
+  // Auto-scroll only while the user is pinned near the bottom; otherwise show
+  // a jump-to-latest button instead of yanking the view down on every delta.
+  const pinnedRef = useRef(true);
+  const [showJump, setShowJump] = useState(false);
+
   const started = messages.length > 0;
   const sessionCapable = SESSION_AGENTS.includes(agentId);
 
@@ -245,8 +290,23 @@ export function ChatPanel({
   const models = detected[agentId]?.models ?? [];
 
   useEffect(() => {
+    if (!pinnedRef.current) return; // reading history — don't yank the view down
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    pinnedRef.current = pinned;
+    setShowJump(!pinned);
+  };
+
+  const jumpToBottom = () => {
+    pinnedRef.current = true;
+    setShowJump(false);
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  };
 
   /** Synchronously commit a messages change: compute from the live ref (never
    * a stale render snapshot), update the ref, then set state. Channel events
@@ -371,7 +431,7 @@ export function ChatPanel({
         inflightStepRef.current = null;
 
         // Clear the mid-stream flag on the whole list (matches persist()).
-        const next = mutateMessages((prev) =>
+        mutateMessages((prev) =>
           prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)),
         );
 
@@ -381,6 +441,7 @@ export function ChatPanel({
             // Generative step (search/document/foundation): open the produced
             // file (if any), then AUTO-ADVANCE to the next generative step;
             // stop before a terminal chat step.
+            setStepStatusAt(stepIdx, "done");
             if (step.file && resolvedWorkdirRef.current) {
               onOpenFile(joinPath(resolvedWorkdirRef.current, step.file));
             }
@@ -395,6 +456,7 @@ export function ChatPanel({
               }));
             } else {
               stepArmedRef.current = false; // terminal chat → wait for the user
+              if (nextStep) setStepStatusAt(nextIdx, "active");
             }
           }
           // chat kind: terminal — nothing to advance.
@@ -402,9 +464,22 @@ export function ChatPanel({
           // Canceled/failed mid-workflow → halt auto-progress, drop to plain chat.
           stepIndexRef.current = WF.length;
           stepArmedRef.current = false;
+          setStepStatusAt(stepIdx, "halted");
+          mutateMessages((prev) => [
+            ...prev,
+            note(
+              ev.status === "canceled"
+                ? "작업을 중지했습니다 — 이후에는 일반 대화로 진행됩니다."
+                : "오류로 단계 진행을 중단했습니다 — '다시 시도'로 재개하거나 일반 대화로 진행하세요.",
+            ),
+          ]);
+        } else if (ev.status === "canceled") {
+          // Plain-chat cancel: leave a consistent confirmation (the partial
+          // reply above stays as-is).
+          mutateMessages((prev) => [...prev, note("응답 생성을 중지했습니다.")]);
         }
 
-        persist(next); // save the completed turn (incl. captured cli session id)
+        persist(messagesRef.current); // save the completed turn (incl. captured cli session id)
         break;
       }
     }
@@ -416,6 +491,7 @@ export function ChatPanel({
     if (inflightStepRef.current != null) {
       stepIndexRef.current = inflightStepRef.current;
       stepArmedRef.current = true;
+      setStepStatusAt(inflightStepRef.current, "pending");
       inflightStepRef.current = null;
     }
   };
@@ -456,7 +532,7 @@ export function ChatPanel({
         onRagResult(query, hits);
         return { context: formatRagContext(hits) };
       } catch (e) {
-        return { skip: `사내 문서 검색 단계를 건너뜁니다 — ${String(e)}` };
+        return { skip: `사내 문서 검색 단계를 건너뜁니다 — ${ragUserError(String(e))}` };
       }
     }
     if (step.kind === "knowledge") {
@@ -561,6 +637,7 @@ export function ChatPanel({
     const stepInject = !!step && stepArmedRef.current;
     if (!isPrefill) stepArmedRef.current = false;
     inflightStepRef.current = stepInject ? stepIndexRef.current : null;
+    if (stepInject) setStepStatusAt(stepIndexRef.current, "active");
 
     const skillBodies: string[] = [];
     const injectedNow: string[] = [];
@@ -595,23 +672,41 @@ export function ChatPanel({
     let preflightContext = "";
     if (!isPrefill && stepInject && step) {
       const fetches = step.kind === "rag" || step.kind === "knowledge";
-      if (fetches) setStreaming(true); // Stop stays live during the fetch
+      const fetchNote = step.kind === "rag" ? "사내 문서 검색 중…" : "지식 베이스 확인 중…";
+      if (fetches) {
+        setStreaming(true); // Stop stays live during the fetch
+        // Visible fetch feedback (D57): the network call can take a while
+        // (HTTP timeout 120s) — announce it, then drop the transient note.
+        mutateMessages((prev) => [...prev, note(fetchNote)]);
+      }
       const pf = await stepPreflight(step);
-      if (fetches) setStreaming(false);
+      if (fetches) {
+        setStreaming(false);
+        mutateMessages((prev) =>
+          prev.length && prev[prev.length - 1].system && prev[prev.length - 1].content === fetchNote
+            ? prev.slice(0, -1)
+            : prev,
+        );
+      }
       if (preflightAbortRef.current) {
         // Stopped mid-preflight → same fallback as a canceled step: halt
         // auto-progress, drop to plain chat.
         preflightAbortRef.current = false;
         unwindSkills();
+        setStepStatusAt(stepIndexRef.current, "halted");
         inflightStepRef.current = null;
         stepIndexRef.current = WF.length;
         stepArmedRef.current = false;
-        mutateMessages((prev) => [...prev, note("단계 진행을 중지했습니다.")]);
+        mutateMessages((prev) => [
+          ...prev,
+          note("작업을 중지했습니다 — 이후에는 일반 대화로 진행됩니다."),
+        ]);
         return true; // deliberately stopped — consumed
       }
       if (pf.skip) {
         unwindSkills();
         inflightStepRef.current = null;
+        setStepStatusAt(stepIndexRef.current, "skipped");
         mutateMessages((prev) => [...prev, note(pf.skip!)]);
         const nextIdx = stepIndexRef.current + 1;
         stepIndexRef.current = nextIdx;
@@ -624,6 +719,7 @@ export function ChatPanel({
           return send(text, prompt ? opts : { ...opts, system: true, display: progressLabel(nextIdx, WF) });
         }
         stepArmedRef.current = false;
+        if (nextStep) setStepStatusAt(nextIdx, "active"); // terminal chat reached
         if (prompt) return send(text, opts); // never drop a real user prompt
         return true;
       }
@@ -646,6 +742,12 @@ export function ChatPanel({
       return true; // nothing to send (empty input, no injected instruction)
     }
     if (!opts?.system) setInput("");
+    if (!isPrefill) {
+      // Remember the turn for same-session retry after a failure (D57).
+      lastTurnRef.current = { text, opts, stepIndex: inflightStepRef.current };
+      setUiError(null);
+    }
+    pinnedRef.current = true; // a new turn always scrolls into view
 
     // Sessionless agents need the whole conversation each turn; capture it from
     // the pre-append messages before we add the new pair.
@@ -730,6 +832,50 @@ export function ChatPanel({
     else preflightAbortRef.current = true;
   };
 
+  /** Re-send the last failed turn in the SAME session (D57): drop the failed
+   * message pair (and any trailing halt notes), restore the workflow cursor to
+   * the failed step, and fire the identical turn again. */
+  const retry = () => {
+    if (streaming) return;
+    const turn = lastTurnRef.current;
+    if (!turn) return;
+    mutateMessages((prev) => {
+      const next = [...prev];
+      while (next.length && next[next.length - 1].system) next.pop(); // halt notes
+      if (next.length && next[next.length - 1].role === "assistant") next.pop();
+      if (next.length && next[next.length - 1].role === "user") next.pop();
+      return next;
+    });
+    if (turn.stepIndex != null) {
+      stepIndexRef.current = turn.stepIndex;
+      stepArmedRef.current = true;
+      setStepStatusAt(turn.stepIndex, "pending");
+    }
+    void send(turn.text, turn.opts);
+  };
+
+  /** Confirm before an action that would silently kill an in-flight run
+   * (leave to Home / new session / open another session — D57). */
+  const confirmLeave = async (): Promise<boolean> => {
+    if (!streaming) return true;
+    return ask("진행 중인 에이전트 작업이 있습니다. 나가면 실행이 중지됩니다.\n계속할까요?", {
+      title: "Operation Wizard",
+      kind: "warning",
+    });
+  };
+
+  const guardedHome = () => {
+    void confirmLeave().then((ok) => {
+      if (ok) onHome();
+    });
+  };
+
+  const guardedNewSession = () => {
+    void confirmLeave().then((ok) => {
+      if (ok) onNewSession();
+    });
+  };
+
   const openHistory = async () => {
     if (historyOpen) {
       setHistoryOpen(false);
@@ -750,10 +896,12 @@ export function ChatPanel({
   const chooseSession = async (id: string) => {
     setHistoryOpen(false);
     if (!projectId) return;
+    if (!(await confirmLeave())) return;
     try {
       onOpenSession(await loadSession(projectId, id));
-    } catch {
-      /* ignore load failure */
+    } catch (e) {
+      // Surface instead of silently staying on the current chat (D57).
+      setUiError(`세션을 열지 못했습니다 — ${String(e)}`);
     }
   };
 
@@ -827,6 +975,15 @@ export function ChatPanel({
     [agents, detected],
   );
 
+  // The retry action targets the last assistant turn (a halt note may follow
+  // it, so "last message" is not enough).
+  const lastAssistantIdx = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") return i;
+    }
+    return -1;
+  }, [messages]);
+
   return (
     // Width comes from the WorkspaceView wrapper (user-resizable split, D49).
     <section className="relative flex w-full min-w-0 flex-col border-r border-line bg-panel min-h-0">
@@ -834,7 +991,7 @@ export function ChatPanel({
       <div className="flex shrink-0 items-center gap-2 border-b border-line px-3.5 py-2.5">
         <button
           type="button"
-          onClick={onHome}
+          onClick={guardedHome}
           title="홈"
           className="grid h-7 w-7 place-items-center rounded-lg border border-line bg-panel text-ink-muted transition-colors hover:bg-subtle"
         >
@@ -856,13 +1013,34 @@ export function ChatPanel({
         </button>
         <button
           type="button"
-          onClick={onNewSession}
+          onClick={guardedNewSession}
           title="새 세션"
           className="grid h-7 w-7 place-items-center rounded-lg border border-line bg-panel text-ink-muted transition-colors hover:bg-subtle"
         >
           <FilePlus2 size={15} />
         </button>
       </div>
+
+      {/* persistent workflow progress (D57) */}
+      {stepProgress && <WorkflowStepper steps={stepProgress} />}
+
+      {/* transient UI failure line (e.g. session open failure — D57) */}
+      {uiError && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-bad-border bg-bad-bg px-3.5 py-1.5 text-[12px] text-bad">
+          <AlertTriangle size={13} className="shrink-0" />
+          <span className="min-w-0 flex-1 truncate" title={uiError}>
+            {uiError}
+          </span>
+          <button
+            type="button"
+            onClick={() => setUiError(null)}
+            aria-label="닫기"
+            className="grid shrink-0 place-items-center rounded p-0.5 transition-opacity hover:opacity-70"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
 
       {/* history popover */}
       {historyOpen && (
@@ -911,37 +1089,79 @@ export function ChatPanel({
       )}
 
       {/* messages */}
-      <div ref={scrollRef} className="flex flex-1 flex-col gap-4 overflow-auto px-4 py-[18px]">
-        {messages.length === 0 && (
-          <div className="mt-6 text-center text-[12.5px] leading-[1.6] text-ink-soft">
-            메시지를 입력해 작업을 시작하세요.
-            <br />
-            에이전트가 선택한 작업 폴더에서 실행됩니다.
-          </div>
-        )}
-        {messages.map((m, i) =>
-          m.system ? (
-            <div
-              key={i}
-              className="self-center whitespace-pre-wrap rounded-full bg-subtle px-3 py-1 text-center text-[11.5px] font-medium text-ink-soft"
-            >
-              {m.content}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="flex flex-1 flex-col gap-4 overflow-auto px-4 py-[18px]"
+        >
+          {messages.length === 0 && (
+            <div className="mt-6 text-center text-[12.5px] leading-[1.6] text-ink-soft">
+              메시지를 입력해 작업을 시작하세요.
+              <br />
+              에이전트가 선택한 작업 폴더에서 실행됩니다.
             </div>
-          ) : m.role === "user" ? (
-            <div
-              key={i}
-              className="max-w-[88%] self-end whitespace-pre-wrap rounded-[14px_14px_4px_14px] bg-muted px-3.5 py-2.5 text-[13.5px] leading-[1.5] text-ink-strong"
-            >
-              {m.content}
-            </div>
-          ) : (
-            <AssistantMessage key={i} message={m} onNewSession={onNewSession} />
-          ),
+          )}
+          {messages.map((m, i) =>
+            m.system ? (
+              <div
+                key={i}
+                className="self-center whitespace-pre-wrap rounded-full bg-subtle px-3 py-1 text-center text-[11.5px] font-medium text-ink-soft"
+              >
+                {m.content}
+              </div>
+            ) : m.role === "user" ? (
+              <div
+                key={i}
+                className="max-w-[88%] self-end whitespace-pre-wrap rounded-[14px_14px_4px_14px] bg-muted px-3.5 py-2.5 text-[13.5px] leading-[1.5] text-ink-strong"
+              >
+                {m.content}
+              </div>
+            ) : (
+              <AssistantMessage
+                key={i}
+                message={m}
+                speaker={agents.find((a) => a.id === agentId)?.name}
+                onNewSession={onNewSession}
+                onRetry={i === lastAssistantIdx && lastTurnRef.current ? retry : undefined}
+              />
+            ),
+          )}
+        </div>
+        {showJump && (
+          <button
+            type="button"
+            onClick={jumpToBottom}
+            title="최신 메시지로 이동"
+            className="absolute bottom-3 right-4 z-10 inline-flex items-center gap-1.5 rounded-full border border-line-strong bg-elevated px-2.5 py-1.5 text-[11.5px] font-medium text-ink-muted shadow-md transition-colors hover:bg-subtle"
+          >
+            <ArrowDown size={13} />
+            최신으로
+          </button>
         )}
       </div>
 
       {/* composer */}
       <div className="shrink-0 border-t border-line px-3.5 py-3">
+        {/* Undetected-agent onboarding (D57): sending would fail at runtime —
+            warn up front and route to the Agents view. */}
+        {detected[agentId] && !detected[agentId].available && (
+          <div className="mb-2 flex items-center gap-1.5 rounded-lg border border-line bg-warn-bg px-2.5 py-1.5 text-[11.5px] text-warn">
+            <AlertTriangle size={13} className="shrink-0" />
+            <span className="min-w-0 flex-1">
+              선택한 에이전트가 탐지되지 않았습니다 — 실행이 실패할 수 있습니다.
+            </span>
+            {onOpenAgents && (
+              <button
+                type="button"
+                onClick={onOpenAgents}
+                className="shrink-0 font-medium underline hover:opacity-80"
+              >
+                Agents에서 경로 설정
+              </button>
+            )}
+          </div>
+        )}
         <div className="mb-2 flex items-center gap-2 text-[11.5px] text-ink-soft">
           <select
             value={agentId}
@@ -953,7 +1173,7 @@ export function ChatPanel({
             {(availableAgents.length ? availableAgents : agents).map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
-                {detected[a.id]?.available ? "" : " (미탐지)"}
+                {detected[a.id] ? (detected[a.id].available ? "" : " (미탐지)") : " (탐지 중…)"}
               </option>
             ))}
           </select>

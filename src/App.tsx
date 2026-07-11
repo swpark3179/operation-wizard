@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, RefreshCw, X } from "lucide-react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { AppShell } from "./components/AppShell";
 import type { View } from "./components/NavRail";
 import { HomeArea } from "./components/HomeArea";
@@ -76,9 +77,25 @@ function App() {
     [detectOne],
   );
 
+  // Whether the workspace has an in-flight agent run (streaming) — navigating
+  // away unmounts the ChatPanel, which cancels the run. Confirm first (D57).
+  const workspaceBusyRef = useRef(false);
+  const handleWorkspaceBusy = useCallback((busy: boolean) => {
+    workspaceBusyRef.current = busy;
+  }, []);
+
   const handleViewChange = useCallback((v: View) => {
-    if (v === "home") setHomeNonce((n) => n + 1);
-    setView(v);
+    void (async () => {
+      if (workspaceBusyRef.current) {
+        const ok = await ask(
+          "진행 중인 에이전트 작업이 있습니다. 화면을 이동하면 실행이 중지됩니다.\n계속할까요?",
+          { title: "Operation Wizard", kind: "warning" },
+        );
+        if (!ok) return;
+      }
+      if (v === "home") setHomeNonce((n) => n + 1);
+      setView(v);
+    })();
   }, []);
 
   return (
@@ -92,6 +109,8 @@ function App() {
             agents={agents}
             detected={detected}
             settings={settings}
+            onOpenAgents={() => handleViewChange("agents")}
+            onBusyChange={handleWorkspaceBusy}
           />
         ) : view === "agents" ? (
           <div className="h-full overflow-auto">

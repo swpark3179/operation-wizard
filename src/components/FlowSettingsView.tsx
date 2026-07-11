@@ -3,7 +3,7 @@
 // shown as the initial (sample) content; "기본값으로 되돌리기" clears the
 // override (sends `null`) so future app defaults apply again.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
   ChevronUp,
@@ -14,6 +14,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { CATEGORIES, type Category } from "./workspace";
 import { pickFolder, setSkills, setWorkflow } from "../lib/api";
 import { skillList } from "../lib/skills";
@@ -279,17 +280,26 @@ function WorkflowSection({
   category,
   settings,
   onSettingsChange,
+  onDirtyChange,
 }: {
   category: Category;
   settings: Settings | null;
   onSettingsChange: (s: Settings) => void;
+  /** Unsaved-edit flag mirror: the parent guards the category tab switch (the
+   * `key={category}` remount would otherwise silently discard the draft, D57). */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState<StepDef[]>(() =>
     cloneSteps(workflowFor(category, settings)),
   );
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const skills = skillList(settings);
   const isCustom = !!settings?.workflows?.[category];
@@ -300,9 +310,13 @@ function WorkflowSection({
   const foundationOn = draft.some((s) => isFoundationKind(s.kind));
   const foundationCount = draft.filter((s) => isFoundationKind(s.kind)).length;
 
+  const touch = () => {
+    setSaved(false);
+    setDirty(true);
+  };
   const update = (i: number, next: StepDef) => {
     setDraft((d) => d.map((s, idx) => (idx === i ? next : s)));
-    setSaved(false);
+    touch();
   };
   const move = (i: number, dir: -1 | 1) => {
     setDraft((d) => {
@@ -313,7 +327,7 @@ function WorkflowSection({
       [next[i], next[j]] = [next[j], next[i]];
       return next;
     });
-    setSaved(false);
+    touch();
   };
   const toggleFoundation = () => {
     setDraft((d) =>
@@ -321,11 +335,11 @@ function WorkflowSection({
         ? d.filter((s) => !isFoundationKind(s.kind))
         : [...cloneSteps(DEFAULT_FOUNDATION_STEPS), ...d],
     );
-    setSaved(false);
+    touch();
   };
   const remove = (i: number) => {
     setDraft((d) => d.filter((_, idx) => idx !== i));
-    setSaved(false);
+    touch();
   };
   const add = () => {
     const step: StepDef = {
@@ -342,7 +356,7 @@ function WorkflowSection({
         ? [...d.slice(0, -1), step, d[d.length - 1]]
         : [...d, step],
     );
-    setSaved(false);
+    touch();
   };
 
   const save = async () => {
@@ -352,6 +366,7 @@ function WorkflowSection({
       const next = await setWorkflow(category, draft);
       onSettingsChange(next);
       setSaved(true);
+      setDirty(false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -360,6 +375,12 @@ function WorkflowSection({
   };
 
   const reset = async () => {
+    // One click used to wipe the whole custom workflow — confirm first (D57).
+    const ok = await ask(
+      "이 카테고리의 단계 설정을 앱 기본값으로 되돌릴까요?\n저장된 사용자 정의 단계는 삭제됩니다.",
+      { title: "기본값으로 되돌리기", kind: "warning" },
+    );
+    if (!ok) return;
     setSaving(true);
     setError(null);
     try {
@@ -367,6 +388,7 @@ function WorkflowSection({
       onSettingsChange(next);
       setDraft(cloneSteps(workflowFor(category, next)));
       setSaved(true);
+      setDirty(false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -435,6 +457,9 @@ function WorkflowSection({
           <Plus size={14} /> 단계 추가
         </button>
         <div className="flex-1" />
+        {dirty && !validation && (
+          <span className="text-[12px] text-warn">저장되지 않은 변경</span>
+        )}
         {validation && <span className="text-[12px] text-bad">{validation}</span>}
         {!validation && saved && <span className="text-[12.5px] text-ok">Saved.</span>}
         {error && <span className="max-w-[280px] truncate text-[12px] text-bad" title={error}>{error}</span>}
@@ -597,6 +622,7 @@ function SkillLibrary({
   const [freshIds, setFreshIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const isCustom = !!settings?.skills;
@@ -622,6 +648,7 @@ function SkillLibrary({
     setDraft((d) => [...d, skill]);
     setFreshIds((s) => new Set(s).add(skill.id));
     setSaved(false);
+    setDirty(true);
   };
 
   const save = async () => {
@@ -631,6 +658,7 @@ function SkillLibrary({
       const next = await setSkills(draft);
       onSettingsChange(next);
       setSaved(true);
+      setDirty(false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -639,6 +667,12 @@ function SkillLibrary({
   };
 
   const reset = async () => {
+    // One click used to wipe the whole custom registry — confirm first (D57).
+    const ok = await ask(
+      "스킬 목록을 앱 기본값으로 되돌릴까요?\n저장된 사용자 정의 스킬은 삭제됩니다.",
+      { title: "기본값으로 되돌리기", kind: "warning" },
+    );
+    if (!ok) return;
     setSaving(true);
     setError(null);
     try {
@@ -647,6 +681,7 @@ function SkillLibrary({
       setDraft(skillList(next).map((s) => ({ ...s })));
       setFreshIds(new Set());
       setSaved(true);
+      setDirty(false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -682,10 +717,12 @@ function SkillLibrary({
             onChange={(next) => {
               setDraft((d) => d.map((x, idx) => (idx === i ? next : x)));
               setSaved(false);
+              setDirty(true);
             }}
             onRemove={() => {
               setDraft((d) => d.filter((_, idx) => idx !== i));
               setSaved(false);
+              setDirty(true);
             }}
           />
         ))}
@@ -701,6 +738,9 @@ function SkillLibrary({
           <Plus size={14} /> 스킬 추가
         </button>
         <div className="flex-1" />
+        {dirty && !validation && (
+          <span className="text-[12px] text-warn">저장되지 않은 변경</span>
+        )}
         {validation && <span className="text-[12px] text-bad">{validation}</span>}
         {!validation && saved && <span className="text-[12.5px] text-ok">Saved.</span>}
         {error && <span className="max-w-[280px] truncate text-[12px] text-bad" title={error}>{error}</span>}
@@ -735,6 +775,22 @@ export function FlowSettingsView({
   onSettingsChange: (s: Settings) => void;
 }) {
   const [category, setCategory] = useState<Category>("plan");
+  // The category switch remounts WorkflowSection (key), which would silently
+  // discard an unsaved draft — confirm when it is dirty (D57).
+  const [workflowDirty, setWorkflowDirty] = useState(false);
+
+  const switchCategory = async (id: Category) => {
+    if (id === category) return;
+    if (workflowDirty) {
+      const ok = await ask(
+        "저장하지 않은 단계 변경이 있습니다. 카테고리를 이동하면 변경 내용이 사라집니다.\n계속할까요?",
+        { title: "Flows", kind: "warning" },
+      );
+      if (!ok) return;
+    }
+    setWorkflowDirty(false);
+    setCategory(id);
+  };
 
   return (
     <div className="mx-auto max-w-[760px] px-6 py-7">
@@ -754,7 +810,7 @@ export function FlowSettingsView({
           <button
             key={c.id}
             type="button"
-            onClick={() => setCategory(c.id)}
+            onClick={() => void switchCategory(c.id)}
             className={
               "rounded-md px-2.5 py-1 text-[12.5px] font-medium transition-colors " +
               (category === c.id
@@ -772,6 +828,7 @@ export function FlowSettingsView({
         category={category}
         settings={settings}
         onSettingsChange={onSettingsChange}
+        onDirtyChange={setWorkflowDirty}
       />
 
       <div className="my-6 border-t border-line" />

@@ -1,6 +1,6 @@
 import { RefreshCw, ChevronDown, FolderOpen, SlidersHorizontal } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { AgentIcon } from "./AgentIcon";
 import { StatusDot } from "./StatusDot";
 import { DIAGNOSTIC_HINT, type AgentInfo, type DetectedAgent, type Settings } from "../lib/types";
@@ -125,9 +125,17 @@ function PathConfig({
             </button>
             <button
               type="button"
-              onClick={() => {
+              onClick={async () => {
+                // Confirm only when a saved override is about to be removed (D57).
+                if (initialValue) {
+                  const ok = await ask(
+                    `${info.name}의 저장된 사용자 지정 경로를 삭제하고 자동 탐지로 되돌릴까요?`,
+                    { title: info.name, kind: "warning" },
+                  );
+                  if (!ok) return;
+                }
                 setValue("");
-                save(null);
+                void save(null);
               }}
               disabled={saving}
               className="rounded-[6px] border border-line px-3 py-1.5 text-[13px] font-medium text-ink-muted transition-colors duration-[120ms] hover:bg-subtle disabled:opacity-50"
