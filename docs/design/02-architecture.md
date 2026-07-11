@@ -60,7 +60,7 @@
 | `files.rs` | 캔버스 파일 뷰어용 read-only 커맨드(`list_dir`/`read_file`) |
 | `projects.rs` | 대화 영속화: `~/.operation-wizard/projects/<projectId>/{workspace,sessions/<sessionId>}`. **projectId=프론트 mint**(workdir와 분리), `ensure_project`(workdir resolve)/`save_session`/`list_sessions`/`load_session`. 모두 projectId-keyed. ([07](07-workspace-and-runs.md)) |
 | `settings.rs` | 앱 설정(`settings.json`) 로드/저장: 에이전트별 경로 맵 + **스킬 레지스트리(`SkillDef`, `dir?` 리소스 폴더 포함)·카테고리별 워크플로우(`StepDef`, `output?` 포함) override**(D39/D45/D47) + **`ConfluenceConfig`/`RagConfig`**(D48; `RagConfig`는 endpoint+secretKey+passKey 헤더 값 — D50. PAT/키는 평문 저장 — 읽기 전용 키 권장) + 저장 시 검증(`validate_skills`/`validate_steps` — `STEP_KINDS` 6종·`STEP_OUTPUTS`). `CATEGORIES` 상수는 프론트 `workspace.ts`와 동기화 |
-| `knowledge.rs` | 지식 베이스 CRUD: `~/.operation-wizard/knowledge/<id>.json`(항목당 1파일, upsert 타임스탬프 스탬프). knowledge 기반 단계 주입용 (D48) |
+| `knowledge.rs` | 지식 베이스 CRUD: `~/.operation-wizard/knowledge/<id>.json`(항목당 1파일, upsert 타임스탬프 스탬프). knowledge 기반 단계 주입용 (D48). **산출물 지식(D59)**: `kind`/`files`/출처 필드 + `save_knowledge_files`(산출물 파일을 `knowledge/artifacts/<id>/`로 staged-swap 복사) + `get_knowledge_root`(주입 인덱스·extraDirs용 절대경로); 삭제 시 폴더 동반 제거 |
 | `rag.rs` | **사용자가 채우는 RAG API 어댑터**: `RagClient::{ingest_page, search}` TODO(user) 스텁(미구현 시 한글 안내 Err) + `rag_search` 커맨드(spawn_blocking). 요약·임베딩은 사용자 RAG 서비스 담당 (D48) |
 | `confluence.rs` | Confluence Server/DC REST 크롤(반복 BFS, visited dedupe, 상한) + 페이지 원문을 `rag.rs`로 전달. `IngestEvent`를 `Channel`로 스트리밍, `IngestRegistry`(취소 플래그) managed state (D48) |
 | `main.rs` | 바이너리 진입점 (`run()` 호출) |
@@ -77,7 +77,7 @@
 | 화면 | `components/AgentsView` | 에이전트 관리 뷰(카드당 탐지 표시 + 경로 설정 통합; 별도 Settings 뷰 폐지 — [05](05-decisions.md) D38) |
 | 화면 | `components/FlowSettingsView` | **Flows 설정 뷰**: 카테고리별 단계 편집기(추가/삭제/순서/kind/지시문/산출물 파일/**결과 형태(output)**/스킬 연결; **기반 3단계는 pinned + 비-plan 카테고리 토글** — D44/D47) + 스킬 라이브러리(추가/수정/삭제/사용처 힌트/**리소스 폴더(dir)** — D45) + 기본값 복원 ([05](05-decisions.md) D39/D40) |
 | 화면 | `components/KnowledgeView` (+ `lib/ingest.ts`) | **지식 뷰**(D48): RAG 검색 설정(endpoint/secretKey/passKey/topK + 연결 테스트 — D50) + Confluence 수집(설정·수집 시작/중지·진행 표시) + 지식 베이스 CRUD. 수집 진행 상태는 **`lib/ingest.ts` 모듈 싱글턴 스토어**가 Channel과 함께 소유해 뷰 전환을 생존하고(`useIngestState` 구독; NavRail '지식' pulse 점 포함 — D51) |
-| 워크스페이스 | `components/HomeArea, HomeView, WorkspaceView, ChatPanel, AssistantMessage, WorkflowStepper, CanvasPanel, ArtifactsPanel, DiagramGallery, FileViewer, Markdown, RequirementsForm` (+ `lib/options.ts`, `lib/skills.ts`, `lib/workflow.ts`, `lib/clarify.ts`, `lib/clipboard.ts`, `lib/artifacts.ts`) | HOME 런처(최근 프로젝트, 새 채팅=새 프로젝트; **미탐지 에이전트 온보딩 배너** — D57) + 좌 대화(새 세션·기록, **폼 대기 중 컴포저 차단** — D41; **채팅↔캔버스 폭은 경계 드래그로 조절** — D49; **진행 스테퍼·채팅 마크다운 렌더+복사·같은 세션 재시도·이탈 확인·하단 고정 스크롤** — D57)/우 캔버스(**파일 목록 탭 + 파일별 뷰어 탭(닫기 가능)** — D49; 요구사항 탭은 **폼 대기 중에만 표시**; **산출물 허브 + 다이어그램 갤러리 탭, 워크플로우 산출 파일은 허브로 라우팅** — D58), 실행 스트리밍·파일 뷰어(**md+mermaid 미리보기** — D42, **목차 드롭다운** — D58)·세션 영속화·**카테고리 가이드 플로우**(고정 선택지 우선+프리필 자동채움·단계별 스킬 주입·소스 조사·문서 생성) ([07](07-workspace-and-runs.md), [08](08-guided-flows-and-skills.md)) |
+| 워크스페이스 | `components/HomeArea, HomeView, WorkspaceView, ChatPanel, AssistantMessage, WorkflowStepper, CanvasPanel, ArtifactsPanel, DiagramGallery, KnowledgeSavePanel, FileViewer, Markdown, RequirementsForm` (+ `lib/options.ts`, `lib/skills.ts`, `lib/workflow.ts`, `lib/clarify.ts`, `lib/clipboard.ts`, `lib/artifacts.ts`, `lib/knowledgeSave.ts`, `lib/useArtifactExistence.ts`) | HOME 런처(최근 프로젝트, 새 채팅=새 프로젝트; **미탐지 에이전트 온보딩 배너** — D57) + 좌 대화(새 세션·기록, **폼 대기 중 컴포저 차단** — D41; **채팅↔캔버스 폭은 경계 드래그로 조절** — D49; **진행 스테퍼·채팅 마크다운 렌더+복사·같은 세션 재시도·이탈 확인·하단 고정 스크롤** — D57)/우 캔버스(**파일 목록 탭 + 파일별 뷰어 탭(닫기 가능)** — D49; 요구사항 탭은 **폼 대기 중에만 표시**; **산출물 허브 + 다이어그램 갤러리 탭, 워크플로우 산출 파일은 허브로 라우팅** — D58; **워크플로우 완료 배너 + '지식 저장' 탭**(산출물 선택+요약 생성→지식 베이스 저장) — D59), 실행 스트리밍·파일 뷰어(**md+mermaid 미리보기** — D42, **목차 드롭다운** — D58)·세션 영속화·**카테고리 가이드 플로우**(고정 선택지 우선+프리필 자동채움·단계별 스킬 주입·소스 조사·문서 생성) ([07](07-workspace-and-runs.md), [08](08-guided-flows-and-skills.md)) |
 | 가이드 플로우 | `lib/options.ts`, `lib/skills.ts`, `lib/workflow.ts` | 카테고리별 고정 선택지 카탈로그(`CATEGORY_OPTIONS`, 코드 정적) + **settings-aware 스킬 레지스트리(`DEFAULT_SKILLS`/`resolveSkills`)·워크플로우(`DEFAULT_WORKFLOWS`/`workflowFor(category, settings)`)** — 사용자 override는 settings.json, 코드 기본값은 폴백=샘플 ([08](08-guided-flows-and-skills.md), D39/D40) |
 | 위젯 | `components/AgentCard, AgentIcon, StatusDot` | 범용 에이전트 카드(탐지 표시 + 접이식 커스텀 경로 설정) 및 상태 표시 |
 | 스타일 | `styles/tokens.css, global.css` | 디자인 토큰 + Tailwind 테마 매핑 (blue→`info` 매핑 추가) |
@@ -109,7 +109,9 @@
 | `set_confluence_config` | `config: ConfluenceConfig \| null` | `Settings` | Confluence 수집 설정 저장/해제(빈 baseUrl=해제, D48) |
 | `set_rag_config` | `config: RagConfig \| null` | `Settings` | RAG endpoint 설정 저장/해제 |
 | `rag_search` | `query: string`, `topK?: number` | `RagHit[]` | rag 기반 단계 검색(사용자 어댑터 `rag.rs`; 미구현/미설정 시 한글 Err) |
-| `list_knowledge` / `save_knowledge` / `delete_knowledge` | — / `entry` / `id` | `KnowledgeEntry[]` / `KnowledgeEntry` / — | 지식 베이스 CRUD |
+| `list_knowledge` / `save_knowledge` / `delete_knowledge` | — / `entry` / `id` | `KnowledgeEntry[]` / `KnowledgeEntry` / — | 지식 베이스 CRUD(삭제는 artifact 폴더 동반 제거 — D59) |
+| `save_knowledge_files` | `entry: KnowledgeEntry`, `sources: string[]` | `KnowledgeEntry` | 산출물 파일을 `knowledge/artifacts/<id>/`로 복사(staged swap) + artifact 엔트리 upsert(D59). `files`는 복사된 이름으로 서버가 채움 |
+| `get_knowledge_root` | — | `string` | 지식 루트 절대경로(주입 인덱스·extraDirs용 — D59) |
 | `start_confluence_ingest` | `onEvent: Channel<IngestEvent>` | `ingestId: string` | 크롤+수집 워커 시작, 진행 스트리밍 |
 | `cancel_ingest` / `probe_confluence` | `ingestId` / — | — / `string` | 수집 취소 / 연결 테스트 |
 

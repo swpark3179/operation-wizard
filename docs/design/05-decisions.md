@@ -777,3 +777,47 @@
   (파일 트리/탭으로 열람 가능). `read_file` 2MiB 상한을 넘는 산출물은 다이어그램 스캔에서 조용히 스킵된다.
   다이어그램 스캔은 탭 오픈 시점 기준(백그라운드 감시 없음 — 재스캔 버튼/`refreshNonce`로 갱신). 산출물
   단계가 수십 개로 늘면 허브 목록 가상화/그룹화를 검토.
+
+---
+
+### D59. 워크플로우 산출물의 지식 저장 = 파일 복사 + 요약 본문 + 주입 시 경로 인덱스/extraDirs
+- **배경**: 지식 베이스는 텍스트 전용(`title`+`body`)이고 주입 시 항목당 4,000자/전체 16KB로 잘려
+  (D48), 완료된 작업의 산출물(md 문서·HTML 렌더 등)을 본문에 통째로 저장하면 이후 작업에는 앞부분만
+  전달됐다. 사용자 요구 — "작업이 완료되면 산출물을 지식으로 저장해 이후 작업에서 참고".
+- **결정(저장 구조)**: **파일 보관 + 요약 주입**. `KnowledgeEntry`에 옵셔널 필드 추가 —
+  `kind`("note"/"artifact", plain string — settings.rs validate-on-save 관례), `files`(복사된 파일명
+  목록), `sourceProjectId`/`sourceCategory`/`sourceTitle`(출처 표시용). 전부 `#[serde(default)]`라 구
+  JSON 하위호환. 산출물 파일은 새 커맨드 **`save_knowledge_files(entry, sources)`**가
+  `~/.operation-wizard/knowledge/artifacts/<entryId>/`로 **백엔드에서 복사**(프론트는 파일쓰기 불가 —
+  D21; `read_file` 2MiB 상한도 미적용, 파일당 10MiB 가드만). 복사는 **staged swap**(`<id>.tmp`에 복사
+  후 교체) — 재저장 중간 실패가 기존 파일 세트를 파괴하지 않고, 엔트리 JSON은 복사 완료 후에만
+  기록된다. basename 충돌은 `-2`/`-3` 접미사(케이스 무시). 삭제는 기존 `delete_knowledge`가 폴더까지
+  제거(멱등 유지). **`get_knowledge_root`** 커맨드가 절대경로를 제공한다(주입 인덱스·extraDirs용 —
+  `list_knowledge` 응답에 절대경로를 넣으면 save 라운드트립 때 파생 데이터가 영속되는 문제로 기각).
+- **결정(활용)**: knowledge preflight가 artifact 엔트리를 **요약(body, 4000자 클립) + 첨부 문서
+  절대경로 인덱스 + "필요하면 원문을 직접 읽으라"는 안내**로 주입하고(`formatKnowledgeContext`에
+  `artifactsRoot` 인자 추가), `knowledge/artifacts` **루트 1개**를 `knowledgeDirsRef`로 extraDirs에
+  등록해(claude `--add-dir`, gemini/aipro `--include-directories` — D52와 동일 경로) 대화 내내
+  에이전트가 원문 전체를 읽을 수 있게 한다. 원문은 절대 인라인하지 않으므로 16KB 상한과 무관.
+- **결정(저장 트리거·UX)**: ① **완료 시 제안** — 종단 chat 도달 지점 2곳(end 핸들러의 자동전진 정지
+  + preflight 스킵 체인)에서 `file`을 실제 생성한 단계가 있으면 세션당 1회, ChatPanel 컴포저 위
+  dismissible 배너로 제안(캔버스 탭은 자동 전환하지 않음 — D58 산출물 라우팅과 충돌 방지).
+  ② **수동 저장** — 산출물 탭 행 hover 액션(존재하는 산출물만). 두 경로 모두 **'지식 저장' 조건부
+  캔버스 탭**(`KnowledgeSavePanel`, '요구사항' 탭 선례)을 연다 — 산출물 체크박스(존재 프로브는
+  `useArtifactExistence` 공용 훅으로 추출, 미생성은 disabled)+제목+요약 편집+저장. `entryId`는
+  세션당 1회 mint되어 저장 후에도 유지 → **같은 세션 재저장은 같은 엔트리 upsert**(새 세션=새 엔트리,
+  v1 수용). 로드 세션(완료 배너 없음)은 수동 경로로 완전 동작.
+- **결정(요약 생성)**: 패널 오픈 시 **격리 요약 턴**(`generateKnowledgeSummary` — 프리필 패턴:
+  `runAgent` 직접 호출, 세션 id/resume 없음, ChatPanel 상태 불변)이 산출물 문서를 직접 읽고
+  ` ```summary ` 펜스로 요약을 생성해 편집 가능한 textarea로 스트리밍한다(`fencedBlocks`를
+  clarify.ts에서 export해 재사용; 펜스 미준수 시 평문 폴백 — plain 에이전트의 raw stdout도 수용).
+  실패/취소 시 직접 작성 폴백 — **저장은 요약에 블록되지 않는다**. in-session resume 기각: 로드
+  세션에서 stale하고, 세션리스는 transcript 재전송으로 더 비싸며, `streaming` 슬롯과 얽힘.
+- **대안 기각**: 산출물 원문을 body로 저장(16KB/4000자 잘림 — 문제의 원인 그대로) / 엔트리별
+  `--add-dir`(엔트리 수에 비례한 CLI 인자 폭증) / `files`를 폴더 나열로 파생(list마다 IPC+디렉터리
+  읽기, 순서 비결정) / RAG ingest(rag.rs가 사용자 스텁 + Confluence 페이지 형태에 고정).
+- **한계**: artifacts 폴더의 파일을 사용자가 수동 삭제하면 주입 인덱스는 남고 에이전트 읽기만
+  실패한다(graceful, v1은 존재 프로브 없음). 새 세션에서 같은 프로젝트를 재저장하면 엔트리가
+  중복된다(출처 표시로 식별 가능).
+- **재검토 조건**: artifact 엔트리가 수십 건으로 늘면 종류별 주입 상한·선택 UI를 도입; 지식의 RAG
+  승격(D48 재검토 조건)이 이뤄지면 산출물 원문도 RAG ingest로 승격.

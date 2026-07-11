@@ -4,6 +4,7 @@ import {
   ArrowUp,
   ArrowDown,
   AlertTriangle,
+  BookmarkPlus,
   Square,
   ClipboardList,
   FilePlus2,
@@ -18,6 +19,7 @@ import {
   Channel,
   cancelRun,
   ensureProject,
+  getKnowledgeRoot,
   listKnowledge,
   listSessions,
   loadSession,
@@ -54,8 +56,9 @@ import type {
 const SESSION_AGENTS = ["claude", "codex"];
 
 /** Pick the default agent: prefer an available Claude Code, else the first
- * available detected agent, else the first known agent. */
-function defaultAgentId(agents: AgentInfo[], detected: Record<string, DetectedAgent>): string {
+ * available detected agent, else the first known agent. Exported for the
+ * manual knowledge-save path (loaded sessions pick a fallback agent — D59). */
+export function defaultAgentId(agents: AgentInfo[], detected: Record<string, DetectedAgent>): string {
   if (detected.claude?.available) return "claude";
   const firstAvailable = agents.find((a) => detected[a.id]?.available);
   return firstAvailable?.id ?? agents[0]?.id ?? "claude";
@@ -96,6 +99,7 @@ export function ChatPanel({
   onStreamingChange,
   onStepProgress,
   onOpenAgents,
+  onOpenKnowledgeSave,
 }: {
   /** The active project id (folder key for persistence). */
   projectId: string;
@@ -139,6 +143,9 @@ export function ChatPanel({
   onStepProgress?: (progress: StepProgress[] | null) => void;
   /** Navigate to the Agents view (undetected-agent onboarding, D57). */
   onOpenAgents?: () => void;
+  /** Open the canvas 지식 저장 panel (workflow-completion banner, D59) with the
+   * session's agent/model (the summary turn runs on them). */
+  onOpenKnowledgeSave?: (ctx: { agentId: string; model: string | null }) => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>(
     () => (initialSession?.messages as ChatMessage[] | undefined) ?? [],
@@ -206,8 +213,19 @@ export function ChatPanel({
   const codebasePathRef = useRef<string | null>(codebasePath);
   const codebasePersistedRef = useRef(!!initialSession); // manifest already has it
   const skillDirsRef = useRef(new Set<string>());
+  // Stored-artifact read access (D59): once the knowledge preflight injected an
+  // artifact entry's document index, the knowledge `artifacts` root rides
+  // extraDirs for the rest of the conversation (one root dir — no per-entry
+  // CLI-arg bloat) so the agent can read the full originals on demand.
+  const knowledgeDirsRef = useRef(new Set<string>());
   const lastAnswersWireRef = useRef("");
   const preflightAbortRef = useRef(false);
+  // Workflow completion (D59): true once any generative step produced a file;
+  // reaching the terminal chat step then proposes saving the artifacts as
+  // knowledge — once per session, dismissible.
+  const producedFileRef = useRef(false);
+  const completionFiredRef = useRef(false);
+  const [kbProposal, setKbProposal] = useState(false);
   // Auto-advance: a generative step queues the next step's turn here; a
   // nonce-guarded effect fires it once (never call send() from the stream
   // handler's closure — it would capture stale `messages`).
@@ -446,6 +464,7 @@ export function ChatPanel({
             // stop before a terminal chat step.
             setStepStatusAt(stepIdx, "done");
             if (step.file && resolvedWorkdirRef.current) {
+              producedFileRef.current = true; // an artifact exists → completion may propose saving it (D59)
               onOpenFile(joinWorkdirPath(resolvedWorkdirRef.current, step.file));
             }
             const nextIdx = stepIdx + 1;
@@ -460,6 +479,7 @@ export function ChatPanel({
             } else {
               stepArmedRef.current = false; // terminal chat → wait for the user
               if (nextStep) setStepStatusAt(nextIdx, "active");
+              maybeProposeKnowledgeSave();
             }
           }
           // chat kind: terminal — nothing to advance.
@@ -497,6 +517,16 @@ export function ChatPanel({
       setStepStatusAt(inflightStepRef.current, "pending");
       inflightStepRef.current = null;
     }
+  };
+
+  /** Terminal chat reached (D59): once per session, when at least one step
+   * actually produced a file, offer to save the artifacts as knowledge. Called
+   * from both terminal-reach sites — the end handler's auto-advance stop and
+   * the preflight-skip chain. */
+  const maybeProposeKnowledgeSave = () => {
+    if (completionFiredRef.current || !producedFileRef.current) return;
+    completionFiredRef.current = true;
+    setKbProposal(true);
   };
 
   /** A centered workflow note (skip/stop announcements). */
@@ -540,12 +570,22 @@ export function ChatPanel({
     }
     if (step.kind === "knowledge") {
       try {
-        const entries = await listKnowledge();
+        const [entries, kbRoot] = await Promise.all([
+          listKnowledge(),
+          getKnowledgeRoot().catch(() => null), // root fetch failure → summaries without the index
+        ]);
         if (preflightAbortRef.current) return {};
         if (!entries.length) {
           return { skip: "등록된 사내 지식이 없어 지식 반영 단계를 건너뜁니다. (지식 화면에서 등록)" };
         }
-        return { context: formatKnowledgeContext(entries) };
+        // Artifact entries (D59): the injected context lists their documents'
+        // absolute paths; grant read access to the store for the rest of the
+        // conversation so the agent can open the full originals.
+        const artifactsRoot = kbRoot ? `${kbRoot.replace(/[\\/]+$/, "")}\\artifacts` : null;
+        if (artifactsRoot && entries.some((e) => e.kind === "artifact" && e.files?.length)) {
+          knowledgeDirsRef.current.add(artifactsRoot);
+        }
+        return { context: formatKnowledgeContext(entries, artifactsRoot) };
       } catch (e) {
         return { skip: `지식 베이스를 읽지 못해 단계를 건너뜁니다 — ${String(e)}` };
       }
@@ -723,6 +763,7 @@ export function ChatPanel({
         }
         stepArmedRef.current = false;
         if (nextStep) setStepStatusAt(nextIdx, "active"); // terminal chat reached
+        maybeProposeKnowledgeSave();
         if (prompt) return send(text, opts); // never drop a real user prompt
         return true;
       }
@@ -805,11 +846,13 @@ export function ChatPanel({
           sessionId: useSession ? sessionIdRef.current : null,
           resume: useSession ? resumeRef.current : false,
           // Every turn: claude maps these to --add-dir, gemini/aipro to
-          // --include-directories (codebase + skill resource folders, D52);
+          // --include-directories (codebase + skill resource folders, D52; +
+          // the knowledge artifacts root once its index was injected, D59);
           // codex is full-access, plain agents rely on the prompt mentions.
           extraDirs: [
             ...(codebasePathRef.current ? [codebasePathRef.current] : []),
             ...skillDirsRef.current,
+            ...knowledgeDirsRef.current,
           ],
         },
         channel,
@@ -1143,6 +1186,36 @@ export function ChatPanel({
           </button>
         )}
       </div>
+
+      {/* workflow-completion banner (D59): offer to save the artifacts as
+          knowledge. Dismissible; never auto-switches the canvas (the end
+          handler just routed it to the 산출물 tab — D58). */}
+      {kbProposal && onOpenKnowledgeSave && (
+        <div className="flex shrink-0 items-center gap-2 border-t border-line bg-accent-tint px-3.5 py-2 text-[12px] text-ink-muted">
+          <BookmarkPlus size={14} className="shrink-0 text-accent" />
+          <span className="min-w-0 flex-1">
+            작업이 완료되었습니다 — 산출물을 지식으로 저장해 이후 작업에서 참고할 수 있습니다.
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setKbProposal(false);
+              onOpenKnowledgeSave({ agentId, model: model === "default" ? null : model });
+            }}
+            className="shrink-0 rounded-md border border-accent px-2 py-1 font-medium text-accent transition-colors hover:bg-accent hover:text-white"
+          >
+            지식으로 저장
+          </button>
+          <button
+            type="button"
+            onClick={() => setKbProposal(false)}
+            aria-label="닫기"
+            className="grid shrink-0 place-items-center rounded p-0.5 transition-opacity hover:opacity-70"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
 
       {/* composer */}
       <div className="shrink-0 border-t border-line px-3.5 py-3">

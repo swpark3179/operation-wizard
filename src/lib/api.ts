@@ -89,7 +89,23 @@ export function saveKnowledge(entry: KnowledgeEntry): Promise<KnowledgeEntry> {
   return invoke<KnowledgeEntry>("save_knowledge", { entry });
 }
 
-/** Delete one knowledge entry (idempotent). */
+/** Copy workflow output files into the entry's artifact folder and upsert the
+ * entry as kind "artifact" (D59). `sources` are absolute file paths; the
+ * returned entry's `files` holds the copied names. */
+export function saveKnowledgeFiles(
+  entry: KnowledgeEntry,
+  sources: string[],
+): Promise<KnowledgeEntry> {
+  return invoke<KnowledgeEntry>("save_knowledge_files", { entry, sources });
+}
+
+/** Absolute knowledge root path (join `artifacts/<id>/<name>` for the
+ * injection index and the extraDirs grant — D59). */
+export function getKnowledgeRoot(): Promise<string> {
+  return invoke<string>("get_knowledge_root");
+}
+
+/** Delete one knowledge entry (idempotent; artifact files go with it). */
 export function deleteKnowledge(id: string): Promise<void> {
   return invoke("delete_knowledge", { id });
 }

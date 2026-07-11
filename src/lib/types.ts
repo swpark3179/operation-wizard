@@ -160,11 +160,21 @@ export type IngestEvent =
   | { type: "end"; status: string; ingested: number; failed: number };
 
 /** One knowledge entry (title + how-it-was-done body), injected into the
- * foundation phase's knowledge step. */
+ * foundation phase's knowledge step. Artifact entries (D59) additionally own
+ * copied workflow output files under `knowledge/artifacts/<id>/`; `body` is
+ * their injected summary and `files` the copied names. */
 export interface KnowledgeEntry {
   id: string;
   title: string;
   body: string;
+  /** "note" (직접 작성) | "artifact" (워크플로우 산출물 저장). Absent = note. */
+  kind?: string;
+  /** Artifact entries: copied file names inside `artifacts/<id>/`. */
+  files?: string[];
+  /** Provenance of an artifact entry (origin project) — display only. */
+  sourceProjectId?: string | null;
+  sourceCategory?: string | null;
+  sourceTitle?: string | null;
   createdAt: number;
   updatedAt: number;
 }

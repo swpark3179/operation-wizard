@@ -48,19 +48,57 @@ export function formatRagContext(hits: RagHit[], capBytes = CONTEXT_CAP): string
   return parts.join("");
 }
 
-/** Format knowledge entries (newest-first as given) as prompt context. */
-export function formatKnowledgeContext(entries: KnowledgeEntry[], capBytes = CONTEXT_CAP): string {
+/** One entry's injected block. Artifact entries (D59) get a provenance line
+ * and an absolute-path index of their copied documents — the summary (`body`)
+ * is inlined but full documents never are; the agent reads them on demand via
+ * the extraDirs grant. `artifactsRoot` = `<knowledge root>\artifacts` (null →
+ * summaries only, no index). */
+function knowledgeBlock(entry: KnowledgeEntry, artifactsRoot: string | null): string {
+  const head = `\n\n## ${entry.title.trim()}`;
+  const body = clip(entry.body.trim(), 4000);
+  if (entry.kind !== "artifact" || !entry.files?.length) {
+    return `${head}\n${body}`;
+  }
+  const origin = [entry.sourceCategory?.trim(), entry.sourceTitle?.trim()]
+    .filter(Boolean)
+    .join(" · ");
+  const provenance = `[과거 작업 산출물${origin ? ` · ${origin}` : ""}]`;
+  const index = artifactsRoot
+    ? `\n첨부 문서(전문, 절대경로):\n${entry.files
+        .map((name) => `- ${artifactsRoot}\\${entry.id}\\${name}`)
+        .join("\n")}`
+    : "";
+  return `${head}\n${provenance}\n${body}${index}`;
+}
+
+/** Format knowledge entries (newest-first as given) as prompt context.
+ * `artifactsRoot` is the absolute `knowledge\artifacts` folder used for the
+ * per-entry document index (D59). */
+export function formatKnowledgeContext(
+  entries: KnowledgeEntry[],
+  artifactsRoot: string | null,
+  capBytes = CONTEXT_CAP,
+): string {
   const parts: string[] = ["다음은 등록된 사내 지식입니다:"];
   let used = parts[0].length;
   let dropped = 0;
+  let hasArtifactIndex = false;
   for (const entry of entries) {
-    const block = `\n\n## ${entry.title.trim()}\n${clip(entry.body.trim(), 4000)}`;
+    const block = knowledgeBlock(entry, artifactsRoot);
     if (used + block.length > capBytes) {
       dropped += 1;
       continue;
     }
     parts.push(block);
     used += block.length;
+    if (artifactsRoot && entry.kind === "artifact" && entry.files?.length) {
+      hasArtifactIndex = true;
+    }
+  }
+  if (hasArtifactIndex) {
+    parts.push(
+      "\n\n위 첨부 문서는 파일 읽기 도구로 직접 열람할 수 있습니다. 요약만으로 부족하면 절대경로로 원문을 읽으세요.",
+    );
   }
   if (dropped > 0) parts.push(`\n\n(지식 ${dropped}건은 길이 제한으로 생략)`);
   return parts.join("");
