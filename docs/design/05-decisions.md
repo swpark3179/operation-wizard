@@ -966,3 +966,49 @@
   실행·승인 연동은 범위 밖(신청양식 산출까지). 붙여넣기 서식 보존은 인라인 스타일 사용에 의존(에이전트가
   `<style>`을 쓰면 body-복사 시 유실 — 스킬이 인라인을 강제하나 완전 보장은 아님). 종류가 늘면 스킬
   템플릿을 확장.
+
+---
+
+### D63. 운영 가이드(guide) 카테고리 다단계 기본 플로우 + RAG/Confluence 시각화 + 부분 foundation
+- **배경**: `guide`(운영 가이드 생성)는 단일 `chat` 단계뿐이라(가이드 플로우·RAG·산출물 없음) 사내 문서
+  활용도가 없었다. 사용자 요구 — 이 카테고리의 **강점으로 RAG/Confluence 정보를 시각적으로 보기 좋게**
+  제공하고, **사용자가 어떤 절차로 업무를 수행하면 되는지 단계별 가이드**를 산출한다.
+- **핵심 판단**: `query`(D61)/`change`(D62)가 그대로 템플릿이라 **새 컴포넌트/StepKind/백엔드/의존성이
+  없다** — 콘텐츠 카탈로그(options/skills/workflow) 정비 + foundation 부분화 소폭 완화뿐. RAG 시각화는
+  **기존 rag 단계 preflight → '검색 결과' 캔버스 탭**(sandbox iframe 카드 UI, D46)이 이미 제공하므로,
+  guide에 rag 단계를 넣으면 자동으로 얻는다. 프로세스 가이드는 개정된 `guide-author` 스킬이 담당.
+- **결정(분석 범위 — 코드베이스 제외)**: 사용자 확정으로 guide는 **Confluence·지식 중심**이다 — 기반
+  3단계 중 `codebase`를 빼고 **`rag`+`knowledge`만** 사용한다. 이를 위해 foundation의 all-or-nothing
+  불변식(D44)을 **부분 foundation**으로 완화한다:
+  - `CATEGORY_FOUNDATION: Record<Category, readonly string[]>`(`workflow.ts`) — plan/query/change=완전
+    트리오, **guide=`["rag","knowledge"]`**. `mandatoryFoundation(category, settings)`가 foundation이
+    on일 때 이 종류들을 반환.
+  - `coerceSteps(steps, {foundationKinds?})` — 지정 종류를 **canonical 순서로 pin**(누락은 defaults에서
+    보충). 미지정이면 **present한 foundation 종류만** canonical **부분수열**로 pin(강제 채움 없음).
+    기존 `foundation:boolean`은 ≡완전 트리오로 하위호환.
+  - `optionsFor`(`options.ts`) — 필수 코드베이스 폴더 질문(D45)을 `foundationEnabled` 대신 **resolved
+    워크플로우에 `codebase` 단계가 있을 때만** 프리펜드. guide는 codebase가 없어 **폴더 선택 강제 없음**.
+  - `stepsError`(`FlowSettingsView`) canonical 검사를 **부분수열 허용**으로 완화(FOUNDATION_KINDS 인덱스가
+    strictly increasing이면 통과 — `[rag,knowledge]` 허용, `[rag,codebase]` 거부). `toggleFoundation`은
+    **카테고리 default의 foundation 단계**를 프리펜드(guide=rag+knowledge 맞춤 지시문), 토글 라벨도
+    `CATEGORY_FOUNDATION`으로 동적화.
+- **결정(산출물 — HTML)**: `guide-doc`(document) 단계가 `docs/operation-guide.md`를 저술하고
+  **`output:"html"`**(D47)로 `expandOutputSteps`가 뒤에 `html-render` 합성 서브스텝을 붙여
+  `docs/operation-guide.html`을 자동 생성한다. 마크다운 원본(산출물 허브·다이어그램 갤러리·목차)과
+  보기 좋은 HTML(FileViewer 미리보기 + "본문 복사")을 모두 확보. 전용 렌더 스킬은 만들지 않는다.
+- **결정(스킬/옵션)**: `guide-author` 스킬을 개정 — RAG/지식 근거·출처 인용, 전제→단계→검증→롤백 구조,
+  프로세스 mermaid flowchart, 참고 문서(Confluence) 섹션, 지어내기 금지. guide 옵션에 `referenceDocs`
+  (참고 Confluence 공간/키워드, text) 추가(프리필 대상). rag/knowledge 단계 지시문은 guide 맞춤
+  (`GUIDE_RAG_STEP`/`GUIDE_KNOWLEDGE_STEP`/`GUIDE_DOC_STEP`).
+- **기본 `guide` 플로우** = `[사내 문서 RAG 검색(rag) → 지식 베이스 반영(knowledge) → 운영 가이드
+  작성(document, docs/operation-guide.md, output:html) → 마무리 대화(chat)]`.
+- **백엔드 무변경**: `settings.rs::validate_steps`는 foundation 순서를 검증하지 않으므로(마지막 chat만)
+  rag+knowledge-only 배열도 통과. `STEP_KINDS`/`STEP_OUTPUTS`/`CATEGORIES` 기존 값으로 충분. **신규 의존성 0.**
+- **대안 기각**: 완전 기반 3단계 포함(코드베이스 폴더 강제 — 사용자가 명시 거부, 강점이 Confluence이므로
+  마찰) / 전용 guide-HTML 저술 스킬(Q2가 md→html 자동 = html-render 재사용 선택 — 한 턴 부담↓, md 원본
+  확보) / 별도 in-memory HTML 탭 신설(기존 rag 탭·산출물 HTML로 충분).
+- **하위호환**: guide 워크플로우를 이미 저장한 사용자는 stored override 우선(전체 교체형 D39); 개편 기본값은
+  Flows "기본값으로 되돌리기"로 반영. plan/query/change 동작 불변.
+- **한계/재검토**: 세션리스(gemini/aipro)·plain(opencode/antigravity) degrade는 D34/D40과 동일. RAG 미설정·
+  0건이면 rag 단계는 안내와 함께 건너뛴다(D44) — 그때 시각화 탭은 뜨지 않는다. guide의 실제 다단계
+  운영 자동화(작업 실행 연동)는 범위 밖(가이드 문서 산출까지).
