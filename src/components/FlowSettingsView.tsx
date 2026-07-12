@@ -19,7 +19,9 @@ import { CATEGORIES, type Category } from "./workspace";
 import { pickFolder, setSkills, setWorkflow } from "../lib/api";
 import { skillList } from "../lib/skills";
 import {
+  CATEGORY_FOUNDATION,
   DEFAULT_FOUNDATION_STEPS,
+  DEFAULT_WORKFLOWS,
   FOUNDATION_KINDS,
   stepOutput,
   workflowFor,
@@ -70,9 +72,11 @@ function stepsError(steps: StepDef[]): string | null {
     .filter((i) => i >= 0);
   if (foundationIdx.length > 0) {
     const inPrefix = foundationIdx.every((idx, n) => idx === n);
-    const canonical = foundationIdx.every(
-      (idx, n) => steps[idx].kind === FOUNDATION_KINDS[n],
-    );
+    // Foundation steps need not be the full trio (guide uses rag+knowledge only,
+    // D63) — but the kinds present must follow the canonical order as a
+    // subsequence, i.e. their FOUNDATION_KINDS indices strictly increase.
+    const order = foundationIdx.map((idx) => FOUNDATION_KINDS.indexOf(steps[idx].kind));
+    const canonical = order.every((v, n) => n === 0 || v > order[n - 1]);
     if (!inPrefix || !canonical)
       return "기반 단계(코드베이스 분석 → RAG 검색 → 지식 주입)는 맨 앞에 순서대로 있어야 합니다.";
   }
@@ -309,6 +313,9 @@ function WorkflowSection({
   // opt in via the toggle below.
   const foundationOn = draft.some((s) => isFoundationKind(s.kind));
   const foundationCount = draft.filter((s) => isFoundationKind(s.kind)).length;
+  // The foundation kinds this category pins (guide omits codebase — D63);
+  // drives the toggle label so it matches what turning it on inserts.
+  const foundationLabel = CATEGORY_FOUNDATION[category].map((k) => KIND_LABEL[k]).join(" · ");
 
   const touch = () => {
     setSaved(false);
@@ -330,11 +337,17 @@ function WorkflowSection({
     touch();
   };
   const toggleFoundation = () => {
-    setDraft((d) =>
-      foundationOn
-        ? d.filter((s) => !isFoundationKind(s.kind))
-        : [...cloneSteps(DEFAULT_FOUNDATION_STEPS), ...d],
-    );
+    setDraft((d) => {
+      if (foundationOn) return d.filter((s) => !isFoundationKind(s.kind));
+      // Seed with the category's own foundation steps so guide gets rag+knowledge
+      // (its tuned instructions) rather than the full trio (D63); fall back to the
+      // generic defaults filtered by CATEGORY_FOUNDATION.
+      const fromDefault = (DEFAULT_WORKFLOWS[category] ?? []).filter((s) => isFoundationKind(s.kind));
+      const seed = fromDefault.length
+        ? fromDefault
+        : DEFAULT_FOUNDATION_STEPS.filter((s) => CATEGORY_FOUNDATION[category].includes(s.kind));
+      return [...cloneSteps(seed), ...d];
+    });
     touch();
   };
   const remove = (i: number) => {
@@ -427,7 +440,7 @@ function WorkflowSection({
             disabled={saving}
             className="accent-[var(--accent)]"
           />
-          기반 3단계 사용 — 코드베이스 분석 · RAG 검색 · 지식 주입을 먼저 실행
+          기반 단계 사용 — {foundationLabel}을 먼저 실행
         </label>
       )}
 

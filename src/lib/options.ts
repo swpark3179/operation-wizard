@@ -11,7 +11,7 @@
 import type { ClarifyQuestion } from "./clarify";
 import type { Category } from "../components/workspace";
 import type { Settings } from "./types";
-import { foundationEnabled } from "./workflow";
+import { workflowFor } from "./workflow";
 
 /** The mandatory codebase-folder question, prepended when the category's
  * foundation phase applies (D45). Excluded from prefill (folder type); its
@@ -71,6 +71,11 @@ export const CATEGORY_OPTIONS: Record<Category, ClarifyQuestion[]> = {
       label: "롤백/원복 절차를 포함할까요?",
       type: "single",
       options: ["포함", "미포함"],
+    },
+    {
+      id: "referenceDocs",
+      label: "참고할 사내 문서·Confluence 공간/키워드가 있다면 알려주세요. (선택)",
+      type: "text",
     },
     {
       id: "topic",
@@ -140,7 +145,10 @@ export const CATEGORY_OPTIONS: Record<Category, ClarifyQuestion[]> = {
 /** The static option catalog for a category (may be empty → no options phase). */
 export function optionsFor(category: Category, settings: Settings | null): ClarifyQuestion[] {
   const base = CATEGORY_OPTIONS[category] ?? [];
-  // The foundation phase's first stage needs the codebase folder up front, so
-  // the folder question gates the form even when the catalog is empty.
-  return foundationEnabled(category, settings) ? [CODEBASE_QUESTION, ...base] : base;
+  // The codebase-analysis step needs its target folder up front, so the folder
+  // question gates the form only when the resolved workflow actually has a
+  // `codebase` step (D63) — a Confluence/knowledge-only flow like guide has
+  // none, so it shows no folder picker.
+  const needsCodebase = workflowFor(category, settings).some((s) => s.kind === "codebase");
+  return needsCodebase ? [CODEBASE_QUESTION, ...base] : base;
 }

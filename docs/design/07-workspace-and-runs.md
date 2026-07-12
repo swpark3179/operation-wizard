@@ -320,15 +320,18 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   extraDirs에 등록되어 에이전트가 원문 전체를 직접 읽는다).
   rag/knowledge는 미설정·0건·실패 시 **에이전트 턴 없이 건너뛴다**(system 안내 + 커서 전진 + 다음
   생성형 단계로 체인; preflight 중 Stop은 취소 폴백). `plan`은 항상 활성, 그 외 카테고리는 Flows
-  토글(저장 배열에 기반 kind 존재 = 플래그). 이후 기존 설정 단계들이 오늘과 동일하게 이어진다.
+  토글(저장 배열에 기반 kind 존재 = 플래그). **기반 단계는 완전 트리오가 필수는 아니다** — 카테고리별
+  `CATEGORY_FOUNDATION`이 pin할 종류를 정하며(`guide`는 코드베이스를 뺀 **rag+knowledge**만 — D63),
+  `coerceSteps`가 그 종류들을 canonical 순서로 pin한다(codebase가 없으면 필수 폴더 질문·루트 전환도 없음).
+  이후 기존 설정 단계들이 오늘과 동일하게 이어진다.
 - **② 단계별 스킬** — `lib/skills.ts`의 `resolveSkills(settings)`(사용자 레지스트리 ?? `DEFAULT_SKILLS`).
   각 단계의 `skillIds`가 가리키는 스킬 body들을 **그 단계가 armed된 턴**의 wire 앞(스텝 지시문 위)에
   주입한다. 세션형은 같은 스킬을 대화당 1회만(dedupe, 전송 실패 시 되감기), 세션리스는 transcript로 자연
   재노출. 알 수 없는 id는 무시. CLI 자체 스킬과 무관한 앱/사용자 지시문(D40).
 - **③ 워크플로우 단계(`lib/workflow.ts`)**: `StepDef{id,name,kind,instruction,file?,skillIds,output?}` +
   `workflowFor(category, settings)`(사용자 override ?? `DEFAULT_WORKFLOWS`, `coerceSteps(steps,
-  {foundation})`로 방어 — 잘못된 항목 드롭 + **기반 3단계 pinned 프리펜드**(사용자 편집 병합·누락 보충) +
-  종단 `chat` 자동 보강). 기본 `plan` = `[코드베이스 분석(codebase, docs/codebase-analysis.md) →
+  {foundationKinds})`로 방어 — 잘못된 항목 드롭 + **기반 단계 pinned 프리펜드**(`mandatoryFoundation`이
+  준 종류를 canonical 순서로, 사용자 편집 병합·누락 보충) + 종단 `chat` 자동 보강). 기본 `plan` = `[코드베이스 분석(codebase, docs/codebase-analysis.md) →
   사내 문서 RAG 검색(rag) → 지식 베이스 반영(knowledge) → 소스코드 분석(document,
   docs/source-analysis.md) → 계획 생성(document, docs/plan.md) → 변경영향분석서 생성(document,
   docs/impact-analysis.md) → 테스트 계획서 생성(document, docs/test-plan.md) → 마무리 대화(chat)]`
@@ -340,8 +343,11 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   사내 문서 RAG 검색(rag) → 지식 베이스 반영(knowledge) → 테이블 정보·ERD 정리(document,
   docs/change-table-info.md — mermaid erDiagram) → DC Manager 신청양식 생성(document,
   docs/dc-manager-form.html — 초반 선택한 변경 종류에 맞춰 `dc-manager-form` 스킬이 폼 분기) →
-  마무리 대화(chat)]`(기반 3단계 기본 활성). guide =
-  `chat` 1개(+기존 카테고리 스킬을 그 단계에 부착; Flows 토글로 기반 3단계 opt-in). `kind`: `search`·`document`·기반 3종(생성형,
+  마무리 대화(chat)]`(기반 3단계 기본 활성). 기본 `guide`(운영 가이드 생성, D63) = `[사내 문서 RAG
+  검색(rag) → 지식 베이스 반영(knowledge) → 운영 가이드 작성(document, docs/operation-guide.md,
+  output:html) → 마무리 대화(chat)]` — **코드베이스 단계를 제외한 부분 foundation(rag+knowledge)**으로
+  Confluence/지식 시각화(rag '검색 결과' 탭 D46)를 강점으로 삼고, `output:"html"`이 보기 좋은
+  operation-guide.html을 자동 생성한다. `kind`: `search`·`document`·기반 3종(생성형,
   `isGenerative`) / `chat`(종단). **`output`("chat"/"file"/"html", D47)**: 미지정 시 kind에서 파생;
   오케스트레이터는 `runtimeWorkflowFor` = `expandOutputSteps(workflowFor(...))`를 실행해 `"html"` 단계
   뒤에 `html-render` 스킬을 단 합성 렌더 서브스텝(`<file>.html`)을 삽입한다(편집기는 미확장 뷰만 봄).
@@ -391,8 +397,9 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   탭으로 집계 뷰는 구현됨(D58)**; 아티팩트별 전용 뷰/오케스트레이션은 후속. (요구사항 명확화·소스 조사·계획서
   생성은 `plan`, 참조 SQL·ERD·참고 SQL 산출은 `query`, 변경 종류별 DC Manager 신청양식(HTML) 생성은
   `change`에 한해 위 "카테고리 워크플로우"로 구현됨.)
-- guide 카테고리의 **기본** 다단계 플로우(기본값은 chat 1개+스킬; plan·query·change는 다단계 기본값을
-  가짐 — D40/D61/D62; 사용자는 Flows 설정에서 어느 카테고리든 단계를 추가할 수 있음 — D39).
+- plan·query·change·guide는 다단계 기본값을 가짐(D40/D61/D62/D63; guide는 코드베이스를 뺀 부분
+  foundation). 사용자는 Flows 설정에서 어느 카테고리든 단계를 추가/편집할 수 있음(D39).
+- guide의 실제 운영 작업 자동화(가이드에 따른 작업 실행 연동) — 범위 밖(가이드 문서 산출까지).
 - 실제 데이터 조회 실행·결과 표시(현재 `query`는 참고용 SQL 산출까지 — D61). 실제 변경 실행·승인 연동
   (현재 `change`는 DC Manager 신청양식 산출까지 — D62).
 - 대화는 파일(JSON)로 영구화된다(위 "세션/프로젝트 영속화"). SQLite/전문 검색/여러 프로젝트 목록

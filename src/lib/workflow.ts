@@ -37,6 +37,19 @@ const STEP_KINDS: readonly string[] = [
  * category (plan is always enabled). */
 export const FOUNDATION_KINDS: readonly string[] = ["codebase", "rag", "knowledge"];
 
+/** Which foundation kinds a category pins when its foundation phase is on, in
+ * canonical order (D63). Most categories use the full trio; `guide` is
+ * Confluence/knowledge-centric and deliberately omits `codebase` (no mandatory
+ * codebase-folder pick). `coerceSteps` pins exactly these when foundation is
+ * on; `optionsFor` prepends the folder question only when `codebase` is among
+ * the resolved steps. */
+export const CATEGORY_FOUNDATION: Record<Category, readonly string[]> = {
+  plan: FOUNDATION_KINDS,
+  query: FOUNDATION_KINDS,
+  change: FOUNDATION_KINDS,
+  guide: ["rag", "knowledge"],
+};
+
 /** Step output modes — keep in sync with `STEP_OUTPUTS` in settings.rs (D47).
  * Absent → derived from kind (document→"file", else "chat"). */
 export const STEP_OUTPUTS: readonly string[] = ["chat", "file", "html"];
@@ -211,6 +224,36 @@ const CHANGE_DC_MANAGER_STEP = `[시스템 지시: DC Manager 신청양식 생�
   본문은 앱의 "본문 복사" 버튼으로 그대로 복사되어 DC Manager 편집기에 붙습니다.
 - 파일 저장 후, 어떤 종류의 신청서를 만들었는지 한 문장으로만 보고하세요.`;
 
+// ── guide(운영 가이드 생성) 단계별 기본 지시문 ──────────────────────────────────
+// 운영 가이드 카테고리의 강점은 사내 문서(Confluence)/지식을 시각적으로 정리해 보여주고,
+// 사용자가 업무를 어떤 절차로 수행하면 되는지 재현 가능한 가이드를 제공하는 것이다(D63).
+// 코드베이스 분석 단계는 두지 않고 rag + knowledge 두 기반 단계만 사용한다.
+
+const GUIDE_RAG_STEP = `[시스템 지시: 사내 문서 RAG 검색 단계]
+아래에 첨부된 사내 문서(Confluence) 발췌는 사전 임베딩된 지식베이스에서 검색된 결과입니다.
+- 이번 운영 작업과 관련된 **표준 절차·런북·설정·주의사항·과거 사례**를 발췌에서 정리하고, 각 항목에
+  출처(제목/URL)를 인용하세요.
+- 발췌에 없는 내용을 지어내지 마세요. 부족한 부분은 "추가 확인 필요"로 명시하세요.
+- 아직 가이드 문서를 작성하지 마세요. 이번 턴은 "문서 근거 정리"만 합니다.`;
+
+const GUIDE_KNOWLEDGE_STEP = `[시스템 지시: 지식 베이스 반영 단계]
+아래에 첨부된 사내 지식 항목들은 과거 운영 작업 방식(절차·주의점·관례)의 기록입니다.
+- 이번 가이드에 적용되는 항목(예: 표준 절차, 자주 겪는 실패와 대응, 사내 관례)을 골라 무엇을 어떻게
+  반영할지 정리하세요.
+- 이후 가이드 작성 단계에서 이 지식을 절차·주의사항으로 반영하세요.
+- 적용할 항목이 없으면 없다고 보고하세요.`;
+
+const GUIDE_DOC_STEP = `[시스템 지시: 운영 가이드 작성 단계]
+지금까지의 요구사항·사내 문서(RAG)·지식을 종합해, 사용자가 그대로 따라 할 수 있는 **운영 가이드를
+파일로 작성**하세요.
+- 작업 폴더에 \`docs/operation-guide.md\` 파일을 만들어(없으면 docs 폴더도 생성) 파일 쓰기 도구로 저장하세요.
+- 스킬 지시대로 **대상 독자 수준에 맞춘 재현 가능한 절차**로 구성하세요: 개요·목적 → 전제 조건 →
+  단계별 행동(명령/화면/입력) → 각 단계의 검증 방법 → 실패 시 롤백/원복.
+- **전체 흐름을 \`\`\`mermaid\`\`\` 다이어그램(flowchart)으로** 맨 앞에 넣어 절차를 한눈에 보이게 하세요.
+- 맨 뒤에 **참고 문서 섹션**을 두고, 근거로 삼은 사내 문서(Confluence)를 제목/URL과 함께 인용하세요.
+- 발췌·지식에 없는 내용을 지어내지 마세요(불확실은 "추가 확인 필요"로 표기).
+- 파일 저장 후, 어떤 작업의 가이드를 만들었는지 한두 문장으로만 보고하세요.`;
+
 /** The mandatory foundation trio, in canonical order (D44). These are the
  * defaults merged/pinned by `coerceSteps`; the Flows editor shows them as
  * non-deletable cards whose instruction/skills/file stay editable. */
@@ -282,7 +325,32 @@ export const DEFAULT_WORKFLOWS: Record<Category, StepDef[]> = {
     { id: "chat", name: "마무리 대화", kind: "chat", instruction: "", skillIds: [] },
   ],
   guide: [
-    { id: "guide", name: "대화", kind: "chat", instruction: "", skillIds: ["guide-author"] },
+    {
+      id: "rag-search",
+      name: "사내 문서 RAG 검색",
+      kind: "rag",
+      instruction: GUIDE_RAG_STEP,
+      skillIds: [],
+    },
+    {
+      id: "knowledge",
+      name: "지식 베이스 반영",
+      kind: "knowledge",
+      instruction: GUIDE_KNOWLEDGE_STEP,
+      skillIds: [],
+    },
+    {
+      // document + output:"html" → expandOutputSteps가 뒤에 html-render 서브스텝을
+      // 붙여 docs/operation-guide.html을 자동 생성한다(D47/D63).
+      id: "guide-doc",
+      name: "운영 가이드 작성",
+      kind: "document",
+      instruction: GUIDE_DOC_STEP,
+      file: "docs/operation-guide.md",
+      output: "html",
+      skillIds: ["guide-author"],
+    },
+    { id: "chat", name: "마무리 대화", kind: "chat", instruction: "", skillIds: ["guide-author"] },
   ],
   query: [
     {
@@ -377,11 +445,22 @@ export const DEFAULT_WORKFLOWS: Record<Category, StepDef[]> = {
 };
 
 /** Coerce stored steps into a shape the orchestrator can trust: drop entries
- * with a missing id or unknown kind, pin the foundation trio at the front (in
- * canonical order, merging user edits over defaults and filling missing ones)
- * when the foundation phase applies, and guarantee a terminal `chat` step (the
- * runtime never trusts persisted data, even though saves are validated). */
-export function coerceSteps(steps: StepDef[], opts?: { foundation?: boolean }): StepDef[] {
+ * with a missing id or unknown kind, pin the applicable foundation steps at the
+ * front (in canonical order, merging user edits over defaults), and guarantee a
+ * terminal `chat` step (the runtime never trusts persisted data, even though
+ * saves are validated).
+ *
+ * Foundation selection (D44/D63):
+ * - `foundationKinds` given → pin exactly those kinds (fill missing from the
+ *   defaults). This is how a category forces its trio/subset (e.g. plan/query/
+ *   change → full trio; guide → rag+knowledge).
+ * - otherwise → pin whichever foundation kinds are *present*, as a canonical
+ *   subsequence (no forced fill). Used for hand-edited/legacy drafts.
+ * The legacy `foundation: true` boolean is still honored (≡ full trio). */
+export function coerceSteps(
+  steps: StepDef[],
+  opts?: { foundation?: boolean; foundationKinds?: readonly string[] },
+): StepDef[] {
   const valid = (steps ?? []).filter(
     (s) =>
       !!s &&
@@ -390,22 +469,18 @@ export function coerceSteps(steps: StepDef[], opts?: { foundation?: boolean }): 
       STEP_KINDS.includes(s.kind) &&
       Array.isArray(s.skillIds),
   );
-  // The foundation phase is mandatory when asked for (plan) or when the stored
-  // workflow already carries any foundation step (opt-in categories) —
-  // all-or-nothing: missing members are filled from the defaults.
   const stored = valid.filter((s) => FOUNDATION_KINDS.includes(s.kind));
   const rest = valid.filter((s) => !FOUNDATION_KINDS.includes(s.kind));
-  const out =
-    opts?.foundation || stored.length > 0
-      ? [
-          ...FOUNDATION_KINDS.map(
-            (kind) =>
-              stored.find((s) => s.kind === kind) ??
-              DEFAULT_FOUNDATION_STEPS.find((d) => d.kind === kind)!,
-          ),
-          ...rest,
-        ]
-      : rest;
+  // Which foundation kinds to pin, always in canonical (FOUNDATION_KINDS) order.
+  const forced = opts?.foundationKinds ?? (opts?.foundation ? FOUNDATION_KINDS : undefined);
+  const kinds = forced
+    ? FOUNDATION_KINDS.filter((k) => forced.includes(k))
+    : FOUNDATION_KINDS.filter((k) => stored.some((s) => s.kind === k));
+  const pinned = kinds.map(
+    (kind) =>
+      stored.find((s) => s.kind === kind) ?? DEFAULT_FOUNDATION_STEPS.find((d) => d.kind === kind)!,
+  );
+  const out = [...pinned, ...rest];
   if (out.length === 0 || out[out.length - 1].kind !== "chat") {
     out.push({ id: "chat-terminal", name: "대화", kind: "chat", instruction: "", skillIds: [] });
   }
@@ -413,15 +488,25 @@ export function coerceSteps(steps: StepDef[], opts?: { foundation?: boolean }): 
 }
 
 /** Whether the foundation pre-phase applies to a category: always for `plan`;
- * for the rest, when the stored workflow carries a foundation step (the Flows
- * toggle inserts/removes the trio — presence IS the flag, D44). */
+ * for the rest, when the effective workflow carries a foundation step (the Flows
+ * toggle inserts/removes the foundation steps — presence IS the flag, D44). */
 export function foundationEnabled(category: Category, settings: Settings | null): boolean {
   if (category === "plan") return true;
   // Fall back to the built-in default so categories whose DEFAULT_WORKFLOWS
-  // ship the foundation trio (e.g. query, D61) enable it out of the box; a
-  // user-saved override (incl. the Flows toggle turning it off) still wins.
+  // ship foundation steps (e.g. query D61, guide D63) enable it out of the box;
+  // a user-saved override (incl. the Flows toggle turning it off) still wins.
   const steps = settings?.workflows?.[category] ?? DEFAULT_WORKFLOWS[category];
   return !!steps?.some((s) => FOUNDATION_KINDS.includes(s?.kind));
+}
+
+/** The foundation kinds a category pins when its foundation phase is on (D63):
+ * `CATEGORY_FOUNDATION[category]` when enabled, else `undefined` (no forced
+ * foundation → `coerceSteps` keeps only whatever is present). */
+export function mandatoryFoundation(
+  category: Category,
+  settings: Settings | null,
+): readonly string[] | undefined {
+  return foundationEnabled(category, settings) ? CATEGORY_FOUNDATION[category] : undefined;
 }
 
 /** Derive a step's effective output mode (D47). */
@@ -476,7 +561,7 @@ export function expandOutputSteps(steps: StepDef[]): StepDef[] {
  * additionally applies {@link expandOutputSteps} for the runtime sequence. */
 export function workflowFor(category: Category, settings: Settings | null): StepDef[] {
   const raw = settings?.workflows?.[category] ?? DEFAULT_WORKFLOWS[category] ?? DEFAULT_WORKFLOWS.plan;
-  return coerceSteps(raw, { foundation: foundationEnabled(category, settings) });
+  return coerceSteps(raw, { foundationKinds: mandatoryFoundation(category, settings) });
 }
 
 /** The runtime step sequence the ChatPanel orchestrator executes. */
