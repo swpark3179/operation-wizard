@@ -32,4 +32,5 @@
 ## 관련 문서
 
 - 루트 [`README.md`](../../README.md) — 빌드/실행/테스트 등 개발자용 실행 가이드
+- [`RAG + Confluence 연동 가이드`](../rag-confluence-guide.md) — RAG 어댑터 채우기·Confluence 수집 설정·사용법 (how-to)
 - 원본 참조: Open Design 저장소 `docs/cli-agent-detection-and-daemon.ko.md`

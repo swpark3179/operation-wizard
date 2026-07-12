@@ -37,6 +37,10 @@ open-design repo, and `docs/design/` here.
 
 > 프로젝트 전반을 처음부터 이해하려면 [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md)를 참고하세요
 > (개념·구조·동작·확장을 한 문서에 정리). 개념 수준의 단일 출처는 [`docs/design/`](docs/design/README.md)입니다.
+>
+> To enable and use the RAG search + Confluence ingestion features, see
+> [`docs/rag-confluence-guide.md`](docs/rag-confluence-guide.md) (fill in the RAG adapter,
+> configure Confluence crawling, and troubleshooting — in Korean).
 
 ## Prerequisites
 
