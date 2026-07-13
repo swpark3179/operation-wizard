@@ -6,12 +6,14 @@ export interface ModelOption {
   label: string;
 }
 
-export type AgentSource = "custom-path" | "path" | "not-found";
+export type AgentSource = "custom-path" | "path" | "not-found" | "remote";
 export type ModelsSource = "live" | "fallback";
 export type Diagnostic =
   | "not-on-path"
   | "not-executable"
   | "missing-target"
+  | "not-configured"
+  | "unreachable"
   | null;
 
 export interface DetectedAgent {
@@ -94,6 +96,20 @@ export interface RagConfig {
   topK?: number | null;
 }
 
+/** Connection config for the Fabrix remote HTTP agent (mirrors settings.rs,
+ * D64). The token is stored plain text in settings.json — same caveat as
+ * `RagConfig`/`ConfluenceConfig`. */
+export interface FabrixConfig {
+  /** Base endpoint, e.g. "https://fabrix.example.com" (paths are appended). */
+  endpointUrl: string;
+  /** `x-fabrix-client` request header value. */
+  client?: string | null;
+  /** `x-openapi-token` request header value. */
+  openapiToken?: string | null;
+  /** Opt-in for corporate TLS-inspection proxies whose CA is not installed. */
+  allowInvalidCerts: boolean;
+}
+
 export interface Settings {
   /** Per-agent config, keyed by agent id. */
   agents: Record<string, AgentConfig>;
@@ -105,6 +121,8 @@ export interface Settings {
   confluence?: ConfluenceConfig | null;
   /** RAG service endpoint; absent/null → the rag workflow step skips. */
   rag?: RagConfig | null;
+  /** Fabrix remote HTTP agent connection; absent/null → not configured (D64). */
+  fabrix?: FabrixConfig | null;
 }
 
 // ── Agent runs (mirrors src-tauri/src/run.rs) ────────────────────────────────
@@ -243,4 +261,9 @@ export const DIAGNOSTIC_HINT: Record<string, string> = {
     "Not found on PATH or known toolchain dirs. Set a custom path below.",
   "not-executable": "The resolved file is not executable.",
   "missing-target": "The shim points to a missing target (e.g. a removed runtime).",
+  // Remote (HTTP) agent diagnostics — Fabrix (D64).
+  "not-configured":
+    "Fabrix 연결 정보가 없습니다. 아래에서 ENDPOINT_URL·클라이언트·토큰을 저장하세요.",
+  unreachable:
+    "Fabrix 엔드포인트에 연결하지 못했습니다. URL·자격증명·네트워크를 확인하세요.",
 };

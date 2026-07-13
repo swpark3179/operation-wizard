@@ -30,11 +30,12 @@
 ┌─────────┼────────────────────────────────────┐
 │ Rust 백엔드 (src-tauri/src)                   │
 │   lib.rs  ── 커맨드 등록/디스패치 + RunRegistry│
-│   ├─ agents.rs   에이전트 정의(def) + 레지스트리 + RunSpec│
+│   ├─ agents.rs   에이전트 정의(def, kind) + 레지스트리 + RunSpec│
 │   ├─ resolve.rs  실행파일 경로 해석           │
 │   ├─ exec.rs     command_for(shim) + 프로브    │
 │   ├─ detect.rs   탐지 파이프라인 → DetectedAgent│
 │   ├─ run.rs      실행 엔진 → RunEvent(Channel) │
+│   ├─ fabrix.rs   원격 HTTP API(Fabrix): detect/run(SSE)/probe│
 │   ├─ files.rs    list_dir / read_file          │
 │   ├─ projects.rs 세션/프로젝트 영속화(fs)      │
 │   ├─ settings.rs settings.json 영구화          │
@@ -42,9 +43,9 @@
 │   ├─ rag.rs      사용자 RAG API 어댑터(스텁)   │
 │   └─ confluence.rs 크롤+수집 → IngestEvent(Channel)│
 └───────────────────────────────────────────────┘
-          │ 프로세스 실행/실행 (cmd.exe /d /s /c 등)
+          │ 로컬: 프로세스 실행(cmd.exe /d /s /c)  ·  fabrix: HTTPS(GET/POST+SSE)
           ▼
-   로컬 CLI 에이전트들 (opencode / claude / codex / gemini / agy / aipro ...)
+   로컬 CLI 에이전트들 (opencode / claude / codex / gemini / agy / aipro ...) + 원격 API (fabrix)
 ```
 
 ## 백엔드 모듈 책임 (src-tauri/src)
@@ -52,14 +53,15 @@
 | 모듈 | 책임 |
 |------|------|
 | `lib.rs` | Tauri 커맨드 정의·등록(`invoke_handler`), `AgentInfo`, 플러그인 초기화, `RunRegistry` managed state, 앱 실행 진입 + **부트 진단**(panic hook, `~/.operation-wizard/startup-error.log`, 부팅 실패 시 한글 안내 다이얼로그 — D56) |
-| `agents.rs` | 에이전트 정의(`AgentDef`)와 정적 레지스트리(`AGENT_DEFS`), `find`/`all`, 실행 스펙(`RunSpec`/`StreamFormat`/`RunCtx`) |
+| `agents.rs` | 에이전트 정의(`AgentDef`, `kind: AgentKind {Local, Remote}` — D64)와 정적 레지스트리(`AGENT_DEFS` 7종), `find`/`all`, 실행 스펙(`RunSpec`/`StreamFormat`/`RunCtx`) |
 | `resolve.rs` | 에이전트 def 기반으로 실행 파일의 실제 경로를 찾음 (우선순위 기반) |
 | `exec.rs` | `.cmd`/`.bat` shim 래핑 + `CREATE_NO_WINDOW` 커맨드 빌더(`command_for`) + 타임아웃 프로브(`run_capture`) |
 | `detect.rs` | def 기반 resolve→version→models 파이프라인, `DetectedAgent` 조립, 모델 파서, 진단 분류 |
-| `run.rs` | 에이전트 실행 엔진: 자식 spawn + stdout 스트림 파싱 → `RunEvent`를 Tauri `Channel`로. `RunRegistry`(취소). ([07](07-workspace-and-runs.md)) |
+| `run.rs` | 에이전트 실행 엔진: 자식 spawn + stdout 스트림 파싱 → `RunEvent`를 Tauri `Channel`로. `RunRegistry`(취소; `RunHandle.child`는 `Option` — 원격 런은 자식 없이 취소 플래그만, `next_id`/`register_remote`/`unregister` 헬퍼 — D64). `run_agent`는 `kind==Remote`면 `fabrix::run_fabrix`로 위임. ([07](07-workspace-and-runs.md)) |
+| `fabrix.rs` | **원격 HTTP API 에이전트(Fabrix, D64)**: `detect_fabrix`(GET all-models → ko-name 매핑 + 도달성 판정), `run_fabrix`(POST messages + SSE 스트리밍 워커 → `RunEvent`), `probe_fabrix`(연결 테스트 커맨드), 순수 파서 `parse_models_json`/`parse_fabrix_sse_data`. `reqwest` blocking+native-tls 재사용(rag/confluence 레시피), 신규 crate 0 |
 | `files.rs` | 캔버스 파일 뷰어용 read-only 커맨드(`list_dir`/`read_file`) |
 | `projects.rs` | 대화 영속화: `~/.operation-wizard/projects/<projectId>/{workspace,sessions/<sessionId>}`. **projectId=프론트 mint**(workdir와 분리), `ensure_project`(workdir resolve)/`save_session`/`list_sessions`/`load_session` + 매니페스트 갱신(`set_project_codebase`/`set_project_title` — D45/D60). 모두 projectId-keyed. ([07](07-workspace-and-runs.md)) |
-| `settings.rs` | 앱 설정(`settings.json`) 로드/저장: 에이전트별 경로 맵 + **스킬 레지스트리(`SkillDef`, `dir?` 리소스 폴더 포함)·카테고리별 워크플로우(`StepDef`, `output?` 포함) override**(D39/D45/D47) + **`ConfluenceConfig`/`RagConfig`**(D48; `RagConfig`는 endpoint+secretKey+passKey 헤더 값 — D50. PAT/키는 평문 저장 — 읽기 전용 키 권장) + 저장 시 검증(`validate_skills`/`validate_steps` — `STEP_KINDS` 6종·`STEP_OUTPUTS`). `CATEGORIES` 상수는 프론트 `workspace.ts`와 동기화 |
+| `settings.rs` | 앱 설정(`settings.json`) 로드/저장: 에이전트별 경로 맵 + **스킬 레지스트리(`SkillDef`, `dir?` 리소스 폴더 포함)·카테고리별 워크플로우(`StepDef`, `output?` 포함) override**(D39/D45/D47) + **`ConfluenceConfig`/`RagConfig`**(D48; `RagConfig`는 endpoint+secretKey+passKey 헤더 값 — D50. PAT/키는 평문 저장 — 읽기 전용 키 권장) + **`FabrixConfig`**(endpointUrl+client+openapiToken+allowInvalidCerts — fabrix 원격 에이전트 연결, `set_fabrix` — D64) + 저장 시 검증(`validate_skills`/`validate_steps` — `STEP_KINDS` 6종·`STEP_OUTPUTS`). `CATEGORIES` 상수는 프론트 `workspace.ts`와 동기화 |
 | `knowledge.rs` | 지식 베이스 CRUD: `~/.operation-wizard/knowledge/<id>.json`(항목당 1파일, upsert 타임스탬프 스탬프). knowledge 기반 단계 주입용 (D48). **산출물 지식(D59)**: `kind`/`files`/출처 필드 + `save_knowledge_files`(산출물 파일을 `knowledge/artifacts/<id>/`로 staged-swap 복사) + `get_knowledge_root`(주입 인덱스·extraDirs용 절대경로); 삭제 시 폴더 동반 제거 |
 | `rag.rs` | **사용자가 채우는 RAG API 어댑터**: `RagClient::{ingest_page, search}` TODO(user) 스텁(미구현 시 한글 안내 Err) + `rag_search` 커맨드(spawn_blocking). 요약·임베딩은 사용자 RAG 서비스 담당 (D48) |
 | `confluence.rs` | Confluence Server/DC REST 크롤(반복 BFS, visited dedupe, 상한) + 페이지 원문을 `rag.rs`로 전달. `IngestEvent`를 `Channel`로 스트리밍, `IngestRegistry`(취소 플래그) managed state (D48) |
@@ -71,10 +73,10 @@
 |------|------|------|
 | 진입/상태 | `App.tsx` | 뷰 전환(`home`/`agents`/`flows`/`knowledge`), 에이전트/탐지/설정 상태, 초기 로드(실패 시 **재시도 가능한 배너** — D56) |
 | 안정성 | `components/ErrorBoundary` | 렌더 오류 격리: root(main.tsx) + 뷰 단위 keyed 바운더리 — 백지 화면 대신 폴백/복구 UI (D56) |
-| IPC 래퍼 | `lib/api.ts` | `invoke()`·`Channel` 래퍼 (`listAgents`/`detectAgent`/`runAgent`/`cancelRun`/`listDir`/`readFile`/`pickFolder` + `ensureProject`/`setProjectCodebase`/`setProjectTitle`/`saveSession`/`listSessions`/`loadSession`/`listProjects` + `ragSearch`/`listKnowledge`/`saveKnowledge`/`deleteKnowledge`/`setRagConfig`/`setConfluenceConfig`/`startConfluenceIngest`/`cancelIngest`/`probeConfluence`) |
-| 타입 | `lib/types.ts` | 백엔드 serde 구조체의 TS 미러(`AgentInfo`/`RunEvent`/`RunArgs`/`FileEntry` + `ProjectMeta`/`ProjectSummary`/`SessionMeta`/`StoredSession` + `RagHit`/`IngestEvent`/`KnowledgeEntry`/`ConfluenceConfig`/`RagConfig`) + 진단 힌트 맵 |
+| IPC 래퍼 | `lib/api.ts` | `invoke()`·`Channel` 래퍼 (`listAgents`/`detectAgent`/`runAgent`/`cancelRun`/`listDir`/`readFile`/`pickFolder` + `ensureProject`/`setProjectCodebase`/`setProjectTitle`/`saveSession`/`listSessions`/`loadSession`/`listProjects` + `ragSearch`/`listKnowledge`/`saveKnowledge`/`deleteKnowledge`/`setRagConfig`/`setConfluenceConfig`/`startConfluenceIngest`/`cancelIngest`/`probeConfluence` + `setFabrixConfig`/`probeFabrix` — D64) |
+| 타입 | `lib/types.ts` | 백엔드 serde 구조체의 TS 미러(`AgentInfo`/`RunEvent`/`RunArgs`/`FileEntry` + `ProjectMeta`/`ProjectSummary`/`SessionMeta`/`StoredSession` + `RagHit`/`IngestEvent`/`KnowledgeEntry`/`ConfluenceConfig`/`RagConfig`/`FabrixConfig`) + 진단 힌트 맵(`not-configured`/`unreachable` 포함) |
 | 셸 | `components/AppShell, TopBar, NavRail` | 상단바(로고·제목, 폴더 표시 없음) + 좌측 내비레일(Home/Agents/Flows/지식) + 본문 |
-| 화면 | `components/AgentsView` | 에이전트 관리 뷰(카드당 탐지 표시 + 경로 설정 통합; 별도 Settings 뷰 폐지 — [05](05-decisions.md) D38) |
+| 화면 | `components/AgentsView` (+ `AgentCard`/`FabrixCard`) | 에이전트 관리 뷰(카드당 탐지 표시 + 경로 설정 통합; 별도 Settings 뷰 폐지 — [05](05-decisions.md) D38). **`id=="fabrix"`면 `FabrixCard`**(탐지·모델 + endpoint/client/token 3필드 + 연결 테스트, `RagSection` 폼 패턴 재사용 — D64), 그 외는 `AgentCard` |
 | 화면 | `components/FlowSettingsView` | **Flows 설정 뷰**: 카테고리별 단계 편집기(추가/삭제/순서/kind/지시문/산출물 파일/**결과 형태(output)**/스킬 연결; **기반 3단계는 pinned + 비-plan 카테고리 토글** — D44/D47) + 스킬 라이브러리(추가/수정/삭제/사용처 힌트/**리소스 폴더(dir)** — D45) + 기본값 복원 ([05](05-decisions.md) D39/D40) |
 | 화면 | `components/KnowledgeView` (+ `lib/ingest.ts`) | **지식 뷰**(D48): RAG 검색 설정(endpoint/secretKey/passKey/topK + 연결 테스트 — D50) + Confluence 수집(설정·수집 시작/중지·진행 표시) + 지식 베이스 CRUD. 수집 진행 상태는 **`lib/ingest.ts` 모듈 싱글턴 스토어**가 Channel과 함께 소유해 뷰 전환을 생존하고(`useIngestState` 구독; NavRail '지식' pulse 점 포함 — D51) |
 | 워크스페이스 | `components/HomeArea, HomeView, WorkspaceView, ChatPanel, AssistantMessage, WorkflowStepper, CanvasPanel, ArtifactsPanel, DiagramGallery, KnowledgeSavePanel, FileViewer, Markdown, RequirementsForm` (+ `lib/options.ts`, `lib/skills.ts`, `lib/workflow.ts`, `lib/clarify.ts`, `lib/clipboard.ts`, `lib/artifacts.ts`, `lib/knowledgeSave.ts`, `lib/useArtifactExistence.ts`) | HOME 런처(최근 프로젝트, 새 채팅=새 프로젝트; **미탐지 에이전트 온보딩 배너** — D57) + 좌 대화(새 세션·기록, **폼 대기 중 컴포저 차단** — D41; **채팅↔캔버스 폭은 경계 드래그로 조절** — D49; **진행 스테퍼·채팅 마크다운 렌더+복사·같은 세션 재시도·이탈 확인·하단 고정 스크롤** — D57)/우 캔버스(**파일 목록 탭 + 파일별 뷰어 탭(닫기 가능)** — D49; 요구사항 탭은 **폼 대기 중에만 표시**; **산출물 허브 + 다이어그램 갤러리 탭, 워크플로우 산출 파일은 허브로 라우팅** — D58; **워크플로우 완료 배너 + '지식 저장' 탭**(산출물 선택+요약 생성→지식 베이스 저장) — D59), 실행 스트리밍·파일 뷰어(**md+mermaid 미리보기** — D42, **목차 드롭다운** — D58, **html 본문 복사 버튼** `copyHtml` — D62)·세션 영속화·**카테고리 가이드 플로우**(고정 선택지 우선+프리필 자동채움·단계별 스킬 주입·소스 조사·문서 생성) ([07](07-workspace-and-runs.md), [08](08-guided-flows-and-skills.md)) |
@@ -91,13 +93,13 @@
 | 커맨드 | 입력 | 출력 | 비고 |
 |--------|------|------|------|
 | `list_agents` | — | `AgentInfo[]` | 레지스트리 메타(`id`/`name`/`envVar`). 프론트가 카드/설정 행을 이 순서로 렌더 |
-| `detect_agent` | `agentId: string` | `DetectedAgent` | `async` + `spawn_blocking`. 알 수 없는 id는 에러. 느린 `models` 프로브가 UI 스레드를 막지 않도록 블로킹 스레드에서 실행 |
+| `detect_agent` | `agentId: string` | `DetectedAgent` | `async` + `spawn_blocking`. 알 수 없는 id는 에러. 느린 `models` 프로브가 UI 스레드를 막지 않도록 블로킹 스레드에서 실행. **`kind==Remote`(fabrix)면 `fabrix::detect_fabrix`로 분기**(HTTP 모델 조회 — D64) |
 | `get_settings` | — | `Settings` | config 디렉터리에서 로드(에이전트별 경로 맵 + `workdir`) |
 | `set_agent_bin` | `agentId: string`, `path: string \| null` | `Settings` | id 검증 후 저장. 빈 문자열/`null`이면 해당 에이전트 경로 해제 |
 | `set_skills` | `skills: SkillDef[] \| null` | `Settings` | 스킬 레지스트리 전체 교체(검증: id 유일·이름 필수). `null` = 기본값 복원(필드 삭제) |
 | `set_workflow` | `category: string`, `steps: StepDef[] \| null` | `Settings` | 카테고리 검증(`CATEGORIES`) + 단계 검증(≥1개·id 유일·kind 유효·마지막 `chat`). `null` = 기본값 복원(키 삭제) |
-| `run_agent` | `args: RunArgs`, `onEvent: Channel<RunEvent>` | `runId: string` | 워커 스레드에서 자식 spawn 후 `RunEvent` 스트리밍. 즉시 `runId` 반환 |
-| `cancel_run` | `runId: string` | — | 해당 실행의 프로세스 트리 종료(Windows `taskkill /T /F` + `child.kill()`) |
+| `run_agent` | `args: RunArgs`, `onEvent: Channel<RunEvent>` | `runId: string` | 워커 스레드에서 자식 spawn 후 `RunEvent` 스트리밍. 즉시 `runId` 반환. **`kind==Remote`(fabrix)면 `fabrix::run_fabrix`로 위임**(POST+SSE — D64) |
+| `cancel_run` | `runId: string` | — | 해당 실행의 프로세스 트리 종료(Windows `taskkill /T /F` + `child.kill()`). 원격(fabrix) 런은 자식이 없어 취소 플래그만 set → SSE 루프가 연결 종료(D64) |
 | `list_dir` | `path: string` | `FileEntry[]` | 캔버스 파일 트리(디렉터리 우선, 노이즈 dir 스킵) |
 | `read_file` | `path: string` | `string` | 파일 내용(2 MiB 상한) |
 | `ensure_project` | `projectId: string`, `workdir: string`(빈값 허용), `title: string`, `category: string` | `Project` | 프로젝트 폴더+`project.json` 생성(idempotent). workdir 빈값→`workspace/` resolve 후 반환 |
@@ -109,6 +111,8 @@
 | `set_project_title` | `projectId: string`, `title: string` | `Project` | 프로젝트 제목 변경(홈 최근 목록 인라인 편집 — D60). 빈 제목 거부, 100자 상한 |
 | `set_confluence_config` | `config: ConfluenceConfig \| null` | `Settings` | Confluence 수집 설정 저장/해제(빈 baseUrl=해제, D48) |
 | `set_rag_config` | `config: RagConfig \| null` | `Settings` | RAG endpoint 설정 저장/해제 |
+| `set_fabrix_config` | `config: FabrixConfig \| null` | `Settings` | Fabrix 연결 설정 저장/해제(빈 endpointUrl=해제, D64) |
+| `probe_fabrix` | — | `string` | Fabrix 연결 테스트: 모델 목록 조회 후 "연결됨 (N개 모델)"(D64) |
 | `rag_search` | `query: string`, `topK?: number` | `RagHit[]` | rag 기반 단계 검색(사용자 어댑터 `rag.rs`; 미구현/미설정 시 한글 Err) |
 | `list_knowledge` / `save_knowledge` / `delete_knowledge` | — / `entry` / `id` | `KnowledgeEntry[]` / `KnowledgeEntry` / — | 지식 베이스 CRUD(삭제는 artifact 폴더 동반 제거 — D59) |
 | `save_knowledge_files` | `entry: KnowledgeEntry`, `sources: string[]` | `KnowledgeEntry` | 산출물 파일을 `knowledge/artifacts/<id>/`로 복사(staged swap) + artifact 엔트리 upsert(D59). `files`는 복사된 이름으로 서버가 채움 |

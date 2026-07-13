@@ -322,6 +322,17 @@ export function ChatPanel({
 
   const models = detected[agentId]?.models ?? [];
 
+  // Ensure a concrete model is selected when the current value isn't valid for
+  // the chosen agent. Fabrix (D64) lists real modelIds with no "default" option,
+  // so the "default" sentinel would send no modelId — snap to the first model.
+  // CLI agents include a "default" option, so this never fires for them.
+  useEffect(() => {
+    if (started) return;
+    if (models.length > 0 && !models.some((m) => m.id === model)) {
+      setModel(models[0].id);
+    }
+  }, [models, model, started]);
+
   useEffect(() => {
     if (!pinnedRef.current) return; // reading history — don't yank the view down
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });

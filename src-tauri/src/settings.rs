@@ -115,6 +115,30 @@ pub struct RagConfig {
     pub top_k: Option<u32>,
 }
 
+/// Connection config for the Fabrix remote HTTP agent (D64). Unlike the local
+/// CLI agents (a `customBin` path), Fabrix needs an endpoint + two request
+/// headers. Stored here — same root as `rag`/`confluence` — so it persists
+/// across runs. The token is plain text: same caveat as `RagConfig`/
+/// `ConfluenceConfig` (local single-user app; prefer a scoped token).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FabrixConfig {
+    /// Base endpoint, e.g. "https://fabrix.example.com". The model-list and chat
+    /// paths ("/openapi/chat/v1/...") are appended by `fabrix.rs`.
+    #[serde(default)]
+    pub endpoint_url: String,
+    /// `x-fabrix-client` request header value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    /// `x-openapi-token` request header value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openapi_token: Option<String>,
+    /// Opt-in escape hatch for corporate TLS-inspection proxies whose CA is not
+    /// in the Windows store. Default false; the UI labels it dangerous.
+    #[serde(default)]
+    pub allow_invalid_certs: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -134,6 +158,10 @@ pub struct Settings {
     /// The user's RAG service endpoint. `None` → the rag workflow step skips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rag: Option<RagConfig>,
+    /// The Fabrix remote HTTP agent connection. `None` → not configured (the
+    /// Fabrix agent reports "not-configured" until saved) — D64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabrix: Option<FabrixConfig>,
     /// Legacy v0.1 single-agent field. Folded into `agents` on load and never
     /// re-serialized (so the next `save` drops it — self-healing migration).
     #[serde(default, skip_serializing)]
@@ -182,6 +210,11 @@ impl Settings {
     /// Set (`Some`) or clear (`None`) the RAG endpoint config.
     pub fn set_rag(&mut self, config: Option<RagConfig>) {
         self.rag = config;
+    }
+
+    /// Set (`Some`) or clear (`None`) the Fabrix connection config.
+    pub fn set_fabrix(&mut self, config: Option<FabrixConfig>) {
+        self.fabrix = config;
     }
 }
 
@@ -354,6 +387,12 @@ mod tests {
             pass_key: Some("pass".into()),
             top_k: Some(5),
         }));
+        s.set_fabrix(Some(FabrixConfig {
+            endpoint_url: "https://fabrix.example.com".into(),
+            client: Some("client-key".into()),
+            openapi_token: Some("token".into()),
+            allow_invalid_certs: false,
+        }));
         save(&root, &s).unwrap();
 
         let loaded = load(&root);
@@ -382,6 +421,7 @@ mod tests {
         // New sections absent from an old file → None.
         assert!(s.confluence.is_none());
         assert!(s.rag.is_none());
+        assert!(s.fabrix.is_none());
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -399,7 +439,7 @@ mod tests {
         let s: Settings = serde_json::from_str(raw).unwrap();
         assert_eq!(s.skills.as_ref().unwrap()[0].dir, None);
         assert_eq!(s.workflows["plan"][0].output, None);
-        assert!(s.confluence.is_none() && s.rag.is_none());
+        assert!(s.confluence.is_none() && s.rag.is_none() && s.fabrix.is_none());
 
         // A pre-D50 rag section (apiKey) still parses: the unknown field is
         // ignored, the new header fields default to None.
@@ -471,6 +511,7 @@ mod tests {
         s.set_workflow("plan", Some(vec![step("chat", "chat")]));
         s.set_confluence(Some(ConfluenceConfig { base_url: "https://w".into(), ..Default::default() }));
         s.set_rag(Some(RagConfig { endpoint: "https://r".into(), ..Default::default() }));
+        s.set_fabrix(Some(FabrixConfig { endpoint_url: "https://f".into(), ..Default::default() }));
         save(&root, &s).unwrap();
 
         let mut loaded = load(&root);
@@ -478,6 +519,7 @@ mod tests {
         loaded.set_workflow("plan", None);
         loaded.set_confluence(None);
         loaded.set_rag(None);
+        loaded.set_fabrix(None);
         save(&root, &loaded).unwrap();
 
         let reloaded = load(&root);
@@ -485,12 +527,14 @@ mod tests {
         assert!(reloaded.workflows.is_empty());
         assert!(reloaded.confluence.is_none());
         assert!(reloaded.rag.is_none());
+        assert!(reloaded.fabrix.is_none());
         // The serialized file should not even contain the cleared fields.
         let raw = fs::read_to_string(root.join("settings.json")).unwrap();
         assert!(!raw.contains("\"skills\""));
         assert!(!raw.contains("\"workflows\""));
         assert!(!raw.contains("\"confluence\""));
         assert!(!raw.contains("\"rag\""));
+        assert!(!raw.contains("\"fabrix\""));
 
         let _ = fs::remove_dir_all(&root);
     }

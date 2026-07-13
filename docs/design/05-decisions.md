@@ -1012,3 +1012,52 @@
 - **한계/재검토**: 세션리스(gemini/aipro)·plain(opencode/antigravity) degrade는 D34/D40과 동일. RAG 미설정·
   0건이면 rag 단계는 안내와 함께 건너뛴다(D44) — 그때 시각화 탭은 뜨지 않는다. guide의 실제 다단계
   운영 자동화(작업 실행 연동)는 범위 밖(가이드 문서 산출까지).
+
+---
+
+### D64. Fabrix = 첫 원격 HTTP API 에이전트 (레지스트리 kind 분기 + fabrix.rs + settings 저장)
+- **배경**: 기존 6개 에이전트는 전부 **로컬 CLI 바이너리**(resolve→probe→spawn→stdout 파싱)다. 새 에이전트
+  **Fabrix**는 이 전제를 깨는 **원격 HTTP API**다 — 모델 목록은 `GET {endpoint}/openapi/chat/v1/all-models`,
+  채팅은 `POST {endpoint}/openapi/chat/v1/messages` + **SSE 스트리밍**. 인증은 `x-fabrix-client`/
+  `x-openapi-token` 요청 헤더. 사용자 요구 — "Agent 연결에 API 방식 1종 추가".
+- **핵심 판단**: 프론트 에이전트 목록은 `list_agents` 레지스트리가 100% 구동하고, 실행 스트리밍은
+  `RunEvent`+`Channel` 계약으로 이미 추상화돼 있다. 그래서 Fabrix를 **레지스트리에 7번째 def로 추가**하되
+  탐지·실행 **두 지점에서만 원격 경로로 분기**하면 프론트 대부분(에이전트 셀렉트·모델 셀렉트·스트리밍 UI)이
+  변경 없이 Fabrix를 소비한다. HTTP는 기존 `rag.rs`/`confluence.rs`의 `reqwest` blocking+native-tls(schannel)
+  레시피 재사용 — **신규 crate 0**(SSE는 hand-roll: `data:` 라인을 lossy 리더로 읽어 JSON 파싱).
+- **결정(레지스트리)**: `AgentDef`에 `kind: AgentKind { Local, Remote }` 추가. 기존 6개 def는 `Local`, Fabrix는
+  `Remote`. Fabrix def는 CLI 필드(`bin_candidates`/`models_probe`/`run`)를 비워 두고(빈 슬라이스·`None`) 원격
+  경로로 우회한다. `AGENT_DEFS`는 `[AgentDef; 6]`→`[AgentDef; 7]`. `DetectedAgent`의 `source`/`diagnostic`은
+  자유형 `String`이라 원격용 값(`source:"remote"`, `diagnostic:"not-configured"|"unreachable"`)을 스키마
+  변경 없이 담는다.
+- **결정(모듈)**: 새 모듈 **`src-tauri/src/fabrix.rs`** 에 HTTP 로직 격리 — `parse_models_json`(최상위 배열의
+  `modelId` + `name` 배열에서 `languageCode=="ko"` content를 label로, ko 없으면 첫 content, 그것도 없으면
+  modelId; **합성 `default` 미prepend** — 채팅 API가 실제 modelId를 요구), `detect_fabrix`(설정 없음→
+  `not-configured`, 있으면 GET all-models→성공 시 `available`+live models, 실패 시 `unreachable`),
+  `parse_fabrix_sse_data`(`event_status=="CHUNK" && content`→`TextDelta`, 실패 status→`Error`, SUCCESS/R20000
+  종료 마커→이벤트 없음), `run_fabrix`(POST+SSE 워커 스레드), `probe_fabrix`(연결 테스트 커맨드). 두 파서는
+  순수·단위테스트.
+- **결정(실행·취소)**: `run_agent`가 최상단에서 `kind==Remote`면 `fabrix::run_fabrix`로 위임. 프로세스가 없으므로
+  `RunHandle.child`를 `Option`으로 바꿔 **자식 없는 취소 핸들**을 지원한다(`RunRegistry`에 `next_id`/
+  `register_remote`/`unregister` 헬퍼 추가) — 단일 레지스트리·단일 runId 공간을 유지해 `cancel_run`이 두 경로를
+  모두 처리(프로세스는 taskkill, HTTP는 플래그만 set → SSE 읽기 루프가 관측해 연결 종료). 종료 규약은 기존
+  그대로: 실패면 `Error` 선행 후 단일 `End`.
+- **결정(설정·UI)**: 자격증명은 **앱 `settings.json`** 에 `FabrixConfig{endpointUrl, client, openapiToken,
+  allowInvalidCerts}`로 저장(`RagConfig`/`ConfluenceConfig`와 동일 루트 — D39 단일 설정 원칙 유지, 새 파일
+  IO 없음). 커맨드 `set_fabrix_config`(`set_rag_config` 미러) + `probe_fabrix`. UI는 **Agents 화면의 전용
+  `FabrixCard`**(탐지 상태·모델 목록 + endpoint/client/token 3필드 + 연결 테스트; `AgentsView`가 `id=="fabrix"`
+  분기, `RagSection` 폼 패턴 재사용). 시크릿은 평문 저장(로컬 단일사용자 — 기존 관례, 읽기 전용 키 권장).
+- **결정(채팅 파라미터)**: **`isStream: true`**(토큰 스트리밍 — 파이썬 샘플의 모순된 `False` 대신), `llmConfig`는
+  샘플 기본값(max_new_tokens 2024, top_k 14, top_p 0.94, temperature 0.4, repetition_penalty 1.04), `contents`는
+  세션리스 관례대로 `[transcript]` 단일 요소, `systemPrompt`는 기본 문구. Fabrix는 세션리스(ChatPanel
+  `SESSION_AGENTS`에 미포함) → 매 턴 transcript 재전송. 모델은 실제 modelId 필수라 ChatPanel이 현재 model이
+  목록에 없으면 첫 모델로 스냅(CLI 에이전트는 `default`가 목록에 있어 무영향).
+- **대안 기각**: 홈폴더 `~/.operation-wizard/fabrix.json` 별도 파일(사용자가 언급했으나 `.operator-wizard`는
+  오타로 판단; settings.json이 이미 영속화 제공 — 설정 루트 이원화 회피, D39) / `RunSpec`에 `FabrixSse`
+  StreamFormat 추가(전송이 프로세스 전제와 근본적으로 달라 별도 모듈이 깔끔) / 별도 취소 레지스트리
+  (`RunHandle.child`를 Option으로 두면 단일 레지스트리로 충분).
+- **하위호환**: `FabrixConfig`는 `#[serde(default)]`라 구 settings.json 무변경 로드. 기존 6개 에이전트 동작 불변.
+- **한계/재검토**: SSE 취소는 `data:` 라인 사이 플래그 확인이라 서버가 조용하면 다음 바이트까지 지연
+  (confluence 취소와 동형; 토큰 스트림은 자주 방출되어 실사용 무리 없음). `contents`의 교대형 배열 완전 활용은
+  후속(RunArgs가 단일 prompt 문자열). 사내 프록시 TLS는 `allowInvalidCerts` opt-in으로 대응. opencode/
+  antigravity의 1급 파서처럼 Fabrix도 도구 이벤트는 미지원(텍스트 스트림만).
