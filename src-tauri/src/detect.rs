@@ -257,14 +257,23 @@ mod tests {
     #[test]
     fn registry_ids_unique_and_have_fallbacks() {
         let defs = agents::all();
-        assert_eq!(defs.len(), 6);
+        assert_eq!(defs.len(), 7);
         let mut seen = std::collections::HashSet::new();
         for d in defs {
             assert!(!d.id.is_empty());
             assert!(seen.insert(d.id), "duplicate id {}", d.id);
-            assert!(!d.fallback_models.is_empty(), "{} has no fallback models", d.id);
+            // Local agents ship an offline catalog; remote (Fabrix) has none
+            // (models are fetched live over HTTP).
+            if d.kind == agents::AgentKind::Local {
+                assert!(!d.fallback_models.is_empty(), "{} has no fallback models", d.id);
+            }
         }
-        for id in ["opencode", "claude", "codex", "gemini", "antigravity", "aipro"] {
+        assert_eq!(
+            agents::find("fabrix").map(|d| d.kind),
+            Some(agents::AgentKind::Remote),
+            "fabrix must be a remote agent"
+        );
+        for id in ["opencode", "claude", "codex", "gemini", "antigravity", "aipro", "fabrix"] {
             assert!(agents::find(id).is_some(), "missing {id}");
         }
     }

@@ -4,6 +4,7 @@ import type {
   AgentInfo,
   ConfluenceConfig,
   DetectedAgent,
+  FabrixConfig,
   FileEntry,
   IngestEvent,
   KnowledgeEntry,
@@ -54,6 +55,17 @@ export function setConfluenceConfig(config: ConfluenceConfig | null): Promise<Se
 /** Set (or clear, with null/empty endpoint) the RAG service config. */
 export function setRagConfig(config: RagConfig | null): Promise<Settings> {
   return invoke<Settings>("set_rag_config", { config });
+}
+
+/** Set (or clear, with null/empty endpoint) the Fabrix connection config (D64). */
+export function setFabrixConfig(config: FabrixConfig | null): Promise<Settings> {
+  return invoke<Settings>("set_fabrix_config", { config });
+}
+
+/** Fabrix connection test: fetches the model list and returns a summary
+ * ("연결됨 (N개 모델)"). Rejects with a Korean message if unconfigured/unreachable. */
+export function probeFabrix(): Promise<string> {
+  return invoke<string>("probe_fabrix");
 }
 
 // ── RAG / Confluence ingestion / knowledge ───────────────────────────────────

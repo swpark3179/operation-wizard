@@ -96,7 +96,10 @@ pub struct RunArgs {
 }
 
 struct RunHandle {
-    child: Arc<Mutex<Child>>,
+    /// The child process for a local CLI agent; `None` for a remote (HTTP)
+    /// run (Fabrix — D64), which has no process, only a cancel flag its SSE
+    /// read loop observes.
+    child: Option<Arc<Mutex<Child>>>,
     canceled: Arc<AtomicBool>,
 }
 
@@ -105,6 +108,34 @@ struct RunHandle {
 pub struct RunRegistry {
     counter: AtomicU64,
     runs: Mutex<HashMap<String, RunHandle>>,
+}
+
+impl RunRegistry {
+    /// Mint a fresh run id (one counter shared by local + remote runs).
+    pub(crate) fn next_id(&self) -> String {
+        let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        format!("run-{n}")
+    }
+
+    /// Register a child-less (remote/HTTP) run and return its cancel flag. The
+    /// caller's read loop polls the flag and drops the connection on cancel.
+    /// Pair with `unregister` when the run ends. Used by `fabrix.rs` (D64).
+    pub(crate) fn register_remote(&self, id: &str) -> Arc<AtomicBool> {
+        let canceled = Arc::new(AtomicBool::new(false));
+        self.runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.to_string(), RunHandle { child: None, canceled: canceled.clone() });
+        canceled
+    }
+
+    /// Remove a run handle (any kind) from the registry.
+    pub(crate) fn unregister(&self, id: &str) {
+        self.runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
+    }
 }
 
 /// Turn a tool-result `content` (string, or array of `{type:text,text}` parts /
@@ -435,6 +466,14 @@ pub fn run_agent(
     on_event: Channel<RunEvent>,
 ) -> Result<String, String> {
     let def = agents::find(&args.agent_id).ok_or_else(|| format!("unknown agent: {}", args.agent_id))?;
+
+    // Remote (HTTP) agents (Fabrix) bypass the process pipeline entirely: no
+    // resolve, no spawn, no stdin — the prompt becomes a POST body and the SSE
+    // response streams `RunEvent`s (D64).
+    if def.kind == agents::AgentKind::Remote {
+        return crate::fabrix::run_fabrix(app, args, on_event);
+    }
+
     let run = def
         .run
         .as_ref()
@@ -516,7 +555,7 @@ pub fn run_agent(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 run_id2.clone(),
-                RunHandle { child: child_arc.clone(), canceled: canceled.clone() },
+                RunHandle { child: Some(child_arc.clone()), canceled: canceled.clone() },
             );
 
         // Deliver the prompt. Claude uses one stream-json user message, then we
@@ -620,25 +659,29 @@ pub fn cancel_run(registry: tauri::State<RunRegistry>, run_id: String) -> Result
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(h) = runs.get(&run_id) {
+        // Setting the flag first is enough for a remote (HTTP) run: its SSE read
+        // loop polls it and drops the connection (D64). A local run also needs
+        // its process tree killed.
         h.canceled.store(true, Ordering::Relaxed);
-        let mut child = h
-            .child
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // On Windows the agent runs as a node grandchild under a `.cmd` shim, so
-        // killing the direct child (cmd.exe) leaves it running. `taskkill /T`
-        // terminates the entire tree.
-        #[cfg(windows)]
-        {
-            let pid = child.id().to_string();
-            let _ = crate::exec::command_for("taskkill", &["/PID", pid.as_str(), "/T", "/F"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+        if let Some(child_arc) = &h.child {
+            let mut child = child_arc
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // On Windows the agent runs as a node grandchild under a `.cmd` shim,
+            // so killing the direct child (cmd.exe) leaves it running.
+            // `taskkill /T` terminates the entire tree.
+            #[cfg(windows)]
+            {
+                let pid = child.id().to_string();
+                let _ = crate::exec::command_for("taskkill", &["/PID", pid.as_str(), "/T", "/F"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            // Fallback / non-Windows: kill the direct child.
+            let _ = child.kill();
         }
-        // Fallback / non-Windows: kill the direct child.
-        let _ = child.kill();
     }
     Ok(())
 }

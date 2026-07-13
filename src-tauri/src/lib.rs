@@ -2,6 +2,7 @@ mod agents;
 mod confluence;
 mod detect;
 mod exec;
+mod fabrix;
 mod files;
 mod knowledge;
 mod projects;
@@ -17,7 +18,7 @@ use serde::Serialize;
 use tauri::Manager;
 
 use detect::DetectedAgent;
-use settings::{ConfluenceConfig, RagConfig, Settings, SkillDef, StepDef};
+use settings::{ConfluenceConfig, FabrixConfig, RagConfig, Settings, SkillDef, StepDef};
 
 // ---------------------------------------------------------------------------
 // Boot diagnostics (D56). In release builds `windows_subsystem = "windows"`
@@ -176,7 +177,16 @@ fn list_agents() -> Vec<AgentInfo> {
 async fn detect_agent(app: tauri::AppHandle, agent_id: String) -> Result<DetectedAgent, String> {
     let def = agents::find(&agent_id).ok_or_else(|| format!("unknown agent: {agent_id}"))?;
     let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    let custom = settings::load(&config_dir).agent_custom_bin(&agent_id);
+    let s = settings::load(&config_dir);
+    // Remote (HTTP) agents (Fabrix) detect via config presence + an endpoint
+    // reachability/model-list call, not resolve+probe (D64).
+    if def.kind == agents::AgentKind::Remote {
+        let cfg = s.fabrix.clone();
+        return tauri::async_runtime::spawn_blocking(move || fabrix::detect_fabrix(cfg))
+            .await
+            .map_err(|e| format!("{e:?}"));
+    }
+    let custom = s.agent_custom_bin(&agent_id);
     tauri::async_runtime::spawn_blocking(move || detect::detect_agent_blocking(def, custom))
         .await
         .map_err(|e| format!("{e:?}"))
@@ -283,6 +293,28 @@ fn set_rag_config(app: tauri::AppHandle, config: Option<RagConfig>) -> Result<Se
     Ok(s)
 }
 
+/// Set (or clear, with `None`/empty endpoint) the Fabrix connection config
+/// (D64). Trims the endpoint and header values; an empty endpoint clears it.
+#[tauri::command]
+fn set_fabrix_config(
+    app: tauri::AppHandle,
+    config: Option<FabrixConfig>,
+) -> Result<Settings, String> {
+    let normalized = config
+        .map(|mut c| {
+            c.endpoint_url = c.endpoint_url.trim().trim_end_matches('/').to_string();
+            c.client = c.client.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            c.openapi_token = c.openapi_token.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            c
+        })
+        .filter(|c| !c.endpoint_url.is_empty());
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut s = settings::load(&config_dir);
+    s.set_fabrix(normalized);
+    settings::save(&config_dir, &s)?;
+    Ok(s)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_startup_panic_hook();
@@ -311,6 +343,7 @@ pub fn run() {
             set_workflow,
             set_confluence_config,
             set_rag_config,
+            set_fabrix_config,
             run::run_agent,
             run::cancel_run,
             files::list_dir,
@@ -330,7 +363,8 @@ pub fn run() {
             confluence::start_confluence_ingest,
             confluence::cancel_ingest,
             confluence::probe_confluence,
-            rag::rag_search
+            rag::rag_search,
+            fabrix::probe_fabrix
         ])
         // `build` + `run` split (instead of `.run(...).expect(...)`): webview /
         // window creation failures — above all a missing or broken WebView2

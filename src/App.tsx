@@ -8,8 +8,8 @@ import { AgentsView } from "./components/AgentsView";
 import { FlowSettingsView } from "./components/FlowSettingsView";
 import { KnowledgeView } from "./components/KnowledgeView";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { detectAgent, getSettings, listAgents, setAgentBin } from "./lib/api";
-import type { AgentInfo, DetectedAgent, Settings } from "./lib/types";
+import { detectAgent, getSettings, listAgents, setAgentBin, setFabrixConfig } from "./lib/api";
+import type { AgentInfo, DetectedAgent, FabrixConfig, Settings } from "./lib/types";
 
 function App() {
   const [view, setView] = useState<View>("home");
@@ -77,6 +77,18 @@ function App() {
     [detectOne],
   );
 
+  // Save/clear the Fabrix connection config, then re-detect it (D64). Mirrors
+  // `handleSave` — the returned settings replace state, then detection re-runs
+  // (config presence + endpoint reachability + live model list).
+  const handleSaveFabrix = useCallback(
+    async (config: FabrixConfig | null) => {
+      const next = await setFabrixConfig(config);
+      setSettings(next);
+      await detectOne("fabrix");
+    },
+    [detectOne],
+  );
+
   // Whether the workspace has an in-flight agent run (streaming) — navigating
   // away unmounts the ChatPanel, which cancels the run. Confirm first (D57).
   const workspaceBusyRef = useRef(false);
@@ -122,6 +134,7 @@ function App() {
               onRefresh={detectOne}
               settings={settings}
               onSave={handleSave}
+              onSaveFabrix={handleSaveFabrix}
             />
           </div>
         ) : view === "flows" ? (

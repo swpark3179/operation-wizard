@@ -22,17 +22,21 @@
 
 ## 현재 범위 (v0.1)
 
-- **핵심 기능: 로컬 CLI 코딩 에이전트 탐지(다중).**
-  - 대상 에이전트: **OpenCode, Claude Code, Codex, Gemini CLI, Antigravity, AI Pro** (6종).
+- **핵심 기능: 코딩 에이전트 탐지·관리(다중).**
+  - 대상 에이전트: **OpenCode, Claude Code, Codex, Gemini CLI, Antigravity, AI Pro**(로컬 CLI 6종) +
+    **Fabrix**(원격 HTTP API — 첫 비-CLI 에이전트, D64). 총 7종.
     AI Pro는 사내 도구로 Gemini CLI 호환(탐지상 gemini와 동일하게 fallback 전용).
-  - 각 에이전트마다 실행 파일 해석(resolve) → `--version` 프로브 → 모델 목록화.
-  - 결과를 에이전트별 카드 UI로 표시(상태/경로/버전/모델 목록/진단 메시지).
-  - 에이전트별 사용자 지정 경로 설정 및 영구 저장.
-- 탐지 로직은 **"런타임 정의(def) + 공통 probe"** 구조다. 새 에이전트 추가 =
-  레지스트리에 정의 1개 추가(자세히는 [03-agent-detection.md](03-agent-detection.md)).
+  - **로컬 CLI**: 실행 파일 해석(resolve) → `--version` 프로브 → 모델 목록화. **Fabrix**: 설정
+    (endpoint+토큰) 유무 + HTTP 도달성으로 탐지, 모델 목록은 `all-models` API를 호출해 한글 모델명으로 매핑.
+  - 결과를 에이전트별 카드 UI로 표시(로컬=상태/경로/버전/모델; Fabrix=상태/모델 + endpoint·client·token
+    입력 폼 + 연결 테스트). 로컬은 사용자 지정 경로, Fabrix는 연결 정보를 영구 저장(settings.json).
+- 탐지 로직은 **"런타임 정의(def) + 공통 probe"** 구조다(`AgentDef.kind: Local | Remote`). 새 로컬 에이전트 =
+  레지스트리에 정의 1개 추가; 원격 에이전트 = def(`kind: Remote`) + 탐지·실행 분기(자세히는
+  [03-agent-detection.md](03-agent-detection.md)).
 - **에이전트 실행(run) 워크스페이스 (증분 1):** HOME 런처(프롬프트 + 업무 카테고리) →
   좌 대화 패널 + 우 캔버스 패널. 대화는 실제 에이전트를 실행해 응답을 스트리밍한다
-  (**Claude Code·Codex·Gemini·AI Pro** 1급 구조화 스트림, opencode/antigravity는 plain 폴백).
+  (**Claude Code·Codex·Gemini·AI Pro** 1급 구조화 스트림, opencode/antigravity는 plain 폴백,
+  **Fabrix는 HTTP POST + SSE 스트림** — D64).
   정지(프로세스 트리 종료)와 세션 이어가기를 지원한다. 캔버스는 작업 폴더 파일 뷰어
   (트리 + 코드/HTML 미리보기). 실행 엔진은 Open Design 데몬의 run/stream을 Tauri `Channel`로
   포팅한 것(자세히는 [07-workspace-and-runs.md](07-workspace-and-runs.md)).

@@ -241,10 +241,22 @@ pub struct ModelsProbe {
     pub timeout: Duration,
 }
 
-/// Declarative definition of a detectable CLI agent.
+/// Transport of an agent (D64). `Local` agents are CLI binaries resolved on the
+/// filesystem and run as child processes (all fields below apply). `Remote`
+/// agents are HTTP APIs (Fabrix): detection and run bypass resolve/spawn and go
+/// through `fabrix.rs`, so `bin_candidates`/`models_probe`/`run` are left empty.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentKind {
+    Local,
+    Remote,
+}
+
+/// Declarative definition of a detectable agent.
 pub struct AgentDef {
     pub id: &'static str,
     pub name: &'static str,
+    /// Local CLI process vs. remote HTTP API (D64).
+    pub kind: AgentKind,
     /// Binary names to try, in order (Open Design: `bin` then `fallbackBins`).
     pub bin_candidates: &'static [&'static str],
     /// Env var that overrides the binary path (e.g. `OPENCODE_BIN`); `None` if
@@ -269,10 +281,11 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The agents this app knows how to detect, in display order. Values are ported
 /// 1:1 from Open Design's `apps/daemon/src/runtimes/defs/*.ts`.
-pub static AGENT_DEFS: [AgentDef; 6] = [
+pub static AGENT_DEFS: [AgentDef; 7] = [
     AgentDef {
         id: "opencode",
         name: "OpenCode",
+        kind: AgentKind::Local,
         bin_candidates: &["opencode-cli", "opencode"],
         env_var: Some("OPENCODE_BIN"),
         extra_search_subdirs: &[".opencode\\bin"],
@@ -292,6 +305,7 @@ pub static AGENT_DEFS: [AgentDef; 6] = [
     AgentDef {
         id: "claude",
         name: "Claude Code",
+        kind: AgentKind::Local,
         bin_candidates: &["claude", "openclaude"],
         env_var: Some("CLAUDE_BIN"),
         extra_search_subdirs: &[],
@@ -318,6 +332,7 @@ pub static AGENT_DEFS: [AgentDef; 6] = [
     AgentDef {
         id: "codex",
         name: "Codex CLI",
+        kind: AgentKind::Local,
         bin_candidates: &["codex"],
         env_var: Some("CODEX_BIN"),
         extra_search_subdirs: &[],
@@ -350,6 +365,7 @@ pub static AGENT_DEFS: [AgentDef; 6] = [
     AgentDef {
         id: "gemini",
         name: "Gemini CLI",
+        kind: AgentKind::Local,
         bin_candidates: &["gemini"],
         env_var: Some("GEMINI_BIN"),
         extra_search_subdirs: &[],
@@ -373,6 +389,7 @@ pub static AGENT_DEFS: [AgentDef; 6] = [
     AgentDef {
         id: "antigravity",
         name: "Antigravity",
+        kind: AgentKind::Local,
         bin_candidates: &["agy"],
         // Upstream has no env override; `ANTIGRAVITY_BIN` is our deliberate
         // addition for consistency (see docs/design/05-decisions.md).
@@ -400,6 +417,7 @@ pub static AGENT_DEFS: [AgentDef; 6] = [
         // (GEMINI_CLI_TRUST_WORKSPACE) is run-time only and irrelevant to detection.
         id: "aipro",
         name: "AI Pro",
+        kind: AgentKind::Local,
         bin_candidates: &["aipro"],
         env_var: Some("AIPRO_BIN"),
         extra_search_subdirs: &[],
@@ -417,6 +435,22 @@ pub static AGENT_DEFS: [AgentDef; 6] = [
             stream_format: StreamFormat::GeminiJson,
             env: GEMINI_ENV,
         }),
+    },
+    AgentDef {
+        // Remote HTTP API agent (D64) — the first non-CLI agent. Detection and
+        // run go through `fabrix.rs` (GET model list, POST + SSE chat), so the
+        // CLI-oriented fields are empty and `run` is `None`. Connection config
+        // (endpoint + headers) lives in `settings.fabrix`, not a `*_BIN` path.
+        id: "fabrix",
+        name: "Fabrix",
+        kind: AgentKind::Remote,
+        bin_candidates: &[],
+        env_var: None,
+        extra_search_subdirs: &[],
+        version_timeout: VERSION_TIMEOUT,
+        models_probe: None,
+        fallback_models: &[],
+        run: None,
     },
 ];
 
