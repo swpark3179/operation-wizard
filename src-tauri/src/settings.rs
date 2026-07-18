@@ -6,6 +6,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::detect::ModelOption;
+
 /// Category ids — keep in sync with the `Category` union in
 /// `src/components/workspace.ts` (frontend owns the display metadata).
 pub const CATEGORIES: [&str; 4] = ["plan", "guide", "query", "change"];
@@ -72,28 +74,25 @@ pub struct StepDef {
     pub output: Option<String>,
 }
 
-/// Confluence crawl source for RAG ingestion (D48). The PAT is stored as plain
-/// text in settings.json — acceptable for a local single-user desktop app;
-/// recommend a read-only-scope token.
+/// Confluence connection via the official MCP server (D82). Reached over the
+/// streamable-HTTP MCP transport (`mcp.rs`); the crawl target (root page id /
+/// search query) is passed per-collection from the UI, not stored here. The
+/// `auth_key` is stored as plain text in settings.json — acceptable for a local
+/// single-user desktop app; recommend a read-only-scope key.
+///
+/// The old REST-crawl fields (`baseUrl`/`token`/`rootPageId`/`spaceKey`/
+/// `allowInvalidCerts`) were dropped; serde ignores them in an old settings.json
+/// (no `deny_unknown_fields`), so a stale file simply loads with an empty `url`
+/// (treated unconfigured) and the user re-saves (the URL is prefilled).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfluenceConfig {
-    /// Base URL including any context path, e.g. "https://wiki.example.com/confluence".
+    /// MCP endpoint, e.g. "https://sdsdev.co.kr/mcp-confluence/mcp".
     #[serde(default)]
-    pub base_url: String,
-    /// Bearer PAT (Confluence Server/DC). Cloud Basic auth is out of scope v1.
+    pub url: String,
+    /// `x-auth` request header value (MCP server auth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
-    /// Crawl root page id — descendants are collected recursively (BFS).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root_page_id: Option<String>,
-    /// Alternative to `root_page_id`: flat listing of one space's pages.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub space_key: Option<String>,
-    /// Opt-in escape hatch for corporate TLS-inspection proxies whose CA is not
-    /// in the Windows store. Default false; the UI labels it dangerous.
-    #[serde(default)]
-    pub allow_invalid_certs: bool,
+    pub auth_key: Option<String>,
 }
 
 /// The user's own RAG service (summarization + embedding happen there; this app
@@ -105,7 +104,7 @@ pub struct RagConfig {
     pub endpoint: String,
     /// Auth header values the user's rag.rs implementation sends with each
     /// request (D50; how they are attached is the user's TODO stub). Plain-text
-    /// secrets — same caveat as `ConfluenceConfig.token`.
+    /// secrets — same caveat as `ConfluenceConfig.auth_key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,6 +112,16 @@ pub struct RagConfig {
     /// Search result count requested by the rag workflow step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
+    /// Fabrix rag-chat knowledge asset id (`knowledgeAssetId` in the request
+    /// body). Empty → `rag.rs` falls back to a built-in sample asset (D50
+    /// follow-up), so the rag step works before the user picks their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_asset_id: Option<String>,
+    /// Cached model list from the last successful fetch (connection test). The
+    /// RAG search itself uses a fixed model — this is informational + shown in
+    /// the 지식 screen without a network call (cache-first, D66).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelOption>,
 }
 
 /// Connection config for the Fabrix remote HTTP agent (D64). Unlike the local
@@ -137,6 +146,39 @@ pub struct FabrixConfig {
     /// in the Windows store. Default false; the UI labels it dangerous.
     #[serde(default)]
     pub allow_invalid_certs: bool,
+    /// Cached model list from the last successful fetch (save / refresh /
+    /// connection test). Shown at app start without a network call and used as a
+    /// fallback when the endpoint is unreachable (cache-first, D66).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelOption>,
+}
+
+/// Connection config for the AI Pro remote HTTP agent (D71). AI Pro is an
+/// OpenAI-compatible HTTP service (chat `POST {endpoint}/chat/completions` + SSE,
+/// models `GET {endpoint}/models`), so unlike Fabrix's two custom headers it
+/// authenticates with a single `Authorization: Bearer <apiKey>`. Stored here —
+/// same root as `fabrix`/`rag` — so it persists across runs. The key is plain
+/// text: same caveat as `FabrixConfig` (local single-user app; prefer a scoped
+/// key).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiProConfig {
+    /// Base endpoint, e.g. "https://aipro.sdsdev.co.kr/open/api/v1". The
+    /// "/models" and "/chat/completions" paths are appended by `aipro.rs`.
+    #[serde(default)]
+    pub endpoint_url: String,
+    /// `Authorization: Bearer <apiKey>` value (the single OpenAI-style key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Opt-in escape hatch for corporate TLS-inspection proxies whose CA is not
+    /// in the Windows store. Default false; the UI labels it dangerous.
+    #[serde(default)]
+    pub allow_invalid_certs: bool,
+    /// Cached model list from the last successful fetch (save / refresh /
+    /// connection test). Shown at app start without a network call and used as a
+    /// fallback when the endpoint is unreachable (cache-first, D66).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelOption>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -162,6 +204,10 @@ pub struct Settings {
     /// Fabrix agent reports "not-configured" until saved) — D64.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fabrix: Option<FabrixConfig>,
+    /// The AI Pro remote HTTP agent connection (OpenAI-compatible). `None` → not
+    /// configured (the AI Pro agent reports "not-configured" until saved) — D71.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aipro: Option<AiProConfig>,
     /// Legacy v0.1 single-agent field. Folded into `agents` on load and never
     /// re-serialized (so the next `save` drops it — self-healing migration).
     #[serde(default, skip_serializing)]
@@ -215,6 +261,11 @@ impl Settings {
     /// Set (`Some`) or clear (`None`) the Fabrix connection config.
     pub fn set_fabrix(&mut self, config: Option<FabrixConfig>) {
         self.fabrix = config;
+    }
+
+    /// Set (`Some`) or clear (`None`) the AI Pro connection config (D71).
+    pub fn set_aipro(&mut self, config: Option<AiProConfig>) {
+        self.aipro = config;
     }
 }
 
@@ -270,7 +321,44 @@ fn file_path(config_dir: &Path) -> std::path::PathBuf {
     config_dir.join("settings.json")
 }
 
+/// The legacy settings location: the Tauri app-config dir
+/// `%APPDATA%\com.shi.operationwizard\settings.json` used before D72 moved all
+/// app data under `~/.operation-wizard/`. `None` if `%APPDATA%` is unset.
+/// The identifier is `tauri.conf.json`'s `identifier`, hardcoded here as a
+/// one-time migration constant (this path is frozen — it is the *old* location).
+/// Only consulted in real builds; tests exercise `migrate_legacy_settings` with
+/// explicit paths.
+#[cfg(not(test))]
+fn legacy_appdata_settings() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(|ad| Path::new(&ad).join("com.shi.operationwizard").join("settings.json"))
+}
+
+/// One-time, non-destructive migration (D72): if the new home-root
+/// `settings.json` does not exist yet but a legacy `%APPDATA%` copy does, copy it
+/// into place so the user keeps their agent paths / remote connections /
+/// workflows. The legacy file is left untouched. No-op if the destination
+/// already exists or there is no legacy file. Pure (paths injected) → testable.
+fn migrate_legacy_settings(config_dir: &Path, legacy: Option<&Path>) {
+    let dest = file_path(config_dir);
+    if dest.exists() {
+        return;
+    }
+    if let Some(legacy) = legacy {
+        if legacy.exists() {
+            if fs::create_dir_all(config_dir).is_ok() {
+                let _ = fs::copy(legacy, &dest);
+            }
+        }
+    }
+}
+
 pub fn load(config_dir: &Path) -> Settings {
+    // Pull a pre-D72 %APPDATA% settings.json into the home root on first load
+    // (skipped in tests so they stay hermetic — the helper is tested directly).
+    #[cfg(not(test))]
+    migrate_legacy_settings(config_dir, legacy_appdata_settings().as_deref());
+
     let mut s: Settings = match fs::read_to_string(file_path(config_dir)) {
         Ok(raw) => match serde_json::from_str(&raw) {
             Ok(s) => s,
@@ -375,23 +463,32 @@ mod tests {
             ]),
         );
         s.set_confluence(Some(ConfluenceConfig {
-            base_url: "https://wiki.example.com/confluence".into(),
-            token: Some("pat".into()),
-            root_page_id: Some("12345".into()),
-            space_key: None,
-            allow_invalid_certs: false,
+            url: "https://sdsdev.co.kr/mcp-confluence/mcp".into(),
+            auth_key: Some("x-auth-key".into()),
         }));
         s.set_rag(Some(RagConfig {
             endpoint: "https://rag.example.com".into(),
             secret_key: Some("secret".into()),
             pass_key: Some("pass".into()),
             top_k: Some(5),
+            knowledge_asset_id: Some("asset-123".into()),
+            models: vec![ModelOption { id: "rag-m1".into(), label: "RAG 모델".into() }],
         }));
         s.set_fabrix(Some(FabrixConfig {
             endpoint_url: "https://fabrix.example.com".into(),
             client: Some("client-key".into()),
             openapi_token: Some("token".into()),
             allow_invalid_certs: false,
+            models: vec![
+                ModelOption { id: "fx-m1".into(), label: "모델 하나".into() },
+                ModelOption { id: "fx-m2".into(), label: "모델 둘".into() },
+            ],
+        }));
+        s.set_aipro(Some(AiProConfig {
+            endpoint_url: "https://aipro.example.com/open/api/v1".into(),
+            api_key: Some("bearer-key".into()),
+            allow_invalid_certs: false,
+            models: vec![ModelOption { id: "glm-5.1".into(), label: "glm-5.1".into() }],
         }));
         save(&root, &s).unwrap();
 
@@ -422,6 +519,7 @@ mod tests {
         assert!(s.confluence.is_none());
         assert!(s.rag.is_none());
         assert!(s.fabrix.is_none());
+        assert!(s.aipro.is_none());
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -439,7 +537,9 @@ mod tests {
         let s: Settings = serde_json::from_str(raw).unwrap();
         assert_eq!(s.skills.as_ref().unwrap()[0].dir, None);
         assert_eq!(s.workflows["plan"][0].output, None);
-        assert!(s.confluence.is_none() && s.rag.is_none() && s.fabrix.is_none());
+        assert!(
+            s.confluence.is_none() && s.rag.is_none() && s.fabrix.is_none() && s.aipro.is_none()
+        );
 
         // A pre-D50 rag section (apiKey) still parses: the unknown field is
         // ignored, the new header fields default to None.
@@ -449,6 +549,8 @@ mod tests {
         assert_eq!(rag.endpoint, "https://r");
         assert!(rag.secret_key.is_none() && rag.pass_key.is_none());
         assert_eq!(rag.top_k, Some(3));
+        // No `models` in the old JSON → empty cache (cache-first, D66).
+        assert!(rag.models.is_empty());
     }
 
     #[test]
@@ -509,9 +611,10 @@ mod tests {
         let mut s = Settings::default();
         s.set_skills(Some(vec![skill("a")]));
         s.set_workflow("plan", Some(vec![step("chat", "chat")]));
-        s.set_confluence(Some(ConfluenceConfig { base_url: "https://w".into(), ..Default::default() }));
+        s.set_confluence(Some(ConfluenceConfig { url: "https://w".into(), ..Default::default() }));
         s.set_rag(Some(RagConfig { endpoint: "https://r".into(), ..Default::default() }));
         s.set_fabrix(Some(FabrixConfig { endpoint_url: "https://f".into(), ..Default::default() }));
+        s.set_aipro(Some(AiProConfig { endpoint_url: "https://a".into(), ..Default::default() }));
         save(&root, &s).unwrap();
 
         let mut loaded = load(&root);
@@ -520,6 +623,7 @@ mod tests {
         loaded.set_confluence(None);
         loaded.set_rag(None);
         loaded.set_fabrix(None);
+        loaded.set_aipro(None);
         save(&root, &loaded).unwrap();
 
         let reloaded = load(&root);
@@ -528,6 +632,7 @@ mod tests {
         assert!(reloaded.confluence.is_none());
         assert!(reloaded.rag.is_none());
         assert!(reloaded.fabrix.is_none());
+        assert!(reloaded.aipro.is_none());
         // The serialized file should not even contain the cleared fields.
         let raw = fs::read_to_string(root.join("settings.json")).unwrap();
         assert!(!raw.contains("\"skills\""));
@@ -535,6 +640,7 @@ mod tests {
         assert!(!raw.contains("\"confluence\""));
         assert!(!raw.contains("\"rag\""));
         assert!(!raw.contains("\"fabrix\""));
+        assert!(!raw.contains("\"aipro\""));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -579,5 +685,41 @@ mod tests {
         let s = load(&root);
         assert!(s.agent_custom_bin("opencode").is_none());
         assert!(!root.join("settings.json.corrupt").exists());
+    }
+
+    #[test]
+    fn migrates_legacy_settings_non_destructively() {
+        // D72: copy a pre-existing %APPDATA% settings.json into the new home
+        // root on first load, leaving the legacy file in place.
+        let legacy_dir = temp_root("migrate-legacy");
+        let dest_dir = temp_root("migrate-dest");
+        let _ = fs::remove_dir_all(&legacy_dir);
+        let _ = fs::remove_dir_all(&dest_dir);
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy = legacy_dir.join("settings.json");
+        fs::write(&legacy, r#"{"agents":{"claude":{"customBin":"C:\\legacy.cmd"}}}"#).unwrap();
+
+        // Legacy present, destination absent → copied (contents preserved),
+        // legacy untouched.
+        migrate_legacy_settings(&dest_dir, Some(&legacy));
+        let loaded = load(&dest_dir);
+        assert_eq!(loaded.agent_custom_bin("claude").as_deref(), Some("C:\\legacy.cmd"));
+        assert!(legacy.exists(), "legacy file must be left in place");
+
+        // Destination now exists → a second migration is a no-op even if the
+        // legacy changes (the home root is authoritative once populated).
+        fs::write(&legacy, r#"{"agents":{"claude":{"customBin":"C:\\newer.cmd"}}}"#).unwrap();
+        migrate_legacy_settings(&dest_dir, Some(&legacy));
+        assert_eq!(load(&dest_dir).agent_custom_bin("claude").as_deref(), Some("C:\\legacy.cmd"));
+
+        // No legacy → no-op, no file created.
+        let fresh = temp_root("migrate-fresh");
+        let _ = fs::remove_dir_all(&fresh);
+        migrate_legacy_settings(&fresh, None);
+        assert!(!fresh.join("settings.json").exists());
+
+        let _ = fs::remove_dir_all(&legacy_dir);
+        let _ = fs::remove_dir_all(&dest_dir);
+        let _ = fs::remove_dir_all(&fresh);
     }
 }

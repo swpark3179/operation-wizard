@@ -4,6 +4,7 @@
 // canvas tab (rendered via sandboxed iframe srcdoc, never written to disk).
 
 import type { KnowledgeEntry, RagHit } from "./types";
+import type { RagVerdict } from "./ragRelevance";
 
 /** Per-context byte budget for prompt injection (rag excerpts / knowledge). */
 const CONTEXT_CAP = 16_384;
@@ -112,7 +113,42 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-/** Build the self-contained HTML document for the canvas "검색 결과" tab.
+/** Shared style for the canvas "검색 결과" panel (raw + curated views). */
+const RAG_PANEL_STYLE = `
+  :root { color-scheme: light; }
+  body { font-family: "Segoe UI", "Malgun Gothic", sans-serif; margin: 0; padding: 24px;
+         background: #faf9f5; color: #3d3929; line-height: 1.6; }
+  header { margin-bottom: 20px; }
+  header h1 { font-size: 15px; margin: 0 0 4px; color: #6c6a60; font-weight: 600; }
+  header .q { font-size: 14px; white-space: pre-wrap; background: #f0eee6; border: 1px solid #e0ddd1;
+              border-radius: 8px; padding: 10px 12px; }
+  header .reason { font-size: 13px; margin-top: 8px; color: #6c6a60; }
+  article { background: #ffffff; border: 1px solid #e0ddd1; border-radius: 10px;
+            padding: 14px 16px; margin-bottom: 12px; }
+  article h2 { font-size: 14px; margin: 0 0 6px; }
+  .n { display: inline-block; min-width: 20px; height: 20px; line-height: 20px; text-align: center;
+       background: #c96442; color: #fff; border-radius: 999px; font-size: 11px; margin-right: 4px; }
+  .score { font-size: 11px; color: #8f8b7e; font-weight: 400; margin-left: 6px; }
+  .source { font-size: 12px; margin-bottom: 6px; word-break: break-all; }
+  .source a { color: #c96442; }
+  article ul { margin: 6px 0 8px; padding-left: 18px; }
+  article li { font-size: 13px; margin: 0 0 4px; }
+  p { font-size: 13px; margin: 0; white-space: pre-wrap; }
+  .empty { color: #8f8b7e; font-size: 13px; }
+`;
+
+/** Wrap a header + body into the self-contained sandboxed-iframe document. */
+function ragPanelDoc(headerHtml: string, bodyHtml: string): string {
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>${RAG_PANEL_STYLE}</style></head><body>
+${headerHtml}
+${bodyHtml}
+</body></html>`;
+}
+
+/** Build the self-contained HTML document for the canvas "검색 결과" tab (raw
+ * hits — used as the fail-open fallback when no curated verdict is available).
  * Everything is escaped; the iframe is sandboxed (`allow-scripts`, no
  * same-origin) like the file viewer's HTML preview. */
 export function ragResultHtml(query: string, hits: RagHit[]): string {
@@ -132,28 +168,54 @@ export function ragResultHtml(query: string, hits: RagHit[]): string {
 </article>`;
     })
     .join("\n");
-  return `<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root { color-scheme: light; }
-  body { font-family: "Segoe UI", "Malgun Gothic", sans-serif; margin: 0; padding: 24px;
-         background: #faf9f5; color: #3d3929; line-height: 1.6; }
-  header { margin-bottom: 20px; }
-  header h1 { font-size: 15px; margin: 0 0 4px; color: #6c6a60; font-weight: 600; }
-  header .q { font-size: 14px; white-space: pre-wrap; background: #f0eee6; border: 1px solid #e0ddd1;
-              border-radius: 8px; padding: 10px 12px; }
-  article { background: #ffffff; border: 1px solid #e0ddd1; border-radius: 10px;
-            padding: 14px 16px; margin-bottom: 12px; }
-  article h2 { font-size: 14px; margin: 0 0 6px; }
-  .n { display: inline-block; min-width: 20px; height: 20px; line-height: 20px; text-align: center;
-       background: #c96442; color: #fff; border-radius: 999px; font-size: 11px; margin-right: 4px; }
-  .score { font-size: 11px; color: #8f8b7e; font-weight: 400; margin-left: 6px; }
-  .source { font-size: 12px; margin-bottom: 6px; word-break: break-all; }
-  .source a { color: #c96442; }
-  p { font-size: 13px; margin: 0; white-space: pre-wrap; }
-  .empty { color: #8f8b7e; font-size: 13px; }
-</style></head><body>
-<header><h1>사내 문서 검색 결과 · ${hits.length}건</h1><div class="q">${escapeHtml(query)}</div></header>
-${items || '<p class="empty">검색 결과가 없습니다.</p>'}
-</body></html>`;
+  const header = `<header><h1>사내 문서 검색 결과 · ${hits.length}건</h1><div class="q">${escapeHtml(query)}</div></header>`;
+  return ragPanelDoc(header, items || '<p class="empty">검색 결과가 없습니다.</p>');
+}
+
+/** Build the CURATED "검색 결과" panel from the relevance judge's verdict (D70):
+ * topic sections with bullet points + source links. Falls back to the raw hit
+ * list when the verdict has no usable sections. */
+export function ragCuratedHtml(query: string, verdict: RagVerdict, hits: RagHit[]): string {
+  const sections = verdict.sections ?? [];
+  if (sections.length === 0) return ragResultHtml(query, hits);
+
+  // A source token is either a full URL (passes through) or a hit number that
+  // maps back to that hit's url.
+  const resolveSource = (token: string): string | null => {
+    const t = token.trim();
+    if (/^https?:\/\//i.test(t)) return t;
+    const m = t.match(/\d+/);
+    if (!m) return null;
+    return hits[parseInt(m[0], 10) - 1]?.url?.trim() || null;
+  };
+
+  const body = sections
+    .map((sec, i) => {
+      const heading = escapeHtml(sec.heading?.trim() || `관련 정보 ${i + 1}`);
+      const points = sec.points
+        .map((p) => `<li>${escapeHtml(p.trim())}</li>`)
+        .join("\n");
+      const links = (sec.sources ?? [])
+        .map((s) => {
+          const label = escapeHtml(s.trim());
+          const url = resolveSource(s);
+          return url
+            ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${label}</a>`
+            : `<span>${label}</span>`;
+        })
+        .join(" · ");
+      const source = links ? `<div class="source">출처: ${links}</div>` : "";
+      return `<article class="section">
+  <h2><span class="n">${i + 1}</span> ${heading}</h2>
+  ${points ? `<ul>${points}</ul>` : ""}
+  ${source}
+</article>`;
+    })
+    .join("\n");
+
+  const reason = verdict.reason?.trim()
+    ? `<div class="reason">${escapeHtml(verdict.reason.trim())}</div>`
+    : "";
+  const header = `<header><h1>사내 문서 검색 결과 · 관련 정보 정리</h1><div class="q">${escapeHtml(query)}</div>${reason}</header>`;
+  return ragPanelDoc(header, body);
 }

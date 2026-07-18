@@ -516,6 +516,9 @@
   스킬로". 한 턴에 md+html을 모두 시키면 지시 과부하 — 별도 턴이 품질·단순성 모두 우수.
 
 ### D48. 지식 뷰 + reqwest(blocking/native-tls) + Confluence 수집 Channel + RAG 어댑터 스텁
+> ⚠️ **부분 대체(D82)**: Confluence **REST 크롤**과 `ingest_page`→RAG sink는 **D82로 대체**되었다
+> (공식 MCP 서버로 수집 → 로컬 지식 베이스 artifact). 지식 뷰·`reqwest`(blocking/native-tls) 도입·
+> `knowledge.rs`·`IngestEvent`/`IngestRegistry`/Channel 진행·`RagConfig`는 유지된다. 아래는 최초 결정.
 - **결정**: NavRail에 4번째 뷰 **"지식"(`knowledge`)**을 추가한다 — ① RAG 검색 설정(endpoint/apiKey/topK +
   연결 테스트), ② Confluence 수집(baseUrl/PAT/루트 페이지 ID 또는 스페이스 키/TLS 예외 + 수집 시작·중지·
   진행 표시), ③ 지식 베이스 CRUD(제목+본문; `%USERPROFILE%\.operation-wizard\knowledge\<id>.json`
@@ -560,6 +563,9 @@
 - **재검토 조건**: 열린 탭이 많아져 관리가 필요하면(고정/전체 닫기 등) 탭 오버플로 메뉴를 도입.
 
 ### D50. RagConfig = endpoint + secretKey + passKey (apiKey 대체)
+> ⚠️ **D65에서 실연동**: 두 키의 실제 전송처가 확정됐다 — `secret_key`→`x-fabrix-client`,
+> `pass_key`→`x-openapi-token`(Fabrix rag-chat API). `search`는 더 이상 스텁이 아니며, `RagConfig`에
+> `knowledge_asset_id`가 추가되고 지식 뷰 폼도 6필드(+ 라벨을 실제 헤더명으로)로 확장됐다. 아래는 최초 결정.
 - **결정**: RAG 연결 설정을 **endpoint URL + secret key + pass key** 3값으로 바꾼다(`RagConfig.api_key`
   삭제 → `secret_key`/`pass_key` 추가, `top_k` 유지). 두 키는 사용자 RAG 서비스 호출 시 **요청 헤더**로
   전달될 값이며, 실제 전송은 여전히 `rag.rs`의 TODO(user) 스텁이 담당한다(스켈레톤 주석을
@@ -848,7 +854,7 @@
      hover 연필 버튼 → 인라인 입력(Enter 저장/Escape 취소)으로 노출한다. `ensure_project`는
      idempotent라 제목을 덮어쓰지 않으므로(재사용) 별도 갱신 커맨드가 정상 경로다.
   6. **홈 히어로 재정비**: "무엇을 도와드릴까요?" 채팅 인사 대신 **운영 도구 프레이밍** — 배지
-     "Samsung SDS · Operation Wizard", 제목 "운영 작업 도우미", 부제에 진행 절차(요구사항 확인 →
+     "Samsung SDS · Operation Wizard", 제목 "운영 작업 마법사", 부제에 진행 절차(요구사항 확인 →
      코드베이스 분석 → 사내 지식 반영 → 산출물 생성)와 기록 보장을 명시한다.
   7. **홈 컴포저 에이전트·모델 선택**: ChatPanel 컴포저와 동일한 셀렉트 2개를 홈 컴포저에 추가한다.
      선택값은 `onStart(category, prompt, workdir?, agentId?, model?)` → `HomeArea` →
@@ -1016,6 +1022,10 @@
 ---
 
 ### D64. Fabrix = 첫 원격 HTTP API 에이전트 (레지스트리 kind 분기 + fabrix.rs + settings 저장)
+> ⚠️ "첫/유일한 원격 에이전트"는 **D71에서 aipro가 두 번째 원격 에이전트로 합류**하며 갱신되었다.
+> 그때 `detect_agent`/`run_agent`의 단일 `kind==Remote→fabrix` 분기가 **`def.id` match**로 일반화됐다.
+> 아래는 최초 결정의 기록이다.
+
 - **배경**: 기존 6개 에이전트는 전부 **로컬 CLI 바이너리**(resolve→probe→spawn→stdout 파싱)다. 새 에이전트
   **Fabrix**는 이 전제를 깨는 **원격 HTTP API**다 — 모델 목록은 `GET {endpoint}/openapi/chat/v1/all-models`,
   채팅은 `POST {endpoint}/openapi/chat/v1/messages` + **SSE 스트리밍**. 인증은 `x-fabrix-client`/
@@ -1061,3 +1071,648 @@
   (confluence 취소와 동형; 토큰 스트림은 자주 방출되어 실사용 무리 없음). `contents`의 교대형 배열 완전 활용은
   후속(RunArgs가 단일 prompt 문자열). 사내 프록시 TLS는 `allowInvalidCerts` opt-in으로 대응. opencode/
   antigravity의 1급 파서처럼 Fabrix도 도구 이벤트는 미지원(텍스트 스트림만).
+
+---
+
+### D65. RAG 검색 = Fabrix rag-chat API 실연동 (rag.rs search 구현 + knowledgeAssetId 설정 + /models 연결 테스트)
+> ⚠️ **참고(D82)**: `RagClient::ingest_page`는 여전히 스텁이나, **Confluence가 더 이상 이 sink를 타지 않는다**
+> (D82에서 Confluence 수집을 공식 MCP → 로컬 지식 베이스로 전환). RAG **검색**(search) 실연동은 그대로 유효.
+- **배경**: `rag.rs`의 `RagClient::search`가 `TODO(user)` 스텁이라 rag 기반 단계(D44/D48)가 항상 "미구현 —
+  건너뜀"으로 degrade했다. 사용자 요구 — 실제 사내 RAG(**Samsung SDS Fabrix `rag-chat` API**) 호출로 채운다.
+  샘플 계약: 모델 목록 `GET {endpoint}/openapi/rag-chat/v1/models`, 채팅 `POST .../v1/messages`
+  (body `{modelIds:[MODEL], contents:[query], isStream:false, llmConfig:{}, systemPrompt:"", knowledgeAssetId}`),
+  응답(비스트림 단일 JSON) `{content:"요약 답변", references:[…], contentReferences:[{references:[{title,content,link,filename}]}], status:"SUCCESS"}`.
+- **핵심 판단**: 인증 헤더가 **Fabrix(D64)와 동일**(`x-fabrix-client`/`x-openapi-token`)이라 D50의 `RagConfig`
+  (`endpoint`/`secret_key`/`pass_key`/`top_k`)에 그대로 매핑된다. 채우는 지점은 스텁 하나뿐 — 설정 로드·
+  `spawn_blocking`·커맨드 등록·프론트 `RagHit[]` 소비 파이프라인은 이미 배선됨. **신규 crate 0**(reqwest
+  blocking+native-tls 재사용, `fabrix.rs` 레시피).
+- **결정(헤더 매핑)**: `secret_key`→`x-fabrix-client`, `pass_key`→`x-openapi-token`(있을 때만; `attach_headers`
+  헬퍼). serde 필드명은 그대로 두고 **UI 라벨만 실제 헤더명으로 변경**(마이그레이션 0). `x-generative-ai-user-email`
+  헤더는 **생략**(사용자 결정 — 3개 필수 파라미터만; API가 요구하면 필드 1개 추가로 확장 — 재검토 참조).
+- **결정(모델·자산)**: 모델은 **GLM 5.2 하드코딩**(`019f23a1-…`, `rag.rs` 상수; UI 없음). `knowledgeAssetId`는
+  `RagConfig`에 추가한 설정 필드 — 비어 있으면 샘플 자산(`019f5a11-…`)으로 폴백해 즉시 동작(사용자 요구
+  "일단은 샘플 id 그대로"). `/models`는 **연결 테스트 전용**(모델 발견).
+- **결정(응답 매핑)**: `parse_rag_response`(순수 fn, 단위테스트) — `content`(요약 답변)를 맨 앞 `RagHit`
+  (title "RAG 요약 답변")으로 prepend + 출처 청크(`contentReferences[].references[]`, `link` 보유; 비면 top-level
+  `references[]` 폴백)를 `RagHit`으로 매핑, 출처만 `top_k` truncate. 기존 `formatRagContext`/`ragResultHtml`이
+  `RagHit[]`만 소비하므로 **계약·프론트 렌더 변경 0**(요약 답변은 첫 hit으로 자연 표출). `status`가 FAIL/ERROR면
+  `Err`(프론트 → "건너뜀"). `score`는 rankScore가 0~1 유사도가 아니라 `None`으로 둠(0.00 표시 방지).
+- **결정(연결 테스트)**: 새 커맨드 **`probe_rag`**(`probe_fabrix` 미러, spawn_blocking) — `/models` GET →
+  `crate::fabrix::parse_models_json` 재사용(응답 shape 동일) → "연결됨 (N개 모델)". assetId 없이 자격증명·도달성
+  검증. `RagSection` 연결 테스트가 `ragSearch` 더미쿼리 대신 `probeRag`를 호출(assetId 불필요).
+- **결정(ingest 유지)**: rag-chat API에는 ingest 엔드포인트가 없다(지식 자산은 Fabrix 플랫폼에서 관리) →
+  `ingest_page`는 **TODO 스텁 유지**(Confluence 수집은 별개, 여전히 per-page 실패로 degrade). `RagClient::new`
+  시그니처·`IngestPage` 무변경 → `confluence.rs` 영향 0.
+- **대안 기각**: 출처만 매핑(요약 답변 버림 — 사용자 요구와 반대) / 모델 드롭다운(현재 GLM 5.2 고정으로 충분) /
+  `RagConfig` 키 이름을 `client`/`openapi_token`으로 개명(마이그레이션·프론트 필드 변경 비용, D50 계약 재활용이 최소).
+- **하위호환**: `knowledge_asset_id`는 `#[serde(default, skip_serializing_if=Option::is_none)]`라 구 settings.json
+  무변경 로드(구 `apiKey`도 여전히 unknown-field로 무시 — D50). 이미 rag를 저장한 사용자는 재저장 시 필드가 추가된다.
+- **한계/재검토**: 이메일 헤더 생략으로 API가 거부하면 `RagConfig.userEmail` + 필드 추가로 확장. `top_k`는 서버가
+  받지 않고 반환 청크 수 상한으로만 쓰인다(rag-chat에 topK 파라미터 없음). SSE 스트리밍(`isStream:true`) 미사용
+  (검색은 단발 JSON으로 충분).
+
+---
+
+### D66. Fabrix/RAG/Confluence 프록시 우회(`.no_proxy()`) + 모델 목록 캐시 우선 영속
+- **배경**: 사내망에서 Fabrix 원격 에이전트와 RAG 서비스(및 Confluence)는 **직접 도달 가능한 사내
+  엔드포인트**인데, `reqwest`가 기본적으로 환경변수(`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`)의 프록시를
+  자동 상속해 이들 연결이 프록시를 경유하며 실패/오작동할 수 있었다. 또 모델 목록은 매번 라이브로만
+  조회되고 설정에 저장되지 않아, 앱 시작마다 네트워크 호출이 필요하고 일시 장애 시 모델 드롭다운이 비었다.
+  사용자 요구 — ① 이 연결들은 프록시를 타지 않고 직접 연결, ② 모델 목록을 처음(저장/새로고침/연결
+  테스트) API로 조회한 뒤 설정 파일에 저장하고 이후엔 저장본 사용.
+- **결정(프록시 우회)**: 세 HTTP 클라이언트 빌더(`fabrix.rs::build_client`, `rag.rs::RagClient::new`,
+  `confluence.rs::HttpConfluence::new`)에 **`.no_proxy()`**를 추가해 환경 프록시를 무시하고 직접 연결한다.
+  TLS는 기존 native-tls/schannel(OS 인증서 저장소) 그대로라 사내 프록시 CA 신뢰는 유지된다. **신규
+  crate 0.** (Confluence는 Fabrix/RAG와 별개 연결이나 동일 사내 직접 도달 전제라 사용자 결정으로 포함.)
+- **결정(모델 캐시 우선)**: `FabrixConfig`/`RagConfig`에 `models: Vec<ModelOption>`(`#[serde(default,
+  skip_serializing_if="Vec::is_empty")]`, 구 settings.json 하위호환)을 추가하고 `ModelOption`에
+  `Deserialize/Debug/PartialEq` 파생을 확장한다(`detect.rs`). **캐시 우선 동작**:
+  - `detect_agent`에 **`force: bool` 인자** 추가. 원격 분기는 `fabrix::detect_fabrix(cfg, force)` 호출.
+    `!force && 캐시 있음`이면 **네트워크 없이** 캐시 모델을 반환(`models_source="fallback"`); 그 외
+    (강제이거나 캐시 없음=최초)에는 라이브 조회. 라이브 성공 시 `detect_agent`가 `fabrix.models`에 저장.
+    라이브 실패 & 캐시 있음이면 캐시를 폴백으로 표시.
+  - 프론트 `detectOne(id, force)`: **시작 시 탐지는 force 없이(캐시)**, **수동 Refresh·저장 후
+    재탐지는 `force=true`**(라이브 조회 → 캐시 갱신).
+  - **연결 테스트**(`probe_fabrix`/`probe_rag`)와 **저장 흐름**도 라이브 조회 후 `models`를 저장한다.
+    RAG는 에이전트가 아니라 `probe_rag`가 모델 목록(리네임 `fetch_models`)을 조회·저장하고, RagSection이
+    저장/연결 테스트 후 `getSettings()`로 재조회해 목록을 표시한다(Fabrix 카드와 동일 UX).
+  - `set_fabrix_config`/`set_rag_config`는 `models`를 **백엔드 소유**로 다룬다 — 연결(endpoint+자격증명)이
+    동일한 재저장이면 기존 캐시 이월, 바뀌면 비움(다른 서버 목록 방지). 프론트는 `models`를 보내지 않는다.
+- **참고**: RAG 실제 검색(`search`)은 고정 모델(GLM 5.2)을 계속 사용한다 — `rag.models`는 정보 표시용
+  캐시이며 검색 로직에는 영향 없음(D65 유지).
+- **대안 기각**: 프록시 자동 상속 유지(사내 직접 엔드포인트에 부적합) / **라이브 우선**(탐지마다 조회, 저장본은
+  폴백으로만) — 사용자가 "처음엔 API, 이후엔 저장" 캐시 우선을 선택 / 별도 모델 캐시 파일(settings.json이 이미
+  영속 제공 — 설정 루트 이원화 회피, D39 단일 설정 원칙).
+- **하위호환**: `models` 필드는 `#[serde(default)]`라 구 settings.json 무변경 로드(빈 벡터). 기존 동작 불변.
+- **한계/재검토**: 캐시 우선이라 시작 시 도달성을 재확인하지 않는다(저장본을 available로 낙관 표시; 실제
+  연결 문제는 채팅/연결 테스트에서 드러남). 라이브 확인이 필요하면 Refresh/연결 테스트를 쓴다.
+
+---
+
+### D67. Fabrix(원격 에이전트) 산출물 = 앱이 스트리밍 텍스트를 파일로 저장 (files.rs write_file 신설, D21 개정)
+- **배경**: Fabrix는 **파일시스템 접근도 도구도 없이 텍스트만 SSE로 스트리밍**한다(`kind: Remote`, D64 —
+  `run_fabrix`가 `RunEvent::TextDelta`만 방출). 로컬 CLI 에이전트는 워크플로우 `document` 단계에서 자기
+  파일 쓰기 도구로 `docs/*.md`를 직접 생성하지만, Fabrix는 아무 파일도 쓰지 못한다. 결과: Fabrix로
+  워크플로우를 돌리면 `end` 핸들러가 `onOpenFile(joinWorkdirPath(cwd, step.file))`를 호출해도 디스크에
+  파일이 없어 산출물 탭(`ArtifactsPanel`)의 존재 프로브(`useArtifactExistence`→`list_dir`)가 못 찾고,
+  응답이 **대화 패널 텍스트로만** 남았다. 사용자 요구 — 다른 CLI 모델처럼 워크스페이스에 실제 파일이
+  생기고 산출물 탭에서 확인되게 한다.
+- **결정(백엔드 write_file — D21 개정)**: `files.rs`에 세 번째 커맨드 **`write_file(path, contents)`**를
+  추가한다(부모 디렉터리 `create_dir_all` + `MAX_WRITE=5 MiB` 가드 + `fs::write`). `files.rs`의 read-only
+  방침(D21)을 최소로 개정하되, 별도 `fs` 플러그인/capability는 도입하지 않는다(커스텀 커맨드는 core IPC
+  — D21 선례 유지). `lib.rs` invoke_handler에 `files::write_file` 등록, 프론트 `api.ts`에 `writeFile` 래퍼.
+- **결정(클라이언트 영속화 — 원격 전용 게이트)**: `ChatPanel`의 `end` 생성형-성공 분기에서 `step.file`이
+  있고 **에이전트가 원격**(`detected[agentId]?.source === "remote"`)이면, 마지막 assistant 메시지의 누적
+  `content`를 문서 본문으로 정제(`extractDocBody` — 응답 전체가 단일 펜스면 언랩, 아니면 trim)해
+  `writeFile(abs, body)`로 저장한 **뒤** `onOpenFile(abs)`를 호출한다(순서 중요 — refreshNonce 범프 전에
+  파일이 존재해야 존재 프로브가 발견). CLI(비원격) 경로는 **무변경**(자기 파일을 계속 씀 — 앱이 덮어쓰지
+  않음, 회귀 위험 0). 자동전진(`setAutoTurn`)은 동기로 별개 발사되어 write와 무관.
+- **결정(원격 문서 프롬프트)**: `send()` wire 조립에서 원격 에이전트의 생성형+`file` 단계에 짧은 지시문
+  (`remoteDocCtx`: "출력 전체가 문서로 저장됨 — 파일 도구/저장 언급 없이 문서 본문만 출력")을 `pathCtx`
+  뒤에 주입한다. 기존 `document` 지시문("파일 쓰기 도구로 저장")이 Fabrix엔 무의미하고 "…에 저장하겠습니다"
+  류 잡담을 유발하므로. CLI wire는 게이트로 격리(무변경).
+- **결정(토큰 상한)**: `fabrix.rs::chat_body`의 `max_new_tokens` 2024 → **8192**(긴 문서 잘림 방지; 모든
+  Fabrix 채팅에 적용).
+- **대안 기각**: 백엔드가 `step.file`을 알고 `run_fabrix`에서 직접 쓰기 — 워크플로우 개념을 실행 엔진에
+  누출(클라이언트 오케스트레이션 원칙 D30/D34 위배). / 존재-누락 시 전 에이전트 대상 쓰기 — plain
+  에이전트에도 도움이 되나 비결정적이고 이전 실행의 stale 파일을 주울 수 있어 원격 전용이 안전(사용자 확정).
+- **하위호환/영향**: 신규 Cargo/npm 의존성 0. CLI 에이전트 동작 불변. `write_file`은 프론트가 항상
+  `<workdir>/<step.file>`만 넘기므로 로컬 단일사용자 신뢰 모델(D21)과 일치.
+- **한계**: Fabrix는 파일·도구가 없어 **코드베이스 실독·RAG 도구 호출을 못 한다** — `codebase` 단계 등의
+  산출물이 추정 기반일 수 있다(순수 채팅 API의 본질적 제약; 본 결정 범위 밖). rag/knowledge preflight
+  주입은 기존대로 동작.
+
+---
+
+### D68. 워크플로우 생성형 단계의 일시적 타임아웃 자동 재시도 (aipro 백엔드 간헐 지연 흡수)
+- **배경**: AI Pro(`aipro`) 실행 시 `Streaming request timeout after ~45s`로 워크플로우가 중단되는 문제를
+  조사한 결과, 원인은 **aipro 백엔드(glm-5.1)의 간헐적 first-byte 지연(>45초)** 으로 확정됐다(진단 요지:
+  ① 45초는 백엔드가 내려주는 요청 타임아웃 — `getRequestTimeoutMs`의 서버 실험 플래그
+  `DEFAULT_REQUEST_TIMEOUT`→undici `headersTimeout`, 클라이언트에서 못 늘림; ② 앱을 배제한 순수 aipro도
+  성공/실패를 모두 재현 — 동일 프롬프트가 어떤 때는 7분+ 실패, 10분 뒤 성공; ③ 입력 크기·실행 방식
+  (`GEMINI_CLI_TRUST_WORKSPACE`·`--include-directories`·cwd·cmd.exe 래핑)·프록시·프롬프트 내용 모두 A/B로
+  배제). 앱이 유독 자주 실패하는 이유는 **가이드 플로우가 한 세션에서 aipro 요청을 여러 번 순차 발사**해,
+  요청당 실패확률 p에 대해 N단계 실패확률 ≈ 1−(1−p)^N로 **증폭**되기 때문이다.
+- **결정**: 백엔드 45초는 클라이언트에서 못 늘리므로, **워크플로우 생성형 단계의 턴이 일시적 오류로
+  실패하면 중단(halt) 전에 같은 단계를 자동으로 최대 `MAX_STEP_RETRIES`(=2)회 재시도**한다(`ChatPanel`의
+  `end` 실패 분기). 재시도는 실패한 메시지 쌍을 제거(세션리스 transcript 오염 방지)하고 단계를 re-arm한 뒤
+  **기존 자동전진 경로(`setAutoTurn` nonce+effect)** 로 재발사한다(스트림 핸들러에서 `send()`를 직접 호출하지
+  않는 D55 규약 유지). 진행 스테퍼/시스템 노트에 "일시적 오류로 재시도 중 (k/2)"를 표시하고, 소진 시
+  기존 halt 노트(+"여러 번 재시도했지만 실패")로 폴백한다(수동 '다시 시도' D57은 그대로).
+- **선별 재시도(중요)**: 무한/무의미 재시도를 막기 위해 **일시적 오류에만** 적용한다 —
+  `isTransientFailure`가 timeout/stream/network 시그니처는 재시도 대상으로, **치명적 오류(Model not found·
+  TLS BadSignature/인증서·401/403·Credential 가드레일 — D28 부류)는 제외**한다. 트리거 조건: `status==="failed"`
+  (취소 제외) + 생성형 단계(`isGenerative`) + 예산 잔여 + 일시적 시그니처. 오류 텍스트는 `run.rs`가 실패 시
+  stderr를 `RunEvent::Error`로 중계하므로 마지막 assistant 메시지 `error`에서 읽는다.
+- **근거**: 재시도로 대부분 흡수된다(동일 프롬프트가 재실행에서 성공하는 간헐성). 단조 커서·1회성 arm·
+  종단 chat 등 기존 안전장치(D34)와 정합하며, 자동전진 인프라를 재사용해 **신규 백엔드/IPC/의존성 0**
+  (순수 프론트, `ChatPanel`만). 세션형(claude/codex)에도 적용되나 그쪽은 다른 백엔드라 이 타임아웃과
+  대체로 무관(무해).
+- **대안 기각**: 백엔드 타임아웃 상향(클라이언트 불가 — 서버 실험 플래그) / 입력 축소(15만 토큰도 성공 —
+  크기 무관, 비효과) / 전 실패 무조건 재시도(치명적 오류를 반복 — 시간 낭비·오해 유발). 근본 해결(백엔드
+  first-byte 지연 개선/`DEFAULT_REQUEST_TIMEOUT` 상향)은 사내 aipro 운영팀 몫으로 범위 밖.
+- **재검토 조건**: 재시도 2회로 부족한 사용자 보고가 잦으면 `MAX_STEP_RETRIES`를 설정화하거나 지수 백오프
+  지연을 추가한다.
+
+---
+
+### D69. 캔버스 폴더 칩 = 좌측 말줄임 축약(고정폭 버튼 보호) + "탐색기에서 열기" 버튼
+- **배경**: 워크스페이스(좌 대화 + 우 캔버스)의 캔버스 파일 탭 툴바 우측에는 활성 작업 폴더의 **절대경로
+  폴더 칩**(D60)이 있다. 이 칩이 `max-w-[340px]`까지 커지고 flexbox 기본 `flex-shrink:1`이라, 좁은 창에서
+  바로 왼쪽의 **새로고침 버튼**(`h-7 w-7`)·루트 전환 세그먼트가 함께 짓눌려 아이콘이 찌그러지거나 밀리는
+  문제가 있었다. 사용자 요구 — ① 경로는 길어지면 `…`로 간략히, ② **탐색기로 그 경로를 여는 버튼** 추가.
+- **결정**: **프론트 전용**(`CanvasPanel`/`api.ts`/capability 1줄). ① 툴바에서 **폴더 칩만 축소를 허용**하고
+  (`min-w-0` + `max-w-[240px]`, 내부 `truncate`) 나머지 컨트롤(루트 전환 세그먼트·새로고침·신규 탐색기
+  버튼)에 **`shrink-0`**을 부여해 긴 경로가 버튼을 짓누르지 못하게 한다. 좌측 말줄임(`dir="rtl"` + LRM
+  마크, D60)과 전체 경로 툴팁은 유지한다(칩 최대폭만 340→240으로 축소해 "간략" 요구 충족).
+  ② 폴더 칩 오른쪽에 **`ExternalLink` 아이콘 버튼**("탐색기에서 열기")을 추가한다 — `treeRoot`(작업 폴더
+  ↔ 코드베이스 토글에 따른 현재 트리 루트)를 `openInExplorer`(`api.ts`, `@tauri-apps/plugin-opener`의
+  `openPath`)로 OS 탐색기에 **폴더 내용 그대로** 연다. 실패는 조용히 무시(`.catch(() => {})` — 부수 액션).
+- **권한**: `openPath`는 `opener:default`에 없어 capability(`default.json`)에 **`opener:allow-open-path`**를
+  추가한다. **신규 Cargo/npm 의존성 0**(`tauri-plugin-opener`·`@tauri-apps/plugin-opener`는 이미 사용 중).
+- **대안 기각**: `revealItemInDir`(`opener:default`에 이미 포함 — 권한 추가 불필요) — Windows에선 폴더의
+  **부모를 열고 그 폴더를 선택**만 하므로 "그 경로(내용)를 띄운다"는 요구와 어긋난다. `openPath`가 폴더
+  자체를 열어 더 부합. / 폴더 칩 폭을 반응형 계산(JS) — CSS `min-w-0`/`shrink-0`로 충분.
+- **한계/재검토**: `openPath`는 스코프 없이 임의 경로를 열 수 있으나, 프론트가 넘기는 값은 항상 프로젝트
+  workdir/코드베이스 경로라 로컬 단일사용자 신뢰 모델(D21)과 일치한다. 스코프 제한이 필요해지면 opener
+  scope로 승격.
+
+---
+
+### D70. RAG 검색 결과 관련성 LLM 판단 게이트 + 정리된 '검색 결과' 패널 (D44/D46 확장)
+- **배경**: 기반 3단계의 **rag 단계**(D44)는 검색 결과가 1건이라도 있으면 **무조건** (a) 캔버스 '검색 결과'
+  탭(D46, `ragResultHtml`)에 표시하고 (b) `formatRagContext`로 에이전트 프롬프트에 주입했다(유일한 게이트는
+  "0건 → 건너뜀"). 사내 지식베이스는 이번 작업과 무관한 문서까지 top-K로 돌려주는 경우가 많아, 관련 없는
+  정보가 패널을 채우고 프롬프트를 오염시켰다. 사용자 요구 — ① 관련이 적다고 **판단되면** 사용자에게
+  보여주지 않는다, ② 관련이 있으면 **HTML로 보기 좋게 정리된 패널**로 보여준다.
+- **핵심 판단**: RAG/Confluence는 이 앱에서 **rag 단계 하나로 수렴**한다(Confluence 페이지는 RAG 소스 청크의
+  `url`로 표출 — 별도 패널 없음). 관련성 "판단"은 점수가 아니라 **작업 맥락 기반 LLM 판단**이 정확하고,
+  이미 있는 격리-턴 관용구(`knowledgeSave.ts::generateKnowledgeSummary` — D59)와 fenced-block 파서(D30 계열)를
+  그대로 재사용하면 **신규 백엔드/IPC/의존성 0**(순수 프론트)으로 성립한다.
+- **결정(판단·정리)**: 새 모듈 `src/lib/ragRelevance.ts` — `judgeRagRelevance`가 RAG 검색 직후, 캔버스 표시·
+  프롬프트 주입 **전에** 격리된 에이전트 턴 1회를 실행한다(세션 id/resume 없음, 자체 `Channel`, `extraDirs:[]`).
+  이 턴은 (작업 내용=검색 query + 검색 결과)를 읽고 **관련성 여부 + 주제별 정리 섹션**을 하나의
+  ` ```ragrelevance ` fenced JSON(`{relevant, reason, sections:[{heading,points,sources}]}`)으로 낸다.
+  `parseRagRelevance`가 검증(`parsePrefill` 스타일)하며, 정리된 뷰 HTML은 `foundation.ts::ragCuratedHtml`
+  (기존 `ragResultHtml`과 `<style>`/`escapeHtml` 공유; 섹션 비면 원본 hits로 폴백)이 만든다.
+- **결정(게이트)**: `ChatPanel::stepPreflight`의 `rag` 분기에서 —
+  - `verdict.relevant === false` → 기존 **skip 경로 재사용**(패널·주입 없이 스킵 노트 + 워크플로우 계속 진행).
+  - `verdict.relevant === true` → `onRagResult(query, hits, verdict)`로 **정리된 패널** 표시 + (기존대로)
+    `formatRagContext(hits)` **원본 발췌 주입**(게이트는 표시/스킵만 결정; 관련 판정 시 에이전트에는 전체
+    발췌를 그대로 줘 정보 충실도 유지).
+  - `verdict === null`(파싱/에이전트 실패) → **fail-open**: 원본 패널(`ragResultHtml`) 표시 + 원본 주입
+    (오늘 동작 그대로 — 정보를 잘못 숨기지 않음).
+- **취소**: 판단 턴의 run id는 `runIdRef`에 없으므로 `ragJudgeCancelRef`를 두고 `stop()`이 이를 호출한다.
+  취소 시 `judge.promise`가 null로 resolve되고 `preflightAbortRef`가 set되어 **기존 preflight abort 경로**
+  (halt → 일반 대화)를 탄다. `fetchNote`는 "사내 문서 검색·관련성 확인 중…"으로 검색+판단을 포괄.
+- **범위**: 대상은 `rag` 단계와 '검색 결과' 탭. **지식 베이스(`knowledge`) 단계는 범위 밖**(사용자 요구는
+  "rag와 confluence"). 백엔드(`rag.rs`/`settings.rs`) 무변경 — rankScore 플럼빙 불필요.
+- **대안 기각**: **점수 임계값**(RAG `rankScore`를 프론트로 플럼빙해 컷오프) — rankScore 스케일/의미가
+  불확실(샘플 0.0001)하고 "작업과의 관련성"을 총체적으로 못 판단 / **요약 답변 휴리스틱**(RAG 요약의
+  "관련 없음" 문구 감지) — 문구 의존적이라 취약 / 표시만 게이팅하고 주입은 유지 — 무관 정보가 프롬프트를
+  오염 / 판단을 본 턴에 융합 — 패널이 본 턴 전 preflight에 뜨므로 사후 판단으론 숨길 수 없음.
+- **하위호환/한계**: 프론트 전용 타입(`RagVerdict`, serde 미러 아님). plain(opencode/antigravity)·세션리스
+  (gemini/aipro)가 fenced 형식을 안 지키면 `null` → fail-open(오늘 동작, D34/D40 degrade와 일관). 지연은
+  RAG 검색(최대 120s) + 판단 턴 1회이며 Stop으로 취소 가능(`fetchNote` 안내).
+
+---
+
+### D71. AI Pro = 두 번째 원격 에이전트 — 로컬 gemini CLI에서 OpenAI 호환 HTTP로 전환 (D17/D23/D52 갱신)
+- **배경**: `aipro`(AI Pro, 사내)는 D17에서 **gemini 호환 로컬 CLI**(`aipro` 바이너리 spawn →
+  `--output-format stream-json` 파싱)로 등록됐다. 하지만 이 방식은 (a) `aipro` CLI 설치에 의존하고,
+  (b) 사내 백엔드의 간헐적 45초 first-byte 타임아웃 증폭(D68), (c) "Model not found"(D23), (d) 세션 시작
+  콘솔 깜빡임(D54)의 원인이었다. 실제 백엔드는 **OpenAI 호환 HTTP 서비스**
+  (`https://aipro.sdsdev.co.kr/open/api/v1`)로, opencode CLI는 이 엔드포인트를 `@ai-sdk/openai-compatible`
+  프로바이더로 붙인다(`opencode.json` `provider.aipro`). 사용자 요구 — 이 HTTP 방식을 차용해 aipro
+  연결을 개선한다.
+- **핵심 판단**: 이미 검증된 **Fabrix 원격 패턴**(D64, `kind: Remote` → `fabrix.rs`)이 그대로 템플릿이다.
+  프로토콜만 OpenAI로 바꿔 복제하면 **신규 crate 0**(reqwest blocking+native-tls+`.no_proxy()` 재사용,
+  SSE hand-roll). 프론트 런타임(ChatPanel)은 원격/세션 동작을 전부 **`source==="remote"` 문자열**과 모델
+  목록으로 구동하므로(id 무관), aipro가 `source:"remote"`를 보고하면 **문서 파일 저장(D67)·세션리스
+  transcript·모델 스냅이 ChatPanel 변경 0으로 자동 적용**된다.
+- **결정(교체)**: `aipro` def를 **그 자리에서** `kind: Local`→`kind: Remote`로 전환(CLI 필드 비움,
+  `aipro_build_args` 삭제, `run: None`). id/슬롯 유지(`AGENT_DEFS` 7종 불변). `fabrix`와 달리
+  **`fallback_models`(glm-5.1/qwen3.6-27b/gpt-oss-120b)를 유지**해 `detect_aipro`가 `/models` 도달 불가+
+  캐시 없음일 때 정적 폴백으로 쓴다(합성 `default` 없음 — 채팅은 실제 id 필요).
+- **결정(모듈)**: 새 모듈 **`aipro.rs`**(fabrix.rs 미러) — `detect_aipro`(캐시 우선 D66),
+  `fetch_models`(`GET /models`), 순수 파서 `parse_openai_models_json`(`data[].id`)·`parse_openai_sse_data`
+  (`choices[0].delta.content`→TextDelta, `usage`→Usage, `error`→Error, `[DONE]` 종료),
+  `run_aipro`(`POST /chat/completions` + SSE), `probe_aipro`. 인증 `Authorization: Bearer <apiKey>`,
+  `chat_body`는 `{model, messages:[system,user], stream, stream_options.include_usage, temperature, max_tokens:8192}`.
+- **결정(디스패치 일반화)**: 원격이 2종이 됐으므로 `detect_agent`(lib.rs)·`run_agent`(run.rs)의 단일
+  `kind==Remote→fabrix` 분기를 **`match def.id`**(`fabrix`/`aipro`/`_`→에러)로 일반화. 트레이트/enum
+  추상화는 config 타입이 달라(FabrixConfig vs AiProConfig) 2-암 match보다 과함.
+- **결정(설정·UI)**: `settings.json`에 **`AiProConfig`**(endpointUrl+apiKey+allowInvalidCerts+models 캐시)
+  추가(D64 단일 설정 루트 원칙 유지 — opencode.json/auth.json을 직접 읽지 않음). 커맨드
+  `set_aipro_config`/`probe_aipro`. UI는 Agents 화면의 전용 **`AiProCard`**(endpoint는 알려진 상수로
+  프리필·편집 가능 + 단일 API 키 password 필드 + 연결 테스트; `AgentsView`가 `id=="aipro"` 분기).
+  `DIAGNOSTIC_HINT`는 원격 카드가 공유하므로 **에이전트 중립 문구**로 완화.
+- **모델 목록**: 라이브 `GET /models` + 캐시(D66) — 저장/새로고침/연결 테스트에서 조회해 `aipro.models`에
+  저장, 이후 캐시 우선. 실패 시 정적 폴백(3종). **⚠️ D73/D74에서 개정**: 모델을 이미 정적으로 알고 있어
+  `/models` 의존을 제거(모델 목록=정적 카탈로그, 연결 테스트=최소 `POST /chat/completions`; D73). 실제
+  500의 원인은 `/models`가 아니라 **누락된 `User-Agent`**였고 `opencode/<ver>` UA 부착으로 해결됐다(D74).
+- **대안 기각**: **CLI 유지 + 별도 API 에이전트 추가**(에이전트 8종, 두 경로 중복 — 사용자가 "교체" 선택) /
+  **opencode.json/auth.json 직접 읽기**(설정 루트 이원화·외부 파일 의존 — 사용자가 앱 settings.json 선택) /
+  **원격 trait/enum 추상화**(2종에는 과설계) / **CLI 없을 때만 HTTP 폴백**(비결정적, 복잡) /
+  **endpoint를 detect/settings에서 자동 시드**(저장 전 available 오탐 — 카드 프리필만).
+- **하위호환**: `AiProConfig`는 `#[serde(default)]`라 구 settings.json 무변경 로드(`aipro` 없으면 `None`).
+  D17/D23/D52는 aipro의 *과거* CLL 전송을 기술하는 역사 기록으로 유지(D71 역참조). **D68(일시적 타임아웃
+  자동 재시도)은 HTTP 전환 후에도 유효**(원격도 first-byte 지연 가능 — 무해).
+- **한계/재검토**: 원격이라 **코드베이스 실독·도구 호출 불가**(Fabrix와 동일 — D67 한계; codebase 단계
+  산출물은 추정 기반일 수 있음). `.no_proxy()`는 aipro가 사내 직접 도달 전제(프록시 경유 필요 시 aipro
+  클라이언트만 해제). `max_tokens`를 거부하는 백엔드가 있으면 `max_completion_tokens`로 조정. 개편된
+  기본 연결은 사용자가 Agents 카드에서 저장해야 활성(저장 전 `not-configured`).
+
+---
+
+### D72. 모든 앱 데이터를 `~/.operation-wizard/`로 통일 — settings를 `app_config_dir`에서 이전 + 공유 `ow_home()`
+- **배경**: 앱이 디스크에 쓰는 런타임 파일이 **두 루트로 갈라져** 있었다 — `settings.json`(+
+  `settings.json.corrupt`)만 Tauri `app.path().app_config_dir()`(Windows `%APPDATA%\com.shi.operationwizard\`)에,
+  나머지 전부(`projects/`, `knowledge/`·`knowledge/artifacts/`, `startup-error.log`)는 이미
+  `~/.operation-wizard/`(`%USERPROFILE%\.operation-wizard\`)에 있었다. 사용자 요구 — **모든 설정/데이터
+  파일을 홈 폴더 `~/.operation-wizard/` 하위에 쓰게** 통일(한 곳에서 찾고 백업).
+- **핵심 판단**: `settings::load(config_dir)`/`save(config_dir, s)`는 루트를 **인자로 받고**(스스로 정하지
+  않음), 18개 호출부가 전부 `app_config_dir()`를 넘겼다. 반면 `projects.rs`/`knowledge.rs` 커맨드는
+  **`app`을 받지 않고** `projects_root()`/`knowledge_root()`로 env에서 루트를 구한다. 이 패턴을 settings에
+  적용하면 된다 — 즉 실제로 옮길 파일은 `settings.json` 하나뿐.
+- **결정(공유 헬퍼)**: `~/.operation-wizard`를 **한 곳에서** 정의하는 `crate::ow_home() -> Result<PathBuf,
+  String>`(USERPROFILE→HOME)를 `lib.rs`에 추가하고, 흩어져 있던 3개 리졸버(`startup_log_path`·
+  `projects_root`·`knowledge_root`)를 이 헬퍼로 통합(중복 제거·정의 단일화). `startup_log_path`는 홈
+  해석 실패 시 temp 폴백을 유지.
+- **결정(설정 저장 루트 전환)**: 18개 `app.path().app_config_dir()` 호출을 `crate::ow_home()?`로 교체.
+  설정 용도로만 `app`을 받던 **14개 커맨드에서 `app` 파라미터 제거**(`get_settings`·`set_agent_bin`·
+  `set_skills`·`set_workflow`·`set_*_config`·`detect_agent`·`probe_fabrix`·`probe_aipro`·`rag_search`·
+  `probe_rag`·`probe_confluence`) — projects/knowledge 커맨드와 동일 형태가 됨(프론트는 `app`을 넘긴 적이
+  없어 무영향; `.path()` 전용 `use tauri::Manager`도 정리). `app.state()`가 필요한 넷(`run_agent`·
+  `run_fabrix`·`run_aipro`·`start_confluence_ingest`)은 `app` 유지, 그 한 줄만 교체.
+- **결정(자동 이전)**: `settings::load`가 새 위치에 파일이 없고 레거시 `%APPDATA%\com.shi.operationwizard\
+  settings.json`이 있으면 **1회 비파괴 복사**(`migrate_legacy_settings` — 원본 유지, dest 있으면 no-op).
+  env `APPDATA` 조회(`legacy_appdata_settings`)는 `#[cfg(not(test))]`로 게이트해 테스트 격리; 순수 헬퍼는
+  명시 경로로 단위 테스트. 사용자 확정(기존 연결·워크플로우 유지).
+- **불변**: `settings::load`/`save`/`backup_corrupt` 시그니처는 그대로(기존 테스트·`settings.json.corrupt`
+  백업이 새 홈 루트로 자동 따라감). `tauri.conf.json`의 식별자(`com.shi.operationwizard`)는 **미변경**
+  (창·기타 Tauri 기능이 사용) — 단지 settings 저장에 `app_config_dir`를 쓰지 않을 뿐. 프론트/타입/의존성 0.
+- **대안 기각**: **clean switch**(기존 %APPDATA% 설정 폐기 — 사용자가 자동 이전 선택) / **식별자 변경으로
+  app_config_dir 이동**(창·업데이터 등 광범위 영향) / **`tauri-plugin-fs` base dir 설정**(미사용 플러그인
+  도입) / **settings.rs가 루트를 스스로 정하도록 `load()`/`save()` 무인자화**(테스트가 루트 주입에
+  의존 — projects/knowledge식 "커맨드가 루트 해석" 패턴이 더 일관적).
+- **한계**: 마이그레이션은 레거시 식별자를 상수로 하드코딩(1회성·경로 동결). 홈(USERPROFILE/HOME) 미해석
+  환경에선 설정 커맨드가 에러(기존 `app_config_dir` 실패와 동일 의미). `<workdir>/<문서>` 산출물은
+  caller-supplied라 무관(기본 workdir가 이미 `~/.operation-wizard/projects/<id>/workspace/`).
+
+---
+
+### D73. AI Pro 연결 테스트/탐지의 `/models` 의존 제거 — 최소 채팅 프로브 + 정적 카탈로그 (D71 개정)
+> ⚠️ **원인 정정(D74)**: 이 결정은 500의 원인을 "`/models` 엔드포인트가 깨졌다"로 추정했으나, 이후
+> 라이브 진단으로 **진짜 원인은 누락된 `User-Agent`**임이 밝혀졌다(게이트웨이가 opencode UA를 요구하고
+> 백엔드가 `ua.split("/")`). `/models`도 UA만 있으면 동작한다. 단, **아래 설계 결정(연결 테스트=최소 채팅
+> 프로브 + 모델=정적 카탈로그 + cert-skip 제거)은 그대로 유효**하다(모델 3종을 이미 알고 있어 `/models`가
+> 불필요하고, 채팅 프로브가 "실제 대화 가능"을 더 정확히 검증). 실제 수정은 **D74** 참조.
+
+- **배경**: D71에서 AI Pro 연결 테스트(`probe_aipro`)와 탐지(`detect_aipro`)는 OpenAI 표준
+  **`GET {endpoint}/models`**로 모델 목록을 조회했다. 실사용에서 정상 API 키로도 연결 테스트가
+  **HTTP 500**으로 실패했다: `{"detail": "'NoneType' object has no attribute 'split'"}`.
+- **원인(당시 추정 — D74에서 정정)**: 서버(Python) 측 크래시(500 + 파이썬 예외 `detail`)이고 우리 인증/키
+  문제가 아니다(401/403 아님)는 판단은 맞았다. 다만 "`/models` 고유 결함"이라는 추정은 틀렸다 — 실제로는
+  **모든 요청**이 UA 누락으로 500이었다(D74). AI Pro 모델 3종(glm-5.1/gpt-oss-120b/qwen3.6-27b)은 이미
+  정적 카탈로그로 알고 있어 라이브 조회가 불필요하다(이 부분은 유효).
+- **결정**:
+  - **연결 테스트(`probe_aipro`)**: `GET /models` → **최소 비스트림 `POST /chat/completions`**
+    (`chat_probe` — model=`glm-5.1`, `messages:[{user:"ping"}]`, `max_tokens:1`, `stream:false`,
+    헤더 `Authorization: Bearer`+`Accept: application/json`+`Content-Type`(via `.json()`)). HTTP 2xx면
+    `"연결됨 — AI Pro 응답 정상"`. opencode의 검증된 경로와 동일해 "정말 대화가 되는지"를 진짜로 확인한다.
+  - **탐지(`detect_aipro`)**: **네트워크 호출 제거** — 설정(endpoint 존재) 시 `available=true` +
+    **정적 카탈로그**(`models_source="fallback"`), 미설정 시 `not-configured`. `/models`를 호출하면 카드가
+    "unreachable"로 오표시되고, 매 탐지(앱 시작/새로고침)마다 채팅 토큰을 쓸 순 없어 탐지 시 도달성은
+    확인하지 않는다(명시적 연결 테스트·실제 대화가 검증). `force` 인자는 미사용(fabrix와 공통 시그니처 유지).
+  - **죽은 코드 제거**: `aipro.rs`의 `fetch_models`·`parse_openai_models_json`(+단위 테스트) 삭제.
+    `parse_openai_sse_data`·`run_aipro`·`static_fallback_models`는 유지. `AiProConfig.models` 캐시 필드는
+    aipro에서 실질 미사용이나 필드는 유지(serde/마이그레이션 무변경).
+  - **UI**: AI Pro 카드의 **"인증서 검증 건너뛰기" 체크박스 제거**(사용자 요청). 500은 TLS가 아니라 앱
+    오류라 이 옵션과 무관. `allowInvalidCerts`는 항상 `false`로 저장(백엔드 필드는 호환 유지).
+- **대안 기각**: **`/models`에 Content-Type/Accept 헤더 추가로 재시도**(원인이 헤더 누락일 때만 해결 —
+  불확실, `/models`는 비필수) / **`x-generative-ai-user-email` 헤더 추가**(opencode·RAG 모두 미전송 —
+  현 증거상 불필요; 채팅 경로에서도 500이면 그때 후속 추가) / **라이브 모델 목록 유지**(깨진 엔드포인트
+  의존).
+- **한계/재검토**: 탐지가 configured→available이라 카드가 다소 낙관적으로 "Detected"를 표시(도달성은 연결
+  테스트·실제 대화가 진짜 검증 — 저렴한 헬스 엔드포인트 부재로 감수).
+
+---
+
+### D74. AI Pro 500의 진짜 원인 = 누락된 `User-Agent` — 요청에 `opencode/<ver>` UA 부착 (D73 정정)
+- **배경**: D73 이후에도 AI Pro 연결 테스트(이제 `POST /chat/completions`)가 정상 키로 **여전히 HTTP 500**
+  `{"detail": "'NoneType' object has no attribute 'split'"}`을 냈다. 앱을 배제하고 라이브 엔드포인트에
+  직접 curl로 요청을 변주하며 원인을 이분 탐색했다.
+- **진단(라이브 curl로 확정)**:
+  - 무인증 → 401. Bearer 인증 → 통과(401 아님) 후 **모든 authed 경로**(`/chat/completions`·`/models`·`/`·
+    없는 경로, 빈 body 포함)가 동일하게 500 `NoneType.split`. → 라우트/바디가 아니라 **요청 공통 요소**.
+  - 이메일 헤더(`x-generative-ai-user-email` 등 3종)·Fabrix 헤더(`x-fabrix-client`/`x-openapi-token`) 추가 →
+    변화 없음(500).
+  - **`User-Agent`가 결정적**이었다: UA를 붙이면(`curl/8.x`·`reqwest/…`·`node`·`axios`·`aipro-cli`·`Mozilla`)
+    게이트웨이가 **406 Not Acceptable**로 차단, UA를 빼면 백엔드에 도달하나 **500**(백엔드가 `ua.split("/")`를
+    하는데 UA가 None). **`User-Agent: opencode`/`opencode/<ver>`만** 게이트웨이 allowlist를 통과하고 백엔드
+    파싱도 성공해 **HTTP 200 + 정상 completion**(비스트림·스트림 모두 라이브 검증).
+  - 근거: AI Pro CLI(`@aipro/aipro-cli`)는 **opencode 기반**(rg 번들·MCP·skills·hooks 등 동일)이라 공식
+    클라이언트가 `opencode/<ver>` UA를 보낸다. `reqwest`는 기본 UA를 안 보내서 앱이 500을 맞았다.
+- **결정**: `aipro.rs`의 공유 `build_client`에 **`.user_agent("opencode/0.1.0")`**(상수 `OPENCODE_UA`)를 붙여
+  **모든 AI Pro 요청**(`chat_probe`·`run_aipro`)에 적용한다. 한 줄로 연결 테스트·실제 대화가 모두 동작.
+  범위는 aipro만(Fabrix/RAG는 별도 엔드포인트·헤더 — 무관).
+- **부수 개선**: 스트리밍 응답이 `delta.reasoning`(glm-5.1 추론 토큰)을 `delta.content` 앞에 보내므로
+  `parse_openai_sse_data`가 `reasoning`(및 `reasoning_content`)를 **`ThinkingDelta`**로 매핑(무응답 구간
+  체감 감소). 기존 `content`→`TextDelta`는 그대로.
+- **D73과의 관계**: D73의 설계(연결 테스트=최소 채팅 프로브, 모델=정적 카탈로그, cert-skip 제거)는 유지.
+  D74는 그 위에 **실제 동작을 가능케 한 근본 수정**이다. `/models`는 UA만 있으면 동작하지만 여전히 미사용
+  (모델을 정적으로 알고 있음 — D73).
+- **대안 기각**: UA 없이 우회(백엔드가 UA를 split해 500 — 불가) / 실제 브라우저/툴 UA(게이트웨이 406) /
+  이메일·Fabrix 헤더(무효, 라이브 확인) / `.user_agent`를 전 원격 모듈에 일괄 적용(Fabrix/RAG는 무관 —
+  aipro 스코프 유지).
+- **한계/재검토**: UA 값은 `opencode/0.1.0` 상수(라이브 검증). 게이트웨이가 향후 opencode **최소 버전**을
+  요구하면 상수만 상향. `reqwest`가 UA를 안 보낸다는 사실에 의존(향후 기본값이 생겨도 `.user_agent`가 우선).
+
+---
+
+### D75. Confluence 수집 403의 원인 = 누락된 `User-Agent` — 브라우저 UA 부착 + 오류 본문 노출 + TLS-skip 체크박스 제거 (D66/D73/D74 연장)
+> ⚠️ **대체(D82)**: REST 크롤(`HttpConfluence`)과 `CONFLUENCE_UA`는 **D82로 제거**되었다(Confluence를 공식 MCP
+> 서버로 전환). UA가 사내 `sdsdev.co.kr` 게이트웨이 통과의 열쇠라는 교훈은 유효하며, MCP 클라이언트도
+> `User-Agent: opencode/*`를 부착한다(D82). TLS 검증 상시 on 방침도 유지. 아래는 최초 결정.
+- **배경**: 지식 화면의 Confluence 수집이 정상 PAT로도 `HTTP 403 Forbidden — {baseUrl}/rest/api/content/<id>?expand=body.storage`로 실패했다(대상: 사내 `https://devops.sdsdev.co.kr/confluence`, Server/DC).
+- **원인**: `confluence.rs`의 `HttpConfluence::new` reqwest 클라이언트가 `.no_proxy()`(D66)·`.timeout()`·`.danger_accept_invalid_certs()`는 설정하지만 **`.user_agent(...)`가 없었다**. `reqwest`는 기본 UA를 보내지 않고, 사내 게이트웨이/WAF는 **UA 없는 요청을 403으로 차단**한다 — AI Pro가 UA 부착 전까지 실패하던 것과 **같은 클래스**(D74; 두 호스트 모두 `sdsdev.co.kr`). Bearer PAT 인증(`req.bearer_auth`)과 URL은 이미 정상이라 인증 스킴은 원인이 아니다. 형제 모듈 중 `aipro.rs`만 UA를 부착했고 `fabrix.rs`/`rag.rs`/`confluence.rs`는 미부착이었다(confluence만 이번에 부착 — 나머지는 무관해 스코프 유지, D74 관례).
+- **결정(수정)**:
+  - **브라우저형 UA 상수 `CONFLUENCE_UA`**(Chrome 계열 `Mozilla/5.0 …`)를 추가해 클라이언트 빌더에 `.user_agent(CONFLUENCE_UA)`로 부착한다. **증상이 403**(aipro의 500/406과 다름)이라 표준 Confluence+WAF는 일반 브라우저 UA를 원한다고 판단 — aipro의 커스텀 게이트웨이가 요구한 `opencode/*`가 아니라 브라우저 UA를 선택(사용자 확정). `.no_proxy()`는 유지(프록시 우회 — 사용자 요구 + D66).
+  - **오류 본문 노출**: `HttpConfluence::get`이 비2xx 시 응답 본문 스니펫(~300자, 공백 정규화)을 오류 메시지에 덧붙인다 — 잔여 403이 **WAF 차단 HTML**(게이트웨이/UA 문제)인지 **Confluence 권한 오류 JSON**(PAT 열람 권한 부족 — 코드 이슈 아님)인지 수집 진행/오류 UI에서 바로 구분 가능.
+  - **방어적 헤더/토큰**: 요청에 `Accept: application/json`을 부착하고, `bearer_auth`에 `token.trim()`을 넘긴다(프론트가 저장 시 이미 trim하지만 다른 저장 경로 방어).
+  - **TLS 검증 생략 체크박스 제거**: 지식 뷰 `ConfluenceSection`에서 `allowInvalidCerts` 체크박스·상태를 제거하고 저장 시 항상 `allowInvalidCerts: false`를 보낸다(인증서 검증 상시 on — 사용자 요구 "TLS 생략 불필요"). 백엔드 `ConfluenceConfig.allow_invalid_certs`(`#[serde(default)]`) 필드는 serde 호환을 위해 유지(항상 false) — **AI Pro D73의 cert-skip 제거와 동형**. 크롤과 연결 테스트(`probe_confluence`)는 같은 `HttpConfluence::new`/`get`을 타므로 한 곳 수정으로 둘 다 고쳐진다.
+- **대안 기각**: `opencode/0.1.0` UA(aipro 게이트웨이 값 — devops가 같은 게이트웨이면 필요할 수 있으나 403 증상은 표준 WAF 쪽이라 브라우저 UA 우선; 잔여 실패 시 오류 본문으로 확인 후 전환) / UA 미부착·프록시 경유(사내 직접 도달 전제 — D66) / `X-Atlassian-Token: no-check`(변경성 POST용, GET엔 불필요) / TLS-skip 유지(사용자가 불필요로 확정) / UA를 전 원격 모듈 일괄 적용(fabrix/rag는 무관 — confluence 스코프 유지).
+- **하위호환/영향**: 신규 Cargo/npm 의존성 0. `ConfluenceConfig` serde·타입 미러 무변경(프론트가 `allowInvalidCerts: false`를 계속 전송). 기존 크롤 파서/`FakeApi` 단위 테스트는 `HttpConfluence`를 우회하므로 무영향.
+- **한계/재검토**: UA가 브라우저형이라 만약 devops가 aipro와 **동일 커스텀 게이트웨이**면 406이 날 수 있다(그땐 오류 본문이 드러내며 `opencode/0.1.0`로 상수만 교체). 게이트웨이가 향후 특정 UA를 요구하면 상수만 상향. 403 본문이 Confluence 권한 오류면 PAT 사용자 열람 권한 문제(코드 밖).
+
+---
+
+### D76. 미리보기 HTML/마크다운의 외부 링크를 OS 브라우저로 — 링크 가드 (D42/D46/D69 연장)
+- **배경**: 운영 가이드(`guide`)는 결과를 자립형 HTML(`docs/operation-guide.html`)로 만들어 캔버스
+  `FileViewer`의 **샌드박스 iframe**(`sandbox="allow-scripts"`)에 미리보기로 띄운다. 이 HTML의 "참고
+  문서" 섹션 링크(`<a href="http://…">`)를 클릭하면 **뷰가 그 URL로 이동해 앱이 브라우저가 되고 원래
+  화면으로 못 돌아갔다**. 어디에도 링크 클릭을 가로채 OS 브라우저로 넘기는 코드가 없었고, 외부 열기
+  수단은 `openPath`(탐색기 — D69)뿐 `openUrl`은 미사용이었다.
+- **심각도 분석(두 프레임)**: ① **최상위 프레임의 마크다운 링크**(가장 치명적) — 채팅 응답
+  (`AssistantMessage`)과 `.md` 미리보기(`FileViewer`)의 링크는 React DOM의 평범한 `<a href>`라 클릭 시
+  **앱 전체가 교체**된다(복구 불가). ② **샌드박스 iframe HTML**(운영 가이드 `.html` + RAG '검색 결과'
+  패널 — D46) — `allow-top-navigation`이 없어 최상위는 못 바꾸지만 링크가 **iframe 자신(캔버스 pane)** 을
+  외부 사이트로 이동시켜 되돌아갈 수 없다. 사용자 요구는 두 표면 모두 수정.
+- **결정(2계층 프론트 링크 가드)**: 새 순수 모듈 `src/lib/linkGuard.ts` — `isExternalUrl`(http/https/
+  mailto만), `LINK_GUARD_SCRIPT`(주입 스크립트 문자열), `withLinkGuard(html)`(가장 이른 안전 지점에
+  `<script>` 삽입), `OW_OPEN_URL` 상수.
+  - **iframe**: parent가 불투명 origin iframe DOM에 리스너를 못 붙이므로, srcdoc에 **캡처단계 클릭/Enter
+    가드 스크립트**를 주입한다 — 외부 URL이면 `preventDefault()` 후 `window.parent.postMessage({type:
+    'ow-open-url', url}, '*')`. `App.tsx`의 단일 `message` 리스너가 메시지 shape+scheme를 재검증(불투명
+    origin이라 `event.origin==="null"` → origin 비교 불가)하고 `openExternal(url)`(= opener `openUrl`)로
+    OS 브라우저를 연다. `FileViewer::buildSrcdoc`(완결/조각 두 분기 모두)과 `CanvasPanel`의 RAG iframe
+    (`useMemo`)이 `withLinkGuard`를 통과한다. `foundation.ts`(`target="_blank"` 링크)는 무변경 — 가드가
+    클릭을 먼저 가로챈다.
+  - **최상위 마크다운**: `Markdown.tsx`의 `components`에 `a` 오버라이드 추가 — **모든 클릭 `preventDefault`**
+    (최상위 이동은 항상 치명적) 후 외부 URL만 `openExternal`. `AssistantMessage`·`.md` 미리보기 모두
+    `MarkdownView` 경유라 한 번에 커버(스트리밍 중 채팅은 평문이라 앵커 없음; `rehype-raw` 미설정).
+- **권한**: `openUrl`은 신규 grant 불필요 — `opener:default`가 이미 `allow-open-url`을 포함한다(D69의
+  `allow-open-path`는 default에 없어 따로 추가했던 것과 대조). capability 무변경.
+- **정책 분리**: iframe은 **최소 간섭**(`#앵커`·상대·`javascript:`는 그대로 둬 문서 내부 동작/토글 보존),
+  최상위 마크다운은 **전 클릭 차단**(보존할 in-page 앵커가 없고 — 목차는 index 기반 `jumpTo` — 이동은 곧
+  손실). `javascript:`/`data:`/`blob:`은 어느 경로에서도 외부로 열리지 않는다(parent가 http/https/mailto만
+  허용).
+- **대안 기각**: Rust `on_navigation`(wry 네비게이션 핸들러) — **최상위 프레임만** 잡고 iframe 자기 이동은
+  못 잡아 보고된 버그를 못 고친다. 게다가 창이 `tauri.conf.json`로 선언 생성되어 핸들러를 붙이려면
+  `WebviewWindowBuilder`로 창 생성을 `setup()`으로 옮기는 큰 리팩터가 필요 — 프론트 가드가 두 프레임을
+  모두 커버하므로 채택하지 않고 **향후 CSP-내성 backstop**으로만 남긴다. / `foundation.ts` 링크 수정 —
+  가드가 클릭을 가로채므로 불필요. / capability에 `opener:allow-open-url` 추가 — 이미 default에 포함이라 무의미.
+- **하위호환/영향**: 신규 Cargo/npm 의존성 0(전부 프론트). `FileViewer` "본문 복사"(D62)는 원본 `content`를
+  파싱하므로 주입 `<script>`가 복사물에 섞이지 않는다(무변경).
+- **한계/재검토**: 모델 생성 HTML이 `<head>`에 CSP `<meta>`를 넣으면 인라인 가드가 막힐 수 있다(그래서
+  최대한 앞에 주입 — 필요 시 Rust backstop으로 승격). iframe 내 상대경로 링크는 앱 자산으로 이동하나
+  운영 가이드엔 사실상 없음(최소 간섭으로 미간섭 — 잔여 리스크로 기록).
+
+---
+
+### D77. Confluence 수집 = 내장 WebView 내부 fetch로 WAF 우회 (스파이크; fetch/미리보기 MVP — D48/D65/D67 연장)
+> ⚠️ **대체(D82)**: 이 WebView 스파이크(`confluence_open_login`/`confluence_fetch_page`/`WebviewBridge`/
+> `INIT_SCRIPT`/`on_navigation` sentinel)는 **D82에서 전면 제거**되었다 — 공식 Confluence **MCP 서버**가
+> WAF 게이팅과 무관하게 동작해 브라우저-내-fetch 우회가 불필요해졌다. 아래는 최초 결정의 기록이다.
+- **배경**: Confluence REST(`/rest/api/`)가 사내 **WAF에 의해 Apache 계층에서 403**된다(응답이 Apache 기본
+  403 HTML). 진단으로 확정: `.no_proxy()`+브라우저 UA(D75)에도 403, **P1(강제 직결)·P2(프록시 경유)·T3(세션
+  쿠키) 모두 403** → 사내 아웃바운드 프록시가 아니라 컨플루언스 앞단 서버/WAF가 비브라우저 클라이언트를
+  차단. 쿠키+브라우저 헤더 조합의 수동 검증은 사용자 환경에서 어려움. 브라우저 웹 UI는 SSO로 정상 동작.
+- **결정(전략)**: 요청을 **앱 내장 WebView(실제 Chromium) 안에서 실행**해 게이팅 종류(UA/헤더/쿠키/TLS
+  지문) 무관하게 통과시킨다. **Playwright는 비권장**(수백 MB 의존성·단일 exe 배포(D43)·사내망 다운로드·SSO
+  자동화 취약 — 이 앱은 이미 WebView2 내장). **범위: fetch/미리보기만**(저장 보류 — `ingest_page`는 스텁 유지,
+  D65/D67).
+- **결정(회수 메커니즘 = `on_navigation` 인터셉트)**: Tauri 2.11의 `eval`은 **콜백 없는 fire-and-forget**이라
+  반환값을 못 받고, 원격 origin에 IPC를 열면 **remote-scoped ACL이 필요 + 페이지 CSP `connect-src`가
+  `ipc.localhost`를 막을 수 있으며 origin-confusion 보안 이슈**(GHSA-7gmj-67g7-phm9)가 있다. 그래서 주입
+  스크립트(`INIT_SCRIPT`의 `window.__owFetch`)가 same-origin `fetch()` 후 결과를 **sentinel URL
+  (`https://ow-ingest.local/r?reqId=..&d=<JSON>`)로 top-level 네비게이션**해 내보내고, `WebviewWindowBuilder`
+  의 **Rust `on_navigation` 클로저가 이를 가로채(취소, `false` 반환) 페이로드를 회수**한다. `on_navigation`은
+  top-level 네비게이션을 잡으므로(D76이 링크가드에서 기각한 사유 = **iframe 하위프레임** 미포착은 여기선
+  무관 — 전용 창의 top-level 이동) 동작하고, **capability/ACL/CSP-connect가 전혀 필요 없다**. 데이터는
+  `Url::query_pairs`로 자동 퍼센트 디코드.
+- **결정(구현)**: `confluence.rs`에 `WebviewBridge`(managed state: `counter` + `pending: Mutex<HashMap<reqId,
+  Sender>>`) + 커맨드 2개 — **`confluence_open_login`(sync=메인스레드 → 로그인 `WebviewWindow` 생성,
+  label `confluence-login`, `WebviewUrl::External(base)`, `initialization_script`+`on_navigation`)**,
+  **`confluence_fetch_page(page_id)`(async=메인스레드 밖 → `run_on_main_thread`로 `eval(__owFetch)` 디스패치
+  후 `on_navigation`이 채널로 넘긴 결과를 `spawn_blocking`+`recv_timeout(90s)`로 대기)**. `WebviewFetchResult
+  {ok,status,title,bodyHtml,raw}` 반환(성공 시 기존 `parse_page` 재사용, 실패 시 `raw`로 WAF 403 HTML 확인).
+  순수 파서 `parse_nav_payload` 단위테스트. `lib.rs`에 state·커맨드 등록. 프론트: `api.ts` 래퍼 2개
+  + 지식 뷰 `ConfluenceSection`에 "WebView로 가져오기(실험)" UI(로그인 창 열기 + 페이지 ID + 가져오기 +
+  미리보기). **신규 Cargo/npm 의존성 0, capability/`tauri.conf.json` 무변경.**
+- **게이트/후속(Phase 1)**: 스파이크가 1페이지 성공(200+본문)하면 `WebviewConfluence`(두 번째 `ConfluenceApi`
+  impl)로 기존 `crawl` 재사용해 재귀 fetch로 확장. 저장(지식 베이스/ingest)은 별도 결정.
+- **대안 기각**: 경량 쿠키 추출(reqwest+쿠키) — WAF가 TLS 지문까지 보면 실패, 검증도 어려움(그래서 게이팅
+  무관한 in-WebView 채택) / 원격 IPC(`invoke`) — ACL+CSP+보안 리스크 / `eval`-콜백 — 2.11에 공개 API 없음 /
+  네비게이션 대신 title/커스텀스킴 회수 — 더 취약.
+- **리스크/한계**: 페이지 CSP에 (드문) `navigate-to`가 있으면 sentinel 네비게이션이 렌더러에서 막혀 회수
+  실패(→ 타임아웃으로 표면화, 그때 다른 메커니즘 재검토). sentinel URL 길이 한계(대형 페이지 → 후속 청킹
+  필요, 스파이크는 단일 네비게이션). WebView2 쿠키 스토어는 시스템 Edge와 분리 → 앱 창에서 별도 SSO
+  로그인·세션 만료 시 재로그인. 원격 에이전트처럼 **저장측(ingest)은 미구현**(보류).
+
+---
+
+### D78. 요구사항 우선 필드 + 첫 작업 턴 '프롬프트 최적화' 내장 스킬 + '프롬프트' 캔버스 탭 (D36/D40/D46 확장)
+- **배경**: 카테고리 가이드 플로우는 진입 시 고정 선택지 폼(캔버스 '요구사항' 탭, D36)을 먼저 보여주고 제출이
+  첫 작업 턴을 발사한다. 사용자 요구 두 가지 — ① **"뭘 하고 싶은지"가 폼에서 우선**되어야 한다(기존 자유
+  텍스트 질문 constraints/topic/target은 각 카탈로그 맨 뒤에 있어, 카테고리 카드로 시작하면 요구사항 자체를
+  적을 곳이 없었다), ② 폼 제출 후 답변을 바탕으로 **AI가 프롬프팅 기법을 총동원한 "최적 프롬프트"를 완성해
+  캔버스에 보여준다**(사용자가 쓰면서 프롬프팅 개선법을 학습하는 교육 효과). 사용자 명시 구현 방식:
+  **프로그램 구조를 바꾸지 말고, 기존 스킬 주입 기능에서 모든 카테고리의 첫 턴에 스킬 하나를 더 얹는 것**.
+- **핵심 판단**: 기존 인프라(옵션 프리플로우 D36, 스킬 주입 D40, 인메모리 캔버스 탭 D46, fenced-block 파서
+  D30/D59)에 그대로 얹힌다 — **신규 백엔드/IPC/의존성 0**(전부 프론트).
+- **결정(요구사항 필드)**: `REQUIREMENT_QUESTION`(id `userRequest`, text, required, `noPrefill`)을 **모든 카테고리
+  폼 맨 앞**에 프리펜드(`optionsFor` — codebase 질문보다도 앞). 홈 프롬프트(seed)로 시작하면 그 텍스트로
+  **클라이언트가 결정적으로 자동 채움**(`onPrefill({userRequest: seed})`, 수정 가능) — 에이전트 프리필 대상에서
+  제외(`ClarifyQuestion.noPrefill` 신설 → `prefillInstruction`/`parsePrefill` 둘 다 스킵; 에이전트가 재서술하면
+  손실). 프리필 완료 시 `handlePrefill`이 전체 교체이므로 완료 분기가 **seed를 병합**해 요구사항 값을 지키지
+  않게 한다. 요구사항 답변은 **wire에서 빼지 않는다**(`formatClarifyAnswers`가 포함 — 최적 프롬프트 생성의
+  핵심 입력). 답변은 `answerSubmission.requirement`로도 실어 ChatPanel이 사용자 버블로 쓰고 seed 덧붙임(‘원래
+  요청’)을 생략한다(중복 제거).
+- **결정(내장 스킬 = 레지스트리 밖 런타임 주입)**: `PROMPT_OPTIMIZER_SKILL`(`lib/promptCraft.ts`)은 **코드
+  하드코딩·런타임 전용** — Flows 편집기/settings.json/백엔드에 노출되지 않는다. D39 전체 교체형 레지스트리라
+  `DEFAULT_SKILLS`에 넣으면 override 저장 사용자에게 유실되므로, **레지스트리 밖에서 항상 주입**한다. 주입 시점은
+  스텝 arming과 **독립적인 첫 실제 작업 턴**(`promptSkillPendingRef`, 대화당 1회, 프리필 턴 제외, 로드 세션 없음) —
+  `skillBodies.unshift`로 wire 최상단에 얹고 `unwindSkills`에 되감기를 동봉해 preflight 중지·**스킵 재귀 send
+  체인**(guide의 첫 rag가 스킵돼도 다음 생성형 턴에 재주입)·spawn 실패 세 지점을 자동 커버한다.
+- **결정(펜스 계약 + '프롬프트' 탭)**: 에이전트가 응답 맨 앞에 ` ```prompt ` 펜스로 최적 프롬프트를 낸 뒤 **같은
+  턴에서 실제 작업을 계속**한다(추가 턴/확인 게이트 없음). `end`에서 `parsePromptBlock`(태그 일치만, **폴백 없음** —
+  나머지는 작업 산출물)이 블록을 뽑아 `stripPromptBlock`(→ `PROMPT_NOTE`)으로 채팅에서 제거하고(세션리스
+  transcript 재전송 시 블록 재노출·재출력 방지; `mutateMessages` 동기 커밋 D55, `persist`보다 앞) `onPromptResult`로
+  캔버스 **'프롬프트' 탭**(rag 탭 동형 — 인메모리 평문, 세션 유지, 도착 시 자동 전환 D46; 복사 버튼)에 표시한다.
+  실패/취소 end는 파싱 생략(스트림 실패는 skill dedupe와 동일하게 되감지 않음 — wire가 이미 도달).
+- **대안 기각**: 별도 생성 턴/확인 게이트(턴 추가·마찰 — 사용자 기각) / `DEFAULT_SKILLS` 등록(override 사용자
+  미적용) / 전체 응답 폴백 파싱(작업 응답 전체를 프롬프트로 오인) / 스텝 기반 주입(guide rag 스킵 시 첫 턴을
+  놓침 — 첫 "실제 에이전트 턴" 기준이 정확).
+- **하위호환/한계**: 프론트 전용 타입(`noPrefill`은 serde 미러 아님). plain(opencode/antigravity)·원격
+  (fabrix/aipro)·세션리스(gemini)가 펜스를 안 지키면 파싱 실패 → '프롬프트' 탭 없음, 작업은 그대로(폴백 없음이
+  의도, D34/D40 degrade와 일관). 스트리밍 중에는 펜스 원문이 잠시 보이다 완료 시 `PROMPT_NOTE`로 치환(D57
+  "스트리밍 중 평문" 관례). 전 턴 실패 후 D68 자동 재시도 턴은 스킬 dedupe와 같은 의미론이라 프롬프트가
+  재주입되지 않을 수 있다(교육 표시라 수용).
+
+---
+
+### D79. Claude fallback 모델 카탈로그 최신화 — 별칭 우선 + 현행 세대 pinned (D12 콘텐츠 정책)
+- **배경**: Claude Code 에이전트를 고르면 모델 드롭다운에 구세대(`claude-opus-4-5`/`claude-sonnet-4-5`/
+  `claude-haiku-4-5`)만 보였다. Claude는 라이브 모델 조회 경로가 없어(`models_probe: None` — D12,
+  MMS 라우트 미포팅) `detect.rs`가 항상 `agents.rs`의 **정적 fallback 카탈로그**를 반환하는데, 그
+  카탈로그가 4.5세대로 하드코딩돼 있었기 때문이다(D66 모델 캐시는 원격 에이전트 전용 — claude 무관).
+- **결정**: `agents.rs`의 claude `fallback_models`를 **별칭 우선 + 현행 세대 pinned**로 교체한다 —
+  `opus`/`sonnet`/`haiku`(Claude Code CLI가 항상 최신 세대로 해석하므로 잘 안 낡음)를 앞에 두고, pinned
+  ID를 현행(`claude-opus-4-8`/`claude-sonnet-5`/`claude-haiku-4-5`, 라벨은 친숙한 이름)으로 갱신한다.
+  `&'static` 상수라 **재빌드해야 반영**된다. D12의 "claude는 fallback 전용" 판단은 그대로 두고, 이건 그
+  카탈로그의 **콘텐츠 정책**이다.
+- **근거**: 라이브 조회가 없어 카탈로그가 낡으면 곧바로 UI stale로 드러난다. 별칭을 앞세우면 CLI의 자동
+  해석에 기대어 재빌드 없이도 최신을 쓸 수 있고, pinned는 세대 고정 선택지를 제공한다(현행 세대 유지는
+  주기적 갱신 대상). 소비처(`AgentCard`/`HomeView`/`ChatPanel`)가 백엔드 배열을 그대로 렌더하므로 def
+  배열만 고치면 UI에 즉시 반영된다(프론트/타입/캐시 변경 0).
+- **대안 기각**: 별칭만 유지(세대 고정 pin 불가) / 라이브 조회 도입(MMS 프록시 인프라 필요 — D12 범위 밖) /
+  전체 세대 명시(목록 과다). 모델 ID는 공식 레퍼런스로 확정한 현행 문자열이며, pinned는 설치 CLI/계정이
+  거부할 수 있으나 fallback 표시용 정적 값이고 별칭으로 최신 사용이 보장된다.
+- **한계/재검토**: 세대가 넘어가면 pinned를 다시 갱신해야 한다(별칭은 자동 추종). codex/gemini/antigravity
+  카탈로그는 이번 범위 밖(요청은 claude 한정).
+
+---
+
+### D80. codex 샌드박스 = workspace-write (danger-full-access에서 하향) + 엔터프라이즈 정책 한계 (D24/D28 연장)
+- **배경**: Codex CLI 실행이 `Error: invalid value for allowed_sandbox_modes: [WorkspaceWrite] is not
+  in the allowed set must include 'read-only' to allow any PermissionProfile (set by enterprise-managed
+  requirements Group requirements ...)`로 실패했다. 조사 결과 두 층위의 원인이다: ① 앱이
+  `codex_build_args`(agents.rs)에서 샌드박스를 **`danger-full-access`로 하드코딩**(create `--sandbox`,
+  resume `-c sandbox_mode`)해 넘겼고, ② 사용자 머신의 **엔터프라이즈 관리 codex 정책**(cloud "Group
+  requirements")이 `allowed_sandbox_modes`를 `["workspace-write"]`로 두되 **`read-only`를 빠뜨려**, 최신
+  codex가 이를 `Constrained<PermissionProfile>`로 변환할 때 config 로드 단계에서 하드 에러로 거부한다
+  (codex-rs `config/src/config_requirements.rs` — read-only는 모든 PermissionProfile의 floor라 필수).
+- **결정**: 앱의 codex 샌드박스를 `danger-full-access` → **`workspace-write`**로 낮춘다(create/resume
+  두 분기). 문서 생성은 cwd(워크스페이스 루트) 쓰기만 필요하므로 workspace-write면 충분하고, 이는 사내
+  정책의 허용 상한과 호환된다. 아울러 이 부류 오류를 `workspace.ts::errorHint`가 인식해 **한글 안내 +
+  대체 에이전트 유도**를 표시하도록 한다(D28 TLS 케이스 관례). 샌드박스 모드의 **설정 노출·자동 폴백은
+  미도입**(사용자 선택: 최소 교체 — RunArgs/RunCtx/settings/UI 무변경).
+- **정책은 앱이 못 고친다(핵심)**: requirements는 **하드 실링**이라 클라이언트가 `-c`/`--sandbox`로 상한을
+  넓히거나 `allowed_sandbox_modes`를 덮어쓸 수 없다. ②의 config-로드 오류는 **어떤 샌드박스 모드로도**
+  동일하게 나므로(앱뿐 아니라 수동 `codex exec`도 실패), **표시된 오류의 실제 해소는 IT/관리자가 정책의
+  `allowed_sandbox_modes`에 `read-only`를 포함(예: `["read-only","workspace-write"]`)하거나
+  `allowed_permission_profiles` 체계로 이관**하는 것이다(D28과 동류의 환경 제약 — 앱은 안내·회복만 제공).
+  앱의 workspace-write 전환은 정책 정정 후 정상 동작을 위한 정합성 수정이자, danger-full-access 과요구
+  제거다(정책 정정 후에도 danger는 `DangerFullAccess is not in the allowed set`로 거부됨 — codex #18242).
+- **대안 기각**: 설정 노출(단일 조직 환경엔 과설계) / 정책 실패 시 자동 폴백(config-로드 단계 하드 에러는
+  어떤 모드로도 실패해 무효) / config.toml·env 주입으로 우회(관리 계층이 우선순위가 높아 불가).
+- **한계/재검토**: workspace-write는 기본 네트워크 차단(문서 생성엔 무관)이고, 코드베이스 분석(D45)에서
+  cwd 밖 코드베이스 폴더 읽기는 대체로 허용되나 Windows codex 샌드박스 동작에 버전차가 있어 E2E 확인
+  필요 — 읽기가 막히면 `sandbox_workspace_write` 읽기 범위/`writable_roots` 조정을 후속 검토(범위 밖).
+
+---
+
+### D81. 홈 컴포저 프롬프트 → 카테고리 자동 분류 (WorkspaceView 격리 분류 턴 + plan 폴백)
+- **배경**: Home 컴포저에 프롬프트를 입력해 시작하면 `HomeView.send()`가 `start("plan")`으로 카테고리를
+  **무조건 `plan`(개발 계획 수립)** 으로 하드코딩해, 어떤 요청이든 개발 계획 워크플로우로 진입했다(카테고리
+  카드 클릭만 각 id를 넘김). 사용자 요구 — **처음 프롬프트를 근거로 4개 카테고리(`plan`/`guide`/`query`/
+  `change`) 중 가장 어울리는 것으로 자동 라우팅**한다. 카드 클릭은 명시적 선택이라 분류하지 않고, 불명확·
+  실패 시 `plan`으로 폴백(기존 동작 유지).
+- **핵심 제약**: ① 카테고리는 `ChatPanel` **마운트 시 고정(freeze)** 되는 refs(`WF`/`optionQuestions`/
+  `skillMapRef`/`stepProgress` 초기값)를 구동하므로 카테고리를 바꾸려면 그 카테고리로 **마운트**해야 한다.
+  ② 분류 격리 턴은 **유효한 `cwd`가 필수**다(`run.rs`가 빈 cwd 거부 + `current_dir`). 자동 프로젝트 workdir는
+  `ensureProject`가 만들어야 존재하므로 **Home 화면에서는 cwd가 없다** → 워크스페이스 진입 후 분류한다.
+- **결정(Option B — WorkspaceView가 분류, ChatPanel은 최종 카테고리로 1회 마운트)**: `ChatPanel`의 가장
+  취약한 세 지점(boot effect/`send()`/`stop()`)을 **건드리지 않는다.** `WorkspaceView`가 진입 시
+  (a) `ensureProject`로 cwd 확정(+`setResolvedWorkdir`) → (b) 새 모듈 `lib/categorize.ts`의
+  `classifyCategory`(격리 에이전트 턴, `judgeRagRelevance`(D70)/`generateKnowledgeSummary`(D59) 패턴을 그대로
+  복제 — 세션 없이 1회 실행, `` ```category `` fenced JSON 파싱, 실패 시 `null`) 실행 → (c) `activeCategory`
+  확정 후 `ChatPanel`을 그 카테고리로 **딱 한 번** 마운트한다(리마운트 없음, 고정-refs 불변식을 구성적으로
+  충족). 분류 중에는 채팅 컬럼에 "작업 유형 분석 중… + 중지" placeholder를 표시하고, `ChatPanel`은 그동안
+  마운트하지 않는다. 실패/취소/`null` → `"plan"` 폴백. **신규 백엔드/의존성 0, 프론트 전용.**
+- **분류 신호 배선**: `HomeView.onStart`에 trailing optional `autoCategory?: boolean` 추가 — 컴포저 `send`는
+  `start("plan", true)`(잠정 plan + 분류 요청), 카테고리 카드는 `start(id)`(false). `HomeArea`가 `autoCategory`
+  state로 캡처해 `WorkspaceView`로 전달. `WorkspaceView.classifying` 초기값 =
+  `autoCategory && !initialSession && !!seedPrompt.trim()`(빈 프롬프트·카드·loaded session·recent-no-session은
+  분류 안 함). 분류 effect는 `classifyStartedRef` 가드(ChatPanel `bootedRef` 패턴 — cleanup 없음, StrictMode
+  이중 실행 no-op). 분류 턴 취소는 `classifyCancelRef`(placeholder 중지 버튼 → `cancel()` → `null` → plan).
+- **project.json category는 vestigial**: 분류 전 `ensureProject`가 잠정 `"plan"`을 매니페스트에 1회 기록하고
+  (idempotent — 이후 호출은 그대로 반환), 실제 분류 카테고리는 마운트된 `ChatPanel`의 `persist()`가
+  **`SessionMeta.category`** 로 저장한다. 프론트에서 `Project.category`/`ProjectSummary.category`를 읽는 코드는
+  없고(재열기는 `session.category` 사용) 최근 목록에도 표시하지 않으므로, 잠정 plan이 박혀도 **표시·재열기에
+  영향 없다**(별도 `set_project_category` 커맨드는 죽은 데이터라 도입하지 않음).
+- **대안 기각**: **Home에서 분류**(cwd·projectId가 없어 프로젝트 라이프사이클을 HomeView로 끌어와야 함 +
+  Home UI 블로킹) / **ChatPanel boot에서 분류 후 리마운트**(잠정 카테고리로 마운트했다 버림 — boot/`send`/
+  `stop` 세 지점을 건드려 streaming 플래그 누출·`preflightAbortRef` 교차간섭 위험, 리마운트 낭비) /
+  **`set_project_category` 백엔드 커맨드로 매니페스트 정정**(vestigial 데이터라 불필요).
+- **하위호환/한계**: 프론트 전용 타입(`autoCategory`는 serde 미러 아님). 분류는 **추가 격리 턴 1회**라 진입에
+  수 초의 "분석 중" 구간이 생긴다(prefill 턴처럼 숨김·중지 가능; aipro 등 느린 백엔드에선 더 길 수 있음 —
+  D68 재시도와 무관, 분류 실패는 plan 폴백). plain(opencode/antigravity)·원격(fabrix/aipro)·세션리스(gemini)가
+  펜스를 안 지키면 파싱 실패 → plan 폴백(D34/D40 degrade와 일관). 분류 근거는 초기 프롬프트 텍스트만
+  사용한다(옵션 답변 이전 시점).
+
+---
+
+### D82. Confluence 연결 = 공식 MCP(streamable HTTP, JSON-RPC 2.0) 클라이언트 + 로컬 지식 베이스 수집 (D48/D65/D75/D77 대체)
+- **배경**: 기존 Confluence 연결(REST 크롤 + WebView 스파이크)은 **실제로 값을 전달한 적이 없다** — REST가
+  사내 WAF에 403으로 막히고(D75), WebView 우회(D77)는 실험 단계였으며, 최종 sink `RagClient::ingest_page`가
+  **항상 "미구현" 에러를 반환하는 스텁**(rag-chat에 ingest 엔드포인트 없음 — D65)이라 모든 페이지가
+  `PageFailed`로 끝났다. 사용자는 사내에서 **공식 제공 Confluence MCP 서버**
+  (`https://sdsdev.co.kr/mcp-confluence/mcp`, streamable HTTP + `x-auth` 헤더)로 연결에 성공했고, 이를
+  차용해 ① 설정 화면에서 URL(프리필)+x-auth 키를 저장, ② MCP 연결 테스트, ③ 이후 수집을 MCP로 처리하기를 원했다.
+- **핵심 판단**: `confluence.rs`의 BFS 엔진(`crawl` + `ConfluenceApi` 트레이트 + `IngestEvent`/`IngestRegistry`)과
+  그 `FakeApi` 단위 테스트는 transport와 무관하므로 **그대로 둔다**. 바꾸는 것은 **transport(REST→MCP)** 와
+  **sink(RAG 스텁→로컬 지식 베이스)** 둘뿐이다. HTTP는 `fabrix.rs`/`aipro.rs`의 `reqwest` blocking+native-tls
+  +`.no_proxy()`(D66) 레시피 재사용 — **신규 crate 0**(JSON-RPC framing·SSE는 `serde_json`으로 hand-roll).
+- **결정(MCP 클라이언트 = 신규 `mcp.rs`)**: Confluence를 모르는 범용 **MCP-over-streamable-HTTP JSON-RPC 2.0
+  클라이언트**(`McpSession`). handshake = `initialize`(응답 헤더 `Mcp-Session-Id` 캡처, `protocolVersion` 반영)
+  → `notifications/initialized` → `tools/list`. 요청 헤더 = `Content-Type: application/json` +
+  `Accept: application/json, text/event-stream` + `x-auth` + (post-init) `Mcp-Session-Id`/`MCP-Protocol-Version`.
+  응답은 **`application/json`(단일 JSON-RPC)와 `text/event-stream`(SSE) 양쪽 모두** 처리(본문을 통째로 읽어
+  content-type 분기 — MCP 도구 응답은 유한 메시지라 증분 리더 불필요; 120초 total timeout이 hung 스트림을
+  bound). 세션 전략 = **operation당 1회 handshake**(전역 캐시 없음; mid-op HTTP 404면 1회 재handshake 후 재시도).
+  `sdsdev.co.kr` 게이트웨이가 UA를 gate하므로(D74/D75) `User-Agent: opencode/0.1.0` 부착(406/403이면 조정).
+  순수 파서(`parse_jsonrpc_body`/`sse_event_to_result`/`tool_result_text`/`parse_tools`/`arg_key_for`) 단위 테스트.
+- **결정(수집 = MCP 크롤 → 지식 베이스 artifact)**: `McpConfluence`가 기존 `ConfluenceApi`를 구현
+  (`RefCell<McpSession>` — 트레이트 `&self` + `call_tool` `&mut`; getPageById/getChild/searchContent 호출,
+  결과 텍스트를 관대 파싱). 도구 이름·인자 키는 `tools/list`의 스키마에서 해석(`arg_key_for`, 폴백 포함) —
+  와이어 계약을 하드코딩하지 않음. `start_confluence_ingest`는 **`ConfluenceTarget{rootPageId, searchQuery}`**
+  (제거된 config 필드 대체 — 수집 패널에서 per-run 전달)를 받아 `crawl`을 돌리고, 각 페이지를 버퍼에 모아
+  **트리 전체를 artifact `KnowledgeEntry` 1개**로 저장한다(`knowledge.rs`의 신규 in-memory writer
+  `save_knowledge_docs` — staged-swap; 페이지=파일, body=요약+제목 색인). 페이지당 note는 16KB 주입 상한을
+  몇 건 만에 초과하므로 artifact 모델(D59: 요약+파일 색인만 주입, extraDirs로 원문 읽기)이 정답. 취소 시에도
+  부분 버퍼를 저장. `IngestEvent`/`Channel`/`IngestRegistry` 진행·취소는 그대로. **RAG 의존 제거**(더 이상
+  `settings.rag`/`RagClient` 로드 안 함).
+- **결정(연결 테스트)**: `probe_confluence` = `McpSession::connect`(initialize+tools/list) 후 "연결됨 — N개 도구
+  (getChild, searchContent, …)". 잘못된 x-auth → HTTP 401/403 + 본문 스니펫.
+- **결정(설정·UI)**: `ConfluenceConfig`를 `{ url, auth_key }`로 재구성(구 `baseUrl`/`token`/`rootPageId`/
+  `spaceKey`/`allowInvalidCerts`는 serde가 unknown 필드로 무시 — 마이그레이션 없이 로드, `url` 빈값→미설정
+  → 사용자 재저장, URL은 프리필). `set_confluence_config`는 url trim + auth_key trim/empty→None. UI는 지식 뷰
+  `ConfluenceSection`을 **URL(프리필)+x-auth 2필드 + 연결 테스트 + 수집 대상(루트 페이지 ID/검색어) 패널**로
+  재작성; WebView 스파이크·PAT·루트/스페이스·TLS 필드 전부 제거. `rag.rs`의 `confluence.allow_invalid_certs`
+  참조 2곳은 `false`로 교체(TLS 상시 on, D75 일관).
+- **삭제**: `HttpConfluence`(REST)·`CONFLUENCE_UA`·WebView 스파이크(`confluence_open_login`/
+  `confluence_fetch_page`/`WebviewBridge`/`WebviewFetchResult`/`parse_nav_payload`/`INIT_SCRIPT`)와 그 커맨드
+  등록·managed state. 프론트 `confluenceOpenLogin`/`confluenceFetchPage`/`WebviewFetchResult`.
+- **대안 기각**: **온디맨드 검색 뷰만**(대량 수집 대신 검색 — 사용자가 "지식 베이스로 수집" 선택) /
+  **RAG ingest 구현으로 sink 유지**(rag-chat에 ingest 엔드포인트 없음 — 불가) / **페이지당 note 엔트리**
+  (16KB 상한 초과·목록 오염) / **REST 크롤 유지 + fallback**(WAF 403이 근본 문제 — 사용자가 전면 제거 선택) /
+  **incremental SSE 리더**(도구 응답이 유한 메시지라 전체 읽기가 단순·충분).
+- **하위호환/한계**: `ConfluenceConfig`는 `#[serde(default)]`라 구 settings.json 무변경 로드(구 필드 무시).
+  `ingest_page` 스텁은 rag.rs에 남지만 Confluence가 더 이상 타깃 안 함(D65 유지). **MCP 도구 I/O 실제 shape은
+  런타임에 확정** — 파서가 여러 후보 키를 관대하게 시도하고(id: `id|pageId|contentId`, body:
+  `body.storage.value|body|content|value|text`, 목록: `results|children|pages|…`) 비-JSON 텍스트는 본문으로
+  폴백하지만, 서버가 예상 밖 shape면 연결 테스트의 도구 목록·실제 수집 결과로 확인·조정이 필요하다.
+  getChild는 페이지네이션 없이 전체 자식을 반환한다고 가정(REST식 start 무시).

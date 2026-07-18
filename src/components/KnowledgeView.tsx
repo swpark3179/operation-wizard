@@ -1,10 +1,10 @@
 // 지식 view (D48): everything about external/in-house knowledge in one place —
-// ① the user's RAG service endpoint, ② Confluence crawl + ingestion (with live
+// ① the user's RAG service endpoint, ② Confluence MCP collection (with live
 // Channel progress), ③ the knowledge base entries injected into the foundation
 // phase's knowledge step. Separate from Flows (flow *definition* vs knowledge
 // *content* management).
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BookOpen,
   ChevronDown,
@@ -17,9 +17,10 @@ import {
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
   deleteKnowledge,
+  getSettings,
   listKnowledge,
   probeConfluence,
-  ragSearch,
+  probeRag,
   saveKnowledge,
   setConfluenceConfig,
   setRagConfig,
@@ -52,10 +53,27 @@ function RagSection({
   const [secretKey, setSecretKey] = useState(cfg?.secretKey ?? "");
   const [passKey, setPassKey] = useState(cfg?.passKey ?? "");
   const [topK, setTopK] = useState(cfg?.topK != null ? String(cfg.topK) : "");
+  const [assetId, setAssetId] = useState(cfg?.knowledgeAssetId ?? "");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [probe, setProbe] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [showModels, setShowModels] = useState(false);
+  // Backend-owned model cache (filled by save / 연결 테스트, shown without a
+  // network call — cache-first, D66). The RAG search itself uses a fixed model.
+  const models = cfg?.models ?? [];
+
+  // Re-seed inputs when settings reload (e.g. after a save elsewhere) — matches
+  // FabrixCard; without it the form keeps stale values after onSettingsChange.
+  useEffect(() => {
+    setEndpoint(cfg?.endpoint ?? "");
+    setSecretKey(cfg?.secretKey ?? "");
+    setPassKey(cfg?.passKey ?? "");
+    setTopK(cfg?.topK != null ? String(cfg.topK) : "");
+    setAssetId(cfg?.knowledgeAssetId ?? "");
+    setSaved(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings]);
 
   const save = async () => {
     setSaving(true);
@@ -70,11 +88,16 @@ function RagSection({
               secretKey: secretKey.trim() || null,
               passKey: passKey.trim() || null,
               topK: Number.isFinite(k) && k > 0 ? k : null,
+              knowledgeAssetId: assetId.trim() || null,
             }
           : null,
       );
       onSettingsChange(next);
       setSaved(true);
+      // On save, fetch the model list (proxy-bypassed) and cache it (D66). The
+      // fetch persists into settings.rag.models; reload to show it. A fetch
+      // failure is surfaced but does not fail the save.
+      if (endpoint.trim()) await refreshModels();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -82,29 +105,37 @@ function RagSection({
     }
   };
 
-  const test = async () => {
-    setProbe(null);
+  // Run the connection test (fetches + caches the model list) then reload
+  // settings so the freshly-cached list renders.
+  const refreshModels = async () => {
     try {
-      const hits = await ragSearch("연결 테스트", 1);
-      setProbe({ ok: true, msg: `연결됨 (${hits.length}건 응답)` });
+      const msg = await probeRag();
+      setProbe({ ok: true, msg });
+      onSettingsChange(await getSettings());
     } catch (e) {
-      // The rag.rs stub's developer message is rephrased for end users (D57).
+      // The rag.rs error message is rephrased for end users (D57).
       setProbe({ ok: false, msg: ragUserError(String(e)) });
     }
+  };
+
+  const test = async () => {
+    setProbe(null);
+    await refreshModels();
   };
 
   return (
     <div className={cardCls}>
       <div className="mb-1 font-serif text-[15px] font-semibold text-ink-strong">RAG 검색 설정</div>
       <p className="mb-3 text-[12px] leading-[1.5] text-ink-muted">
-        기반 단계의 'RAG 검색'이 조회할 내 RAG 서비스입니다. Secret/Pass 키는 요청 헤더로
-        전달되는 값이며, 실제 호출 코드는 <span className="font-mono">src-tauri/src/rag.rs</span>의{" "}
-        <span className="font-mono">TODO(user)</span> 스텁을 채워 구현합니다. 키는
-        settings.json에 평문으로 저장되니 읽기 전용 키를 권장합니다.
+        기반 단계의 'RAG 검색'이 조회할 사내 RAG(Fabrix rag-chat) 서비스입니다. 두 키는{" "}
+        <span className="font-mono">x-fabrix-client</span>·
+        <span className="font-mono">x-openapi-token</span> 요청 헤더로 전달되며 settings.json에 평문으로
+        저장되니 읽기 전용 키를 권장합니다. 모델은 GLM 5.2를 사용하고, Knowledge Asset ID를 비워두면 샘플
+        자산으로 조회합니다.
       </p>
-      <div className="mb-2.5 grid grid-cols-[1fr_160px_160px_72px] gap-2.5">
+      <div className="mb-2.5 flex flex-col gap-2.5">
         <div>
-          <label className={labelCls}>Endpoint URL</label>
+          <label className={labelCls}>ENDPOINT_URL</label>
           <input
             value={endpoint}
             onChange={(e) => {
@@ -112,52 +143,100 @@ function RagSection({
               setSaved(false);
             }}
             disabled={saving}
-            placeholder="https://rag.example.com"
+            placeholder="https://nsds-api.fabrix-s.samsungsds.com/sds/trial/api-rag-chat"
             className={inputCls + " font-mono text-[12px]"}
           />
         </div>
-        <div>
-          <label className={labelCls}>Secret Key</label>
-          <input
-            type="password"
-            value={secretKey}
-            onChange={(e) => {
-              setSecretKey(e.target.value);
-              setSaved(false);
-            }}
-            disabled={saving}
-            placeholder="비워두면 미사용"
-            className={inputCls + " font-mono text-[12px]"}
-          />
+        <div className="grid grid-cols-2 gap-2.5">
+          <div>
+            <label className={labelCls}>x-fabrix-client</label>
+            <input
+              type="password"
+              value={secretKey}
+              onChange={(e) => {
+                setSecretKey(e.target.value);
+                setSaved(false);
+              }}
+              disabled={saving}
+              placeholder="비워두면 미사용"
+              className={inputCls + " font-mono text-[12px]"}
+            />
+          </div>
+          <div>
+            <label className={labelCls}>x-openapi-token</label>
+            <input
+              type="password"
+              value={passKey}
+              onChange={(e) => {
+                setPassKey(e.target.value);
+                setSaved(false);
+              }}
+              disabled={saving}
+              placeholder="Bearer 포함 · 비워두면 미사용"
+              className={inputCls + " font-mono text-[12px]"}
+            />
+          </div>
         </div>
-        <div>
-          <label className={labelCls}>Pass Key</label>
-          <input
-            type="password"
-            value={passKey}
-            onChange={(e) => {
-              setPassKey(e.target.value);
-              setSaved(false);
-            }}
-            disabled={saving}
-            placeholder="비워두면 미사용"
-            className={inputCls + " font-mono text-[12px]"}
-          />
-        </div>
-        <div>
-          <label className={labelCls}>Top K</label>
-          <input
-            value={topK}
-            onChange={(e) => {
-              setTopK(e.target.value);
-              setSaved(false);
-            }}
-            disabled={saving}
-            placeholder="5"
-            className={inputCls + " font-mono text-[12px]"}
-          />
+        <div className="grid grid-cols-[1fr_96px] gap-2.5">
+          <div>
+            <label className={labelCls}>Knowledge Asset ID</label>
+            <input
+              value={assetId}
+              onChange={(e) => {
+                setAssetId(e.target.value);
+                setSaved(false);
+              }}
+              disabled={saving}
+              placeholder="비워두면 샘플 자산 사용 (019f5a11-…)"
+              className={inputCls + " font-mono text-[12px]"}
+            />
+          </div>
+          <div>
+            <label className={labelCls}>Top K</label>
+            <input
+              value={topK}
+              onChange={(e) => {
+                setTopK(e.target.value);
+                setSaved(false);
+              }}
+              disabled={saving}
+              placeholder="5"
+              className={inputCls + " font-mono text-[12px]"}
+            />
+          </div>
         </div>
       </div>
+      {/* Cached model list (filled by save / 연결 테스트 — D66). Informational:
+          the RAG search always uses the fixed GLM 5.2 model. */}
+      {models.length > 0 && (
+        <div className="mb-2.5">
+          <button
+            type="button"
+            onClick={() => setShowModels((s) => !s)}
+            className="flex items-center gap-1.5 text-[13px] font-medium text-ink-muted hover:text-ink"
+          >
+            <ChevronDown
+              size={15}
+              className={`transition-transform duration-[120ms] ${showModels ? "rotate-0" : "-rotate-90"}`}
+            />
+            {models.length} model{models.length === 1 ? "" : "s"}
+            <span className="rounded-full bg-subtle px-1.5 py-0.5 text-[11px] text-ink-soft">cached</span>
+          </button>
+          {showModels && (
+            <ul className="mt-2 flex flex-col gap-0.5">
+              {models.map((m) => (
+                <li
+                  key={m.id}
+                  className="rounded-[6px] px-2 py-1 text-[12px] text-ink-muted hover:bg-subtle"
+                >
+                  {m.label}
+                  <span className="ml-2 font-mono text-[11px] text-ink-soft">{m.id}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       <div className="flex items-center gap-2">
         <button type="button" onClick={() => void test()} disabled={!settings?.rag} className={ghostBtn}>
           <Plug size={13} /> 연결 테스트
@@ -187,7 +266,9 @@ function RagSection({
   );
 }
 
-/** ② Confluence 수집 — crawl config + the live ingestion runner. */
+/** ② Confluence — MCP 연결 설정 + 수집 실행 (D82). */
+const DEFAULT_CONFLUENCE_URL = "https://sdsdev.co.kr/mcp-confluence/mcp";
+
 function ConfluenceSection({
   settings,
   onSettingsChange,
@@ -196,15 +277,17 @@ function ConfluenceSection({
   onSettingsChange: (s: Settings) => void;
 }) {
   const cfg = settings?.confluence;
-  const [baseUrl, setBaseUrl] = useState(cfg?.baseUrl ?? "");
-  const [token, setToken] = useState(cfg?.token ?? "");
-  const [rootPageId, setRootPageId] = useState(cfg?.rootPageId ?? "");
-  const [spaceKey, setSpaceKey] = useState(cfg?.spaceKey ?? "");
-  const [allowInvalidCerts, setAllowInvalidCerts] = useState(cfg?.allowInvalidCerts ?? false);
+  // Prefill the known MCP URL (editable); `||` so an empty migrated value falls back.
+  const [url, setUrl] = useState(cfg?.url || DEFAULT_CONFLUENCE_URL);
+  const [authKey, setAuthKey] = useState(cfg?.authKey ?? "");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [probe, setProbe] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  // Collection target — passed per-run, not persisted (D82).
+  const [rootPageId, setRootPageId] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
 
   // Ingestion runner state lives in the module-level ingest store (D51), so a
   // running crawl keeps its progress while the user works in other views and
@@ -213,21 +296,21 @@ function ConfluenceSection({
   const running = ingest.status === "running";
   const { progress, summary, failures } = ingest;
 
+  // Re-seed inputs when settings reload (matches RagSection/FabrixCard).
+  useEffect(() => {
+    setUrl(cfg?.url || DEFAULT_CONFLUENCE_URL);
+    setAuthKey(cfg?.authKey ?? "");
+    setSaved(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings]);
+
   const save = async () => {
     setSaving(true);
     setError(null);
     setProbe(null);
     try {
       const next = await setConfluenceConfig(
-        baseUrl.trim()
-          ? {
-              baseUrl: baseUrl.trim(),
-              token: token.trim() || null,
-              rootPageId: rootPageId.trim() || null,
-              spaceKey: spaceKey.trim() || null,
-              allowInvalidCerts,
-            }
-          : null,
+        url.trim() ? { url: url.trim(), authKey: authKey.trim() || null } : null,
       );
       onSettingsChange(next);
       setSaved(true);
@@ -241,96 +324,60 @@ function ConfluenceSection({
   const test = async () => {
     setProbe(null);
     try {
-      const title = await probeConfluence();
-      setProbe({ ok: true, msg: `연결됨 — "${title}"` });
+      const msg = await probeConfluence();
+      setProbe({ ok: true, msg });
     } catch (e) {
       setProbe({ ok: false, msg: String(e) });
     }
   };
 
-  const start = () => void startIngest();
+  const hasTarget = !!(rootPageId.trim() || searchQuery.trim());
+  const start = () =>
+    void startIngest({
+      rootPageId: rootPageId.trim() || null,
+      searchQuery: searchQuery.trim() || null,
+    });
   const stop = () => stopIngest();
 
   return (
     <div className={cardCls}>
       <div className="mb-1 font-serif text-[15px] font-semibold text-ink-strong">
-        Confluence 수집
+        Confluence 수집 (MCP)
       </div>
       <p className="mb-3 text-[12px] leading-[1.5] text-ink-muted">
-        루트 페이지의 하위 페이지를 재귀 수집해 각 페이지 원문을 위의 RAG 서비스로 전달합니다
-        (요약·임베딩은 RAG 서비스가 수행). 인증은 Server/DC의 Bearer PAT입니다. 수집은
-        백그라운드에서 진행되므로 다른 화면에서 작업을 이어가다가 돌아와 진행현황을 확인할 수
-        있습니다.
+        사내 Confluence MCP 서버에 연결해 페이지 트리를 가져와 지식 베이스에 저장합니다(워크플로우의
+        지식 단계가 자동으로 참고). 인증은 <span className="font-mono">x-auth</span> 키입니다. 수집은
+        백그라운드로 진행되며 다른 화면에서 작업을 이어가다 돌아와 진행현황을 볼 수 있습니다.
       </p>
       <div className="mb-2.5 grid grid-cols-2 gap-2.5">
         <div>
-          <label className={labelCls}>Base URL</label>
+          <label className={labelCls}>MCP URL</label>
           <input
-            value={baseUrl}
+            value={url}
             onChange={(e) => {
-              setBaseUrl(e.target.value);
+              setUrl(e.target.value);
               setSaved(false);
             }}
             disabled={saving}
-            placeholder="https://wiki.example.com/confluence"
+            placeholder={DEFAULT_CONFLUENCE_URL}
             className={inputCls + " font-mono text-[12px]"}
           />
         </div>
         <div>
-          <label className={labelCls}>Personal Access Token</label>
+          <label className={labelCls}>x-auth 키</label>
           <input
             type="password"
-            value={token}
+            value={authKey}
             onChange={(e) => {
-              setToken(e.target.value);
+              setAuthKey(e.target.value);
               setSaved(false);
             }}
             disabled={saving}
-            placeholder="읽기 전용 PAT 권장"
-            className={inputCls + " font-mono text-[12px]"}
-          />
-        </div>
-        <div>
-          <label className={labelCls}>루트 페이지 ID (재귀 수집)</label>
-          <input
-            value={rootPageId}
-            onChange={(e) => {
-              setRootPageId(e.target.value);
-              setSaved(false);
-            }}
-            disabled={saving}
-            placeholder="예: 123456789"
-            className={inputCls + " font-mono text-[12px]"}
-          />
-        </div>
-        <div>
-          <label className={labelCls}>스페이스 키 (루트 미지정 시, 평면 수집)</label>
-          <input
-            value={spaceKey}
-            onChange={(e) => {
-              setSpaceKey(e.target.value);
-              setSaved(false);
-            }}
-            disabled={saving}
-            placeholder="예: OPS"
+            placeholder="MCP 인증 키"
             className={inputCls + " font-mono text-[12px]"}
           />
         </div>
       </div>
-      <label className="mb-3 flex cursor-pointer items-center gap-2 text-[12px] text-ink-muted">
-        <input
-          type="checkbox"
-          checked={allowInvalidCerts}
-          onChange={(e) => {
-            setAllowInvalidCerts(e.target.checked);
-            setSaved(false);
-          }}
-          disabled={saving}
-          className="accent-[var(--accent)]"
-        />
-        TLS 인증서 검증 생략 (위험 — 사내 프록시 CA를 Windows 인증서 저장소에 설치하는 것이 안전한
-        해결책입니다)
-      </label>
 
       <div className="flex items-center gap-2">
         <button
@@ -341,27 +388,11 @@ function ConfluenceSection({
         >
           <Plug size={13} /> 연결 테스트
         </button>
-        {running ? (
-          <button type="button" onClick={stop} className={ghostBtn + " text-bad"}>
-            <Square size={12} /> 중지
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => void start()}
-            disabled={!settings?.confluence || !settings?.rag}
-            title={
-              !settings?.confluence || !settings?.rag
-                ? "Confluence와 RAG 설정을 먼저 저장하세요"
-                : undefined
-            }
-            className={ghostBtn}
-          >
-            <CloudDownload size={13} /> 수집 시작
-          </button>
-        )}
         {probe && (
-          <span className={"min-w-0 truncate text-[12px] " + (probe.ok ? "text-ok" : "text-bad")} title={probe.msg}>
+          <span
+            className={"min-w-0 truncate text-[12px] " + (probe.ok ? "text-ok" : "text-bad")}
+            title={probe.msg}
+          >
             {probe.msg}
           </span>
         )}
@@ -383,38 +414,94 @@ function ConfluenceSection({
         </button>
       </div>
 
-      {(progress || summary) && (
-        <div className="mt-3 rounded-[10px] border border-line bg-subtle px-3 py-2.5 text-[12px] text-ink-muted">
-          {progress && (
-            <div className="flex items-center gap-3">
-              <span>
-                수집 <b className="text-ink-strong">{progress.fetched}</b>
-              </span>
-              <span>
-                임베딩 <b className="text-ok">{progress.ingested}</b>
-              </span>
-              <span>
-                실패 <b className={progress.failed ? "text-bad" : "text-ink-strong"}>{progress.failed}</b>
-              </span>
-              {running && (
-                <span className="min-w-0 flex-1 truncate text-ink-soft" title={progress.last}>
-                  {progress.last}
-                </span>
-              )}
-            </div>
-          )}
-          {summary && <div className="mt-1 font-medium text-ink-strong">{summary}</div>}
-          {failures.length > 0 && (
-            <ul className="mt-1.5 list-inside list-disc space-y-0.5 text-[11.5px] text-bad">
-              {failures.map((f, i) => (
-                <li key={i} className="truncate" title={f}>
-                  {f}
-                </li>
-              ))}
-            </ul>
-          )}
+      {/* 수집 대상 + 실행 */}
+      <div className="mt-3 rounded-[10px] border border-line bg-subtle px-3 py-2.5">
+        <div className="mb-2 text-[12.5px] font-semibold text-ink-strong">수집 대상</div>
+        <div className="grid grid-cols-2 gap-2.5">
+          <div>
+            <label className={labelCls}>루트 페이지 ID (하위 재귀 수집)</label>
+            <input
+              value={rootPageId}
+              onChange={(e) => setRootPageId(e.target.value)}
+              disabled={running}
+              placeholder="예: 661535251"
+              className={inputCls + " font-mono text-[12px]"}
+            />
+          </div>
+          <div>
+            <label className={labelCls}>검색어 (선택 · searchContent)</label>
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              disabled={running}
+              placeholder="예: 배포 절차"
+              className={inputCls + " text-[12px]"}
+            />
+          </div>
         </div>
-      )}
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          {running ? (
+            <button type="button" onClick={stop} className={ghostBtn + " text-bad"}>
+              <Square size={12} /> 중지
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void start()}
+              disabled={!settings?.confluence || !hasTarget}
+              title={
+                !settings?.confluence
+                  ? "Confluence MCP 설정을 먼저 저장하세요"
+                  : !hasTarget
+                    ? "루트 페이지 ID 또는 검색어를 입력하세요"
+                    : undefined
+              }
+              className={ghostBtn}
+            >
+              <CloudDownload size={13} /> 수집 시작
+            </button>
+          )}
+          <span className="text-[11.5px] text-ink-soft">
+            수집 문서는 지식 베이스에 &lsquo;Confluence 수집&rsquo; 항목으로 저장됩니다.
+          </span>
+        </div>
+
+        {(progress || summary) && (
+          <div className="mt-2.5 rounded-[8px] border border-line bg-app px-3 py-2.5 text-[12px] text-ink-muted">
+            {progress && (
+              <div className="flex items-center gap-3">
+                <span>
+                  수집 <b className="text-ink-strong">{progress.fetched}</b>
+                </span>
+                <span>
+                  저장 <b className="text-ok">{progress.ingested}</b>
+                </span>
+                <span>
+                  실패{" "}
+                  <b className={progress.failed ? "text-bad" : "text-ink-strong"}>
+                    {progress.failed}
+                  </b>
+                </span>
+                {running && (
+                  <span className="min-w-0 flex-1 truncate text-ink-soft" title={progress.last}>
+                    {progress.last}
+                  </span>
+                )}
+              </div>
+            )}
+            {summary && <div className="mt-1 font-medium text-ink-strong">{summary}</div>}
+            {failures.length > 0 && (
+              <ul className="mt-1.5 list-inside list-disc space-y-0.5 text-[11.5px] text-bad">
+                {failures.map((f, i) => (
+                  <li key={i} className="truncate" title={f}>
+                    {f}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -438,6 +525,19 @@ function KnowledgeCard({
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bodyRef = useAutoGrow(body, 260);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
+
+  // A freshly added entry is prepended to the TOP of the list, which can be far
+  // above the "지식 추가" button at the bottom — so clicking add looked like it
+  // did nothing. Scroll the new card into view and focus its title so the add
+  // has an obvious, visible effect. Runs once on mount (fresh cards only).
+  useEffect(() => {
+    if (!initiallyOpen) return;
+    rootRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    titleRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const save = async () => {
     setBusy(true);
@@ -479,7 +579,7 @@ function KnowledgeCard({
   };
 
   return (
-    <div className={cardCls}>
+    <div ref={rootRef} className={cardCls}>
       <div className="flex items-center gap-2">
         <button
           type="button"
@@ -528,6 +628,7 @@ function KnowledgeCard({
             </div>
           )}
           <input
+            ref={titleRef}
             value={title}
             onChange={(e) => {
               setTitle(e.target.value);
@@ -670,8 +771,8 @@ export function KnowledgeView({
           지식
         </h2>
         <p className="mt-0.5 text-[13px] text-ink-muted">
-          기반 3단계가 사용하는 외부·사내 지식을 관리합니다 — RAG 검색 연결, Confluence 문서
-          수집(임베딩), 그리고 작업 방식 지식 베이스.
+          기반 3단계가 사용하는 외부·사내 지식을 관리합니다 — RAG 검색 연결, Confluence MCP
+          문서 수집, 그리고 작업 방식 지식 베이스.
         </p>
       </div>
 

@@ -36,6 +36,9 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(30);
 /// `None` for the streaming chat so long responses are not cut off.
 fn build_client(allow_invalid_certs: bool, total: Option<Duration>) -> Result<reqwest::blocking::Client, String> {
     let mut b = reqwest::blocking::Client::builder()
+        // Fabrix is a directly-reachable corporate endpoint — connect straight
+        // to it and ignore any HTTP(S)_PROXY/ALL_PROXY env var (D66).
+        .no_proxy()
         .connect_timeout(CONNECT_TIMEOUT)
         .danger_accept_invalid_certs(allow_invalid_certs);
     if let Some(t) = total {
@@ -120,11 +123,16 @@ fn fetch_models(cfg: &FabrixConfig) -> Result<Vec<ModelOption>, String> {
     parse_models_json(&text)
 }
 
-/// Detection for Fabrix: config presence + endpoint reachability, with the live
-/// model list. Blocking — call via `spawn_blocking`. Mirrors the shape of
-/// `detect::detect_agent_blocking` (the free-form `source`/`diagnostic` strings
-/// carry remote-specific values).
-pub fn detect_fabrix(cfg: Option<FabrixConfig>) -> DetectedAgent {
+/// Detection for Fabrix: config presence + (cache-first) model list. Blocking —
+/// call via `spawn_blocking`. Mirrors the shape of `detect::detect_agent_blocking`
+/// (the free-form `source`/`diagnostic` strings carry remote-specific values).
+///
+/// Cache-first (D66): with `force == false` and a cached model list present, the
+/// stored list is returned with NO network call (app start / normal load). A
+/// live fetch happens only on `force == true` (save / refresh / connection test)
+/// or when there is no cache yet (first configure). On a forced fetch failure the
+/// cache, if any, is still shown as a fallback so the model dropdown stays usable.
+pub fn detect_fabrix(cfg: Option<FabrixConfig>, force: bool) -> DetectedAgent {
     let mut agent = DetectedAgent {
         id: "fabrix".to_string(),
         name: "Fabrix".to_string(),
@@ -145,6 +153,15 @@ pub fn detect_fabrix(cfg: Option<FabrixConfig>) -> DetectedAgent {
         }
     };
 
+    // Cache path: use the stored list without touching the network.
+    if !force && !cfg.models.is_empty() {
+        agent.available = true;
+        agent.source = "remote".to_string();
+        agent.models = cfg.models.clone();
+        agent.models_source = "fallback".to_string();
+        return agent;
+    }
+
     match fetch_models(&cfg) {
         Ok(models) => {
             agent.available = true;
@@ -157,6 +174,11 @@ pub fn detect_fabrix(cfg: Option<FabrixConfig>) -> DetectedAgent {
             // detailed error surfaces via the "connection test" (probe_fabrix).
             agent.source = "remote".to_string();
             agent.diagnostic = Some("unreachable".to_string());
+            // Keep showing the last-known models as a fallback if we have them.
+            if !cfg.models.is_empty() {
+                agent.models = cfg.models.clone();
+                agent.models_source = "fallback".to_string();
+            }
         }
     }
     agent
@@ -216,7 +238,9 @@ fn chat_body(model: &str, prompt: &str) -> Value {
         "modelIds": [model],
         "contents": [prompt],
         "llmConfig": {
-            "max_new_tokens": 2024,
+            // Raised from the sample's 2024 so long document-step artifacts
+            // (plans/analyses) are not truncated mid-content (D67).
+            "max_new_tokens": 8192,
             "seed": Value::Null,
             "top_k": 14,
             "top_p": 0.94,
@@ -238,7 +262,7 @@ pub fn run_fabrix(
     args: RunArgs,
     on_event: Channel<RunEvent>,
 ) -> Result<String, String> {
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = crate::ow_home()?;
     let cfg = settings::load(&config_dir)
         .fabrix
         .filter(|c| !c.endpoint_url.trim().is_empty())
@@ -363,14 +387,20 @@ pub fn run_fabrix(
 /// report the count. `async` + `spawn_blocking` (same one-shot pattern as
 /// `rag_search`/`probe_confluence`).
 #[tauri::command]
-pub async fn probe_fabrix(app: tauri::AppHandle) -> Result<String, String> {
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+pub async fn probe_fabrix() -> Result<String, String> {
+    let config_dir = crate::ow_home()?;
     let cfg = settings::load(&config_dir)
         .fabrix
         .filter(|c| !c.endpoint_url.trim().is_empty())
         .ok_or("Fabrix 연결 정보가 설정되지 않았습니다.")?;
     tauri::async_runtime::spawn_blocking(move || {
         let models = fetch_models(&cfg)?;
+        // Cache the fresh list so the model dropdown survives restarts (D66).
+        let mut s = settings::load(&config_dir);
+        if let Some(f) = s.fabrix.as_mut() {
+            f.models = models.clone();
+            let _ = settings::save(&config_dir, &s);
+        }
         Ok::<String, String>(format!("연결됨 ({}개 모델)", models.len()))
     })
     .await
@@ -380,6 +410,35 @@ pub async fn probe_fabrix(app: tauri::AppHandle) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detect_uses_cache_without_network_when_not_forced() {
+        // Cache-first (D66): a config with cached models + force=false returns
+        // the cached list directly — no HTTP call (the endpoint is bogus, so a
+        // live fetch would fail).
+        let cfg = FabrixConfig {
+            endpoint_url: "http://127.0.0.1:9/never".into(),
+            client: None,
+            openapi_token: None,
+            allow_invalid_certs: false,
+            models: vec![ModelOption { id: "cached".into(), label: "캐시 모델".into() }],
+        };
+        let agent = detect_fabrix(Some(cfg), false);
+        assert!(agent.available);
+        assert_eq!(agent.source, "remote");
+        assert_eq!(agent.models_source, "fallback");
+        assert_eq!(agent.models.len(), 1);
+        assert_eq!(agent.models[0].id, "cached");
+        assert!(agent.diagnostic.is_none());
+    }
+
+    #[test]
+    fn detect_reports_not_configured_without_endpoint() {
+        let agent = detect_fabrix(None, false);
+        assert!(!agent.available);
+        assert!(agent.models.is_empty());
+        assert_eq!(agent.diagnostic.as_deref(), Some("not-configured"));
+    }
 
     #[test]
     fn parses_models_with_korean_names() {

@@ -1,10 +1,12 @@
 mod agents;
+mod aipro;
 mod confluence;
 mod detect;
 mod exec;
 mod fabrix;
 mod files;
 mod knowledge;
+mod mcp;
 mod projects;
 mod rag;
 mod resolve;
@@ -15,10 +17,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
-use tauri::Manager;
 
 use detect::DetectedAgent;
-use settings::{ConfluenceConfig, FabrixConfig, RagConfig, Settings, SkillDef, StepDef};
+use settings::{AiProConfig, ConfluenceConfig, FabrixConfig, RagConfig, Settings, SkillDef, StepDef};
 
 // ---------------------------------------------------------------------------
 // Boot diagnostics (D56). In release builds `windows_subsystem = "windows"`
@@ -32,17 +33,27 @@ use settings::{ConfluenceConfig, FabrixConfig, RagConfig, Settings, SkillDef, St
 /// failure dialog to boot-time death; post-boot worker panics only log.
 static BOOT_PHASE: AtomicBool = AtomicBool::new(true);
 
-/// `~/.operation-wizard/startup-error.log`, using the same home-root
-/// convention as `projects.rs`/`knowledge.rs`. The Tauri config dir is not an
+/// The single app home root `~/.operation-wizard/` (Windows `%USERPROFILE%\
+/// .operation-wizard\`). Every on-disk file the app writes lives under here —
+/// `settings.json`, `projects/`, `knowledge/`, `startup-error.log` (D72). This
+/// is the one definition of that path; `projects.rs`/`knowledge.rs`/`settings`
+/// callers all resolve through it. Deliberately NOT the Tauri `app_config_dir`
+/// (`%APPDATA%\<identifier>`) so all app data sits in one discoverable folder.
+pub(crate) fn ow_home() -> Result<PathBuf, String> {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(|h| PathBuf::from(h).join(".operation-wizard"))
+        .map_err(|_| "홈 디렉터리를 찾을 수 없습니다 (USERPROFILE/HOME 미설정)".to_string())
+}
+
+/// `~/.operation-wizard/startup-error.log`. The Tauri config dir is not an
 /// option here: it needs an `AppHandle`, which does not exist when the builder
-/// itself fails. Falls back to the temp dir if no home is resolvable.
+/// itself fails. Falls back to the temp dir if no home is resolvable (so a boot
+/// failure is still logged somewhere).
 fn startup_log_path() -> PathBuf {
-    match std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-        Ok(home) => PathBuf::from(home)
-            .join(".operation-wizard")
-            .join("startup-error.log"),
-        Err(_) => std::env::temp_dir().join("operation-wizard-startup-error.log"),
-    }
+    ow_home()
+        .map(|d| d.join("startup-error.log"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("operation-wizard-startup-error.log"))
 }
 
 /// Append one timestamped line to the log. Every error is swallowed —
@@ -174,17 +185,52 @@ fn list_agents() -> Vec<AgentInfo> {
 /// models. Runs on a blocking thread so the long `models` probe never blocks
 /// the UI thread.
 #[tauri::command]
-async fn detect_agent(app: tauri::AppHandle, agent_id: String) -> Result<DetectedAgent, String> {
+async fn detect_agent(agent_id: String, force: bool) -> Result<DetectedAgent, String> {
     let def = agents::find(&agent_id).ok_or_else(|| format!("unknown agent: {agent_id}"))?;
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = ow_home()?;
     let s = settings::load(&config_dir);
-    // Remote (HTTP) agents (Fabrix) detect via config presence + an endpoint
-    // reachability/model-list call, not resolve+probe (D64).
+    // Remote (HTTP) agents detect via config presence + a (cache-first)
+    // model-list call, not resolve+probe (Fabrix D64, AI Pro D71). `force` forces
+    // a live fetch; otherwise a cached list is returned without a network call
+    // (D66). Two remote agents now, so dispatch on the id.
     if def.kind == agents::AgentKind::Remote {
-        let cfg = s.fabrix.clone();
-        return tauri::async_runtime::spawn_blocking(move || fabrix::detect_fabrix(cfg))
-            .await
-            .map_err(|e| format!("{e:?}"));
+        let dir = config_dir.clone();
+        let agent = match def.id {
+            "fabrix" => {
+                let cfg = s.fabrix.clone();
+                tauri::async_runtime::spawn_blocking(move || fabrix::detect_fabrix(cfg, force))
+                    .await
+                    .map_err(|e| format!("{e:?}"))?
+            }
+            "aipro" => {
+                let cfg = s.aipro.clone();
+                tauri::async_runtime::spawn_blocking(move || aipro::detect_aipro(cfg, force))
+                    .await
+                    .map_err(|e| format!("{e:?}"))?
+            }
+            other => return Err(format!("unknown remote agent: {other}")),
+        };
+        // Persist a freshly fetched (live) list so it survives restarts and
+        // seeds the cache path next time (best-effort — D66).
+        if agent.models_source == "live" && !agent.models.is_empty() {
+            let mut s2 = settings::load(&dir);
+            match def.id {
+                "fabrix" => {
+                    if let Some(f) = s2.fabrix.as_mut() {
+                        f.models = agent.models.clone();
+                        let _ = settings::save(&dir, &s2);
+                    }
+                }
+                "aipro" => {
+                    if let Some(a) = s2.aipro.as_mut() {
+                        a.models = agent.models.clone();
+                        let _ = settings::save(&dir, &s2);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return Ok(agent);
     }
     let custom = s.agent_custom_bin(&agent_id);
     tauri::async_runtime::spawn_blocking(move || detect::detect_agent_blocking(def, custom))
@@ -193,22 +239,18 @@ async fn detect_agent(app: tauri::AppHandle, agent_id: String) -> Result<Detecte
 }
 
 #[tauri::command]
-fn get_settings(app: tauri::AppHandle) -> Result<Settings, String> {
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+fn get_settings() -> Result<Settings, String> {
+    let config_dir = ow_home()?;
     Ok(settings::load(&config_dir))
 }
 
 /// Set (or clear, with `None`/empty) the custom binary path for one agent.
 #[tauri::command]
-fn set_agent_bin(
-    app: tauri::AppHandle,
-    agent_id: String,
-    path: Option<String>,
-) -> Result<Settings, String> {
+fn set_agent_bin(agent_id: String, path: Option<String>) -> Result<Settings, String> {
     if agents::find(&agent_id).is_none() {
         return Err(format!("unknown agent: {agent_id}"));
     }
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = ow_home()?;
     let mut s = settings::load(&config_dir);
     let normalized = match path {
         Some(p) if !p.trim().is_empty() => Some(p.trim().to_string()),
@@ -222,11 +264,11 @@ fn set_agent_bin(
 /// Replace the user's skill registry, or reset to built-in defaults (`None`).
 /// Returns the full new settings (frontend replaces its state atomically).
 #[tauri::command]
-fn set_skills(app: tauri::AppHandle, skills: Option<Vec<SkillDef>>) -> Result<Settings, String> {
+fn set_skills(skills: Option<Vec<SkillDef>>) -> Result<Settings, String> {
     if let Some(list) = &skills {
         settings::validate_skills(list)?;
     }
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = ow_home()?;
     let mut s = settings::load(&config_dir);
     s.set_skills(skills);
     settings::save(&config_dir, &s)?;
@@ -235,59 +277,69 @@ fn set_skills(app: tauri::AppHandle, skills: Option<Vec<SkillDef>>) -> Result<Se
 
 /// Replace one category's workflow steps, or reset to the default (`None`).
 #[tauri::command]
-fn set_workflow(
-    app: tauri::AppHandle,
-    category: String,
-    steps: Option<Vec<StepDef>>,
-) -> Result<Settings, String> {
+fn set_workflow(category: String, steps: Option<Vec<StepDef>>) -> Result<Settings, String> {
     if !settings::CATEGORIES.contains(&category.as_str()) {
         return Err(format!("unknown category: {category}"));
     }
     if let Some(list) = &steps {
         settings::validate_steps(list)?;
     }
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = ow_home()?;
     let mut s = settings::load(&config_dir);
     s.set_workflow(&category, steps);
     settings::save(&config_dir, &s)?;
     Ok(s)
 }
 
-/// Set (or clear, with `None`/empty base URL) the Confluence crawl config.
+/// Set (or clear, with `None`/empty URL) the Confluence MCP connection (D82):
+/// the MCP endpoint URL + `x-auth` key. An empty URL clears the config.
 #[tauri::command]
-fn set_confluence_config(
-    app: tauri::AppHandle,
-    config: Option<ConfluenceConfig>,
-) -> Result<Settings, String> {
+fn set_confluence_config(config: Option<ConfluenceConfig>) -> Result<Settings, String> {
     let normalized = config
         .map(|mut c| {
-            c.base_url = c.base_url.trim().trim_end_matches('/').to_string();
-            c.token = c.token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-            c.root_page_id = c.root_page_id.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-            c.space_key = c.space_key.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            c.url = c.url.trim().to_string();
+            c.auth_key = c.auth_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
             c
         })
-        .filter(|c| !c.base_url.is_empty());
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+        .filter(|c| !c.url.is_empty());
+    let config_dir = ow_home()?;
     let mut s = settings::load(&config_dir);
     s.set_confluence(normalized);
     settings::save(&config_dir, &s)?;
     Ok(s)
 }
 
-/// Set (or clear, with `None`/empty endpoint) the RAG service config.
+/// Set (or clear, with `None`/empty endpoint) the RAG service config. The model
+/// cache (`models`) is backend-owned: preserved across an unchanged-connection
+/// re-save, cleared when the endpoint/credentials change (D66).
 #[tauri::command]
-fn set_rag_config(app: tauri::AppHandle, config: Option<RagConfig>) -> Result<Settings, String> {
+fn set_rag_config(config: Option<RagConfig>) -> Result<Settings, String> {
+    let config_dir = ow_home()?;
+    let mut s = settings::load(&config_dir);
+    let prev = s.rag.clone();
     let normalized = config
         .map(|mut c| {
             c.endpoint = c.endpoint.trim().trim_end_matches('/').to_string();
             c.secret_key = c.secret_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
             c.pass_key = c.pass_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+            c.knowledge_asset_id =
+                c.knowledge_asset_id.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+            // Carry over the cached model list only when the connection is
+            // unchanged; a save is followed by a live fetch (연결 테스트) that
+            // refills it either way.
+            c.models = match &prev {
+                Some(p)
+                    if p.endpoint == c.endpoint
+                        && p.secret_key == c.secret_key
+                        && p.pass_key == c.pass_key =>
+                {
+                    p.models.clone()
+                }
+                _ => Vec::new(),
+            };
             c
         })
         .filter(|c| !c.endpoint.is_empty());
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    let mut s = settings::load(&config_dir);
     s.set_rag(normalized);
     settings::save(&config_dir, &s)?;
     Ok(s)
@@ -295,22 +347,63 @@ fn set_rag_config(app: tauri::AppHandle, config: Option<RagConfig>) -> Result<Se
 
 /// Set (or clear, with `None`/empty endpoint) the Fabrix connection config
 /// (D64). Trims the endpoint and header values; an empty endpoint clears it.
+/// The model cache (`models`) is backend-owned: preserved across an
+/// unchanged-connection re-save, cleared when endpoint/credentials change (D66).
 #[tauri::command]
-fn set_fabrix_config(
-    app: tauri::AppHandle,
-    config: Option<FabrixConfig>,
-) -> Result<Settings, String> {
+fn set_fabrix_config(config: Option<FabrixConfig>) -> Result<Settings, String> {
+    let config_dir = ow_home()?;
+    let mut s = settings::load(&config_dir);
+    let prev = s.fabrix.clone();
     let normalized = config
         .map(|mut c| {
             c.endpoint_url = c.endpoint_url.trim().trim_end_matches('/').to_string();
             c.client = c.client.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
             c.openapi_token = c.openapi_token.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            // Carry over the cached model list only when the connection is
+            // unchanged; save is followed by detectOne(force=true) which refills.
+            c.models = match &prev {
+                Some(p)
+                    if p.endpoint_url == c.endpoint_url
+                        && p.client == c.client
+                        && p.openapi_token == c.openapi_token =>
+                {
+                    p.models.clone()
+                }
+                _ => Vec::new(),
+            };
             c
         })
         .filter(|c| !c.endpoint_url.is_empty());
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    let mut s = settings::load(&config_dir);
     s.set_fabrix(normalized);
+    settings::save(&config_dir, &s)?;
+    Ok(s)
+}
+
+/// Set (or clear, with `None`/empty endpoint) the AI Pro connection config (D71).
+/// Trims the endpoint and Bearer key; an empty endpoint clears it. The model
+/// cache (`models`) is backend-owned: preserved across an unchanged-connection
+/// re-save, cleared when endpoint/key change (D66).
+#[tauri::command]
+fn set_aipro_config(config: Option<AiProConfig>) -> Result<Settings, String> {
+    let config_dir = ow_home()?;
+    let mut s = settings::load(&config_dir);
+    let prev = s.aipro.clone();
+    let normalized = config
+        .map(|mut c| {
+            c.endpoint_url = c.endpoint_url.trim().trim_end_matches('/').to_string();
+            c.api_key = c.api_key.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            // Carry over the cached model list only when the connection is
+            // unchanged; save is followed by detectOne(force=true) which refills.
+            c.models = match &prev {
+                Some(p) if p.endpoint_url == c.endpoint_url && p.api_key == c.api_key => {
+                    p.models.clone()
+                }
+                _ => Vec::new(),
+            };
+            c
+        })
+        .filter(|c| !c.endpoint_url.is_empty());
+    s.set_aipro(normalized);
     settings::save(&config_dir, &s)?;
     Ok(s)
 }
@@ -344,10 +437,12 @@ pub fn run() {
             set_confluence_config,
             set_rag_config,
             set_fabrix_config,
+            set_aipro_config,
             run::run_agent,
             run::cancel_run,
             files::list_dir,
             files::read_file,
+            files::write_file,
             projects::ensure_project,
             projects::save_session,
             projects::list_sessions,
@@ -364,7 +459,9 @@ pub fn run() {
             confluence::cancel_ingest,
             confluence::probe_confluence,
             rag::rag_search,
-            fabrix::probe_fabrix
+            rag::probe_rag,
+            fabrix::probe_fabrix,
+            aipro::probe_aipro
         ])
         // `build` + `run` split (instead of `.run(...).expect(...)`): webview /
         // window creation failures — above all a missing or broken WebView2

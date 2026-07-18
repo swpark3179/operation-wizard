@@ -86,6 +86,16 @@ export function errorHint(msg: string | undefined): string | null {
   if (m.includes("reconnect") || m.includes("stream disconnected")) {
     return "스트림이 완료 전에 끊겼습니다(네트워크/프록시 문제 가능). 새 세션으로 다시 시도해 보세요.";
   }
+  // codex 엔터프라이즈 관리 정책(Group requirements)이 샌드박스 모드를 제한할 때
+  // codex CLI가 config 로드 단계에서 내는 오류. 앱은 정책 상한을 우회할 수 없다(D80).
+  if (
+    m.includes("allowed_sandbox_modes") ||
+    m.includes("permissionprofile") ||
+    m.includes("enterprise-managed") ||
+    (m.includes("sandbox") && m.includes("not in the allowed set"))
+  ) {
+    return "사내 관리 정책이 codex 샌드박스를 제한하고 있습니다. 관리자(IT)에게 codex 정책의 allowed_sandbox_modes에 'read-only'가 포함되도록(예: [\"read-only\",\"workspace-write\"]) 정정을 요청하세요. 앱은 정책 상한을 우회할 수 없습니다. 우회가 필요하면 다른 에이전트(Claude Code·Gemini·Fabrix·AI Pro)로 진행할 수 있습니다.";
+  }
   return null;
 }
 

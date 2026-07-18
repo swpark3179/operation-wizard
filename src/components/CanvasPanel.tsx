@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Folder,
   FolderOpen,
@@ -6,6 +6,9 @@ import {
   FolderTree,
   RefreshCw,
   ChevronRight,
+  ExternalLink,
+  ClipboardCopy,
+  Check,
   X,
 } from "lucide-react";
 import { ArtifactsPanel } from "./ArtifactsPanel";
@@ -15,7 +18,9 @@ import { KnowledgeSavePanel, type KnowledgeSaveRequest } from "./KnowledgeSavePa
 import { RequirementsForm } from "./RequirementsForm";
 import type { StepProgress } from "./WorkflowStepper";
 import { fileTabId, fileTabPath, type CanvasTab } from "./WorkspaceView";
-import { listDir } from "../lib/api";
+import { listDir, openInExplorer } from "../lib/api";
+import { copyText } from "../lib/clipboard";
+import { withLinkGuard } from "../lib/linkGuard";
 import type { ArtifactDef } from "../lib/artifacts";
 import type { ClarifyAnswer, ClarifyQuestion } from "../lib/clarify";
 import type { FileEntry, KnowledgeEntry } from "../lib/types";
@@ -110,6 +115,44 @@ function TreeNode({
   );
 }
 
+/** The "프롬프트" tab (D78): the optimized prompt the agent produced on the first
+ * work turn, with a copy button (Copy→Check 1.5s, mirroring FileViewer). Plain
+ * text — the client owns it, so no iframe/escaping is needed. */
+function PromptPanel({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    if (!(await copyText(text))) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-app">
+      <div className="flex shrink-0 items-start gap-2 border-b border-line bg-panel px-4 py-2.5">
+        <span className="min-w-0 flex-1 text-[12px] leading-[1.5] text-ink-soft">
+          제출한 요구사항으로 AI가 구성한 최적 프롬프트입니다. 이렇게 요청하면 더 정확한 결과를 얻을 수 있어요.
+        </span>
+        <button
+          type="button"
+          onClick={copy}
+          title="프롬프트 복사"
+          className={
+            "inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-line px-2 py-1 text-[11.5px] transition-colors " +
+            (copied ? "border-ok text-ok" : "text-ink-soft hover:bg-subtle")
+          }
+        >
+          {copied ? <Check size={12} /> : <ClipboardCopy size={12} />}
+          {copied ? "복사됨" : "복사"}
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
+        <pre className="whitespace-pre-wrap font-mono text-[12.5px] leading-[1.6] text-ink">
+          {text}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
 export function CanvasPanel({
   workdir,
   codebasePath,
@@ -124,6 +167,7 @@ export function CanvasPanel({
   prefillNonce,
   onSubmitAnswers,
   ragResult,
+  promptResult,
   artifacts,
   stepProgress,
   artifactSel,
@@ -157,6 +201,8 @@ export function CanvasPanel({
   onSubmitAnswers: (answers: ClarifyAnswer[]) => void;
   /** The latest RAG search result (in-memory HTML for the "검색 결과" tab, D46). */
   ragResult: { query: string; html: string } | null;
+  /** The optimized prompt from the first work turn (D78) → "프롬프트" tab. */
+  promptResult: string | null;
   /** The workflow's document artifacts (D58) — gates the 산출물/다이어그램 tabs. */
   artifacts: ArtifactDef[];
   /** Live workflow status mirrored from ChatPanel (null → existence-only). */
@@ -199,6 +245,13 @@ export function CanvasPanel({
     void load();
   }, [load, refreshNonce]);
 
+  // Inject the external-link guard into the in-memory RAG result document so
+  // source links open in the OS browser instead of navigating the pane (D76).
+  const ragSrcdoc = useMemo(
+    () => (ragResult ? withLinkGuard(ragResult.html) : ""),
+    [ragResult],
+  );
+
   // The 산출물/다이어그램 tabs exist while the workflow has document artifacts
   // and the workdir is resolved (D58 — plain-chat categories never show them).
   const hasArtifacts = !!workdir && artifacts.length > 0;
@@ -219,19 +272,23 @@ export function CanvasPanel({
         ? ragResult
           ? "rag"
           : "files"
-        : tab === "artifacts" || tab === "diagrams"
-          ? hasArtifacts
-            ? tab
+        : tab === "prompt"
+          ? promptResult
+            ? "prompt"
             : "files"
-          : tab === "knowledge-save"
-            ? knowledgeSave && workdir
+          : tab === "artifacts" || tab === "diagrams"
+            ? hasArtifacts
               ? tab
               : "files"
-            : activeFilePath
-              ? openFiles.includes(activeFilePath)
+            : tab === "knowledge-save"
+              ? knowledgeSave && workdir
                 ? tab
                 : "files"
-              : tab;
+              : activeFilePath
+                ? openFiles.includes(activeFilePath)
+                  ? tab
+                  : "files"
+                : tab;
   const effectiveFilePath = fileTabPath(effectiveTab);
 
   const tabBtn = (id: CanvasTab, label: string, badge?: boolean) => (
@@ -290,6 +347,7 @@ export function CanvasPanel({
       <div className="flex h-[46px] shrink-0 items-center gap-2 border-b border-line bg-panel px-3.5">
         <div className="flex min-w-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-line bg-subtle p-0.5">
           {!!clarify?.length && tabBtn("requirements", "요구사항", true)}
+          {!!promptResult && tabBtn("prompt", "프롬프트")}
           {!!ragResult && tabBtn("rag", "검색 결과")}
           {hasArtifacts && tabBtn("artifacts", "산출물")}
           {hasArtifacts && tabBtn("diagrams", "다이어그램")}
@@ -301,7 +359,7 @@ export function CanvasPanel({
         {effectiveTab === "files" && treeRoot && (
           <>
             {codebasePath && (
-              <div className="flex items-center gap-0.5 rounded-lg border border-line bg-subtle p-0.5 text-[11.5px]">
+              <div className="flex shrink-0 items-center gap-0.5 rounded-lg border border-line bg-subtle p-0.5 text-[11.5px]">
                 {(
                   [
                     ["workdir", "작업 폴더"],
@@ -328,21 +386,32 @@ export function CanvasPanel({
               type="button"
               onClick={() => void load()}
               title="새로고침"
-              className="grid h-7 w-7 place-items-center rounded-md text-ink-soft transition-colors hover:bg-subtle hover:text-ink"
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink-soft transition-colors hover:bg-subtle hover:text-ink"
             >
               <RefreshCw size={14} />
             </button>
+            {/* Folder chip: the ONLY control here allowed to shrink, so a long
+                path never squeezes the buttons. min-w-0 lets it truncate; the
+                path is ellipsized from the LEFT (dir=rtl trick) so the
+                meaningful tail stays visible, and the tooltip has the whole
+                path (D69). */}
             <span
               title={treeRoot}
-              className="inline-flex max-w-[340px] items-center gap-1.5 rounded-md border border-line bg-subtle px-2 py-1 font-mono text-[11.5px] text-ink-soft"
+              className="inline-flex min-w-0 max-w-[240px] items-center gap-1.5 rounded-md border border-line bg-subtle px-2 py-1 font-mono text-[11.5px] text-ink-soft"
             >
               <Folder size={12} className="shrink-0" />
-              {/* Full path, ellipsized from the LEFT (dir=rtl trick) so the
-                  meaningful tail stays visible; the tooltip has the whole path. */}
               <span className="truncate" dir="rtl">
                 &lrm;{treeRoot}&lrm;
               </span>
             </span>
+            <button
+              type="button"
+              onClick={() => void openInExplorer(treeRoot).catch(() => {})}
+              title="탐색기에서 열기"
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink-soft transition-colors hover:bg-subtle hover:text-ink"
+            >
+              <ExternalLink size={14} />
+            </button>
           </>
         )}
       </div>
@@ -361,9 +430,11 @@ export function CanvasPanel({
         <iframe
           title="사내 문서 검색 결과"
           sandbox="allow-scripts"
-          srcDoc={ragResult.html}
+          srcDoc={ragSrcdoc}
           className="h-full w-full flex-1 border-0 bg-white"
         />
+      ) : effectiveTab === "prompt" && promptResult ? (
+        <PromptPanel text={promptResult} />
       ) : effectiveTab === "artifacts" && workdir ? (
         <ArtifactsPanel
           workdir={workdir}

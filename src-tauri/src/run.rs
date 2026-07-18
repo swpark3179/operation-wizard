@@ -467,11 +467,16 @@ pub fn run_agent(
 ) -> Result<String, String> {
     let def = agents::find(&args.agent_id).ok_or_else(|| format!("unknown agent: {}", args.agent_id))?;
 
-    // Remote (HTTP) agents (Fabrix) bypass the process pipeline entirely: no
-    // resolve, no spawn, no stdin — the prompt becomes a POST body and the SSE
-    // response streams `RunEvent`s (D64).
+    // Remote (HTTP) agents bypass the process pipeline entirely: no resolve, no
+    // spawn, no stdin — the prompt becomes a POST body and the SSE response
+    // streams `RunEvent`s (Fabrix D64, AI Pro D71). Two remote agents now, so
+    // dispatch on the id.
     if def.kind == agents::AgentKind::Remote {
-        return crate::fabrix::run_fabrix(app, args, on_event);
+        return match def.id {
+            "fabrix" => crate::fabrix::run_fabrix(app, args, on_event),
+            "aipro" => crate::aipro::run_aipro(app, args, on_event),
+            other => Err(format!("unknown remote agent: {other}")),
+        };
     }
 
     let run = def
@@ -483,7 +488,7 @@ pub fn run_agent(
         return Err("no working folder selected".to_string());
     }
 
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = crate::ow_home()?;
     let custom = settings::load(&config_dir).agent_custom_bin(&args.agent_id);
     let resolved = resolve_agent(def, custom.as_deref())
         .ok_or_else(|| format!("could not resolve executable for agent: {}", args.agent_id))?;

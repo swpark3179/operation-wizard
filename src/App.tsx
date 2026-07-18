@@ -8,8 +8,17 @@ import { AgentsView } from "./components/AgentsView";
 import { FlowSettingsView } from "./components/FlowSettingsView";
 import { KnowledgeView } from "./components/KnowledgeView";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { detectAgent, getSettings, listAgents, setAgentBin, setFabrixConfig } from "./lib/api";
-import type { AgentInfo, DetectedAgent, FabrixConfig, Settings } from "./lib/types";
+import {
+  detectAgent,
+  getSettings,
+  listAgents,
+  openExternal,
+  setAgentBin,
+  setAiProConfig,
+  setFabrixConfig,
+} from "./lib/api";
+import { OW_OPEN_URL, isExternalUrl } from "./lib/linkGuard";
+import type { AgentInfo, AiProConfig, DetectedAgent, FabrixConfig, Settings } from "./lib/types";
 
 function App() {
   const [view, setView] = useState<View>("home");
@@ -27,7 +36,9 @@ function App() {
   const [bootNonce, setBootNonce] = useState(0);
 
   // Detect a single agent and merge its result/loading/error into the maps.
-  const detectOne = useCallback(async (id: string) => {
+  // `force` forces a live model fetch for the remote agent (Fabrix) — used by
+  // manual Refresh and save; startup detection uses the cache (D66).
+  const detectOne = useCallback(async (id: string, force = false) => {
     setLoading((m) => ({ ...m, [id]: true }));
     setErrors((m) => {
       if (!(id in m)) return m;
@@ -36,7 +47,7 @@ function App() {
       return rest;
     });
     try {
-      const agent = await detectAgent(id);
+      const agent = await detectAgent(id, force);
       setDetected((m) => ({ ...m, [id]: agent }));
     } catch (e) {
       setErrors((m) => ({ ...m, [id]: String(e) }));
@@ -68,6 +79,24 @@ function App() {
     };
   }, [detectOne, bootNonce]);
 
+  // External-link bridge (D76): the previewed HTML sandboxed iframes (file
+  // viewer + RAG panel) carry an injected guard (lib/linkGuard) that posts
+  // clicked http/https/mailto URLs here instead of navigating the pane. One
+  // app-level listener serves every iframe. The frames are opaque-origin, so
+  // `event.origin` is "null" — validate by message shape + URL scheme, then
+  // re-sanitize before opening in the OS browser.
+  useEffect(() => {
+    function onMessage(e: MessageEvent) {
+      const d = e.data as { type?: unknown; url?: unknown } | null;
+      if (!d || d.type !== OW_OPEN_URL || typeof d.url !== "string") return;
+      const url = d.url.trim();
+      if (!isExternalUrl(url)) return;
+      void openExternal(url).catch(() => {});
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
   const handleSave = useCallback(
     async (agentId: string, path: string | null) => {
       const next = await setAgentBin(agentId, path);
@@ -84,7 +113,21 @@ function App() {
     async (config: FabrixConfig | null) => {
       const next = await setFabrixConfig(config);
       setSettings(next);
-      await detectOne("fabrix");
+      // Force a live model fetch on save so the cache is (re)filled (D66).
+      await detectOne("fabrix", true);
+    },
+    [detectOne],
+  );
+
+  // Save/clear the AI Pro connection config, then re-detect it (D71). Mirrors
+  // `handleSaveFabrix` — the returned settings replace state, then detection
+  // re-runs (config presence + endpoint reachability + live model list).
+  const handleSaveAiPro = useCallback(
+    async (config: AiProConfig | null) => {
+      const next = await setAiProConfig(config);
+      setSettings(next);
+      // Force a live model fetch on save so the cache is (re)filled (D66).
+      await detectOne("aipro", true);
     },
     [detectOne],
   );
@@ -131,10 +174,11 @@ function App() {
               detected={detected}
               loading={loading}
               errors={errors}
-              onRefresh={detectOne}
+              onRefresh={(id) => detectOne(id, true)}
               settings={settings}
               onSave={handleSave}
               onSaveFabrix={handleSaveFabrix}
+              onSaveAiPro={handleSaveAiPro}
             />
           </div>
         ) : view === "flows" ? (

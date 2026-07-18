@@ -2,13 +2,15 @@
 //! (`apps/daemon/src/runtimes/detection.ts`); the per-agent data lives in
 //! `agents.rs` (ported from `apps/daemon/src/runtimes/defs/*.ts`).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::agents::AgentDef;
 use crate::exec::run_capture;
 use crate::resolve::resolve_agent;
 
-#[derive(Serialize, Clone)]
+// `Deserialize`/`Debug`/`PartialEq` let a model list be cached in settings.json
+// (`FabrixConfig.models`/`RagConfig.models`) and round-tripped in tests (D66).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOption {
     pub id: String,
@@ -262,8 +264,10 @@ mod tests {
         for d in defs {
             assert!(!d.id.is_empty());
             assert!(seen.insert(d.id), "duplicate id {}", d.id);
-            // Local agents ship an offline catalog; remote (Fabrix) has none
-            // (models are fetched live over HTTP).
+            // Local agents ship an offline catalog. Remote agents fetch models
+            // live over HTTP: Fabrix carries none, but AI Pro keeps a fallback
+            // catalog (used when /models is unreachable — D71), so the invariant
+            // is only asserted for Local agents.
             if d.kind == agents::AgentKind::Local {
                 assert!(!d.fallback_models.is_empty(), "{} has no fallback models", d.id);
             }
@@ -272,6 +276,17 @@ mod tests {
             agents::find("fabrix").map(|d| d.kind),
             Some(agents::AgentKind::Remote),
             "fabrix must be a remote agent"
+        );
+        // AI Pro is the second remote agent (D71) and — unlike Fabrix — keeps a
+        // static fallback catalog that `aipro::detect_aipro` relies on.
+        assert_eq!(
+            agents::find("aipro").map(|d| d.kind),
+            Some(agents::AgentKind::Remote),
+            "aipro must be a remote agent"
+        );
+        assert!(
+            !agents::find("aipro").unwrap().fallback_models.is_empty(),
+            "aipro keeps a static fallback catalog"
         );
         for id in ["opencode", "claude", "codex", "gemini", "antigravity", "aipro", "fabrix"] {
             assert!(agents::find(id).is_some(), "missing {id}");

@@ -27,6 +27,7 @@ import {
   runAgent,
   saveSession,
   setProjectCodebase,
+  writeFile,
 } from "../lib/api";
 import { useAutoGrow } from "../lib/useAutoGrow";
 import {
@@ -36,7 +37,9 @@ import {
 } from "../lib/clarify";
 import { joinWorkdirPath } from "../lib/artifacts";
 import { buildRagQuery, formatKnowledgeContext, formatRagContext, ragUserError } from "../lib/foundation";
-import { optionsFor } from "../lib/options";
+import { judgeRagRelevance, type RagVerdict } from "../lib/ragRelevance";
+import { optionsFor, REQUIREMENT_QUESTION } from "../lib/options";
+import { PROMPT_OPTIMIZER_SKILL, parsePromptBlock, stripPromptBlock } from "../lib/promptCraft";
 import { resolveSkills } from "../lib/skills";
 import { isGenerative, progressLabel, runtimeWorkflowFor } from "../lib/workflow";
 import type {
@@ -76,6 +79,53 @@ function buildTranscript(prev: ChatMessage[], latest: string): string {
   return lines.join("\n\n");
 }
 
+/** The last assistant message's accumulated text (the streamed reply). */
+function lastAssistantContent(msgs: ChatMessage[]): string {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === "assistant") return msgs[i].content;
+  }
+  return "";
+}
+
+/** The last assistant message's error text (set from a `RunEvent::Error`, e.g.
+ * the CLI's stderr on a failed turn). */
+function lastAssistantError(msgs: ChatMessage[]): string {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === "assistant") return msgs[i].error ?? "";
+  }
+  return "";
+}
+
+/** Per-step automatic-retry budget for a workflow turn that failed with a
+ * transient error — chiefly the aipro backend's intermittent >45s first-response
+ * timeout, which aborts otherwise-fine multi-step workflows (D68). */
+const MAX_STEP_RETRIES = 2;
+
+/** Does a failed turn's error look transient (worth an automatic retry)? Targets
+ * streaming/timeout/network hiccups and explicitly excludes fatal errors (wrong
+ * model, TLS/cert distrust, auth/guardrail blocks) that would only retry into the
+ * same wall (D68; cf. codex TLS D28). */
+function isTransientFailure(msg: string): boolean {
+  const m = msg.toLowerCase();
+  if (
+    /model not found|invalid peer certificate|badsignature|certificate|unauthorized|forbidden|\b40[13]\b|api key|credential/.test(
+      m,
+    )
+  )
+    return false;
+  return /timeout|timed out|etimedout|econnreset|socket hang up|premature close|network|stream (disconnect|clos|interrupt|error)|streaming request/.test(
+    m,
+  );
+}
+
+/** Turn a remote agent's document reply into the file body (D67): if the whole
+ * reply is one fenced code block (```md … ```), unwrap it; else trim as-is. */
+function extractDocBody(content: string): string {
+  const trimmed = content.trim();
+  const m = trimmed.match(/^```[^\n]*\n([\s\S]*?)\n?```$/);
+  return (m ? m[1] : trimmed).trim();
+}
+
 export function ChatPanel({
   projectId,
   onResolveWorkdir,
@@ -98,6 +148,7 @@ export function ChatPanel({
   onClarify,
   onPrefill,
   onRagResult,
+  onPromptResult,
   onStreamingChange,
   onStepProgress,
   onOpenAgents,
@@ -125,8 +176,9 @@ export function ChatPanel({
   codebasePath: string | null;
   /** A saved session to rehydrate (view + continue), or null for a fresh chat. */
   initialSession: StoredSession | null;
-  /** Requirements-form answers to send as the next turn (nonce-guarded). */
-  answerSubmission: { wire: string; display: string; nonce: number } | null;
+  /** Requirements-form answers to send as the next turn (nonce-guarded).
+   * `requirement` is the raw requirement-field answer (D78). */
+  answerSubmission: { wire: string; display: string; requirement: string; nonce: number } | null;
   /** True while the requirements form awaits the user — manual chat input is
    * blocked until the form is submitted (hidden prefill / auto turns still run). */
   formPending: boolean;
@@ -140,8 +192,12 @@ export function ChatPanel({
   onClarify: (questions: ClarifyQuestion[]) => void;
   /** Option answers inferred from the launcher prompt (prefill pass) → form. */
   onPrefill: (answers: Record<string, string | string[]>) => void;
-  /** RAG search results from the rag foundation step → canvas "검색 결과" tab. */
-  onRagResult: (query: string, hits: RagHit[]) => void;
+  /** RAG search results from the rag foundation step → canvas "검색 결과" tab.
+   * `verdict` is the relevance judge's curated result (D70), or null when the
+   * judge failed/parsed nothing (fail open — render the raw hits). */
+  onRagResult: (query: string, hits: RagHit[], verdict: RagVerdict | null) => void;
+  /** The optimized prompt from the first work turn → canvas "프롬프트" tab (D78). */
+  onPromptResult: (text: string) => void;
   /** Mirror streaming state up (canvas form disables while streaming). */
   onStreamingChange: (streaming: boolean) => void;
   /** Mirror the workflow step progress up (canvas 산출물 tab shows per-artifact
@@ -193,6 +249,13 @@ export function ChatPanel({
   // loaded, so its cli session id / resume state survive.
   const loadedRef = useRef(!!initialSession);
 
+  // Built-in prompt-optimizer skill (D78): injected once per conversation on the
+  // first REAL work turn (not a prefill turn), independent of step arming. A
+  // loaded session has no first turn → no injection.
+  const promptSkillPendingRef = useRef(!initialSession);
+  // Marks the turn whose `end` must parse a ```prompt block (like inflightStepRef).
+  const promptInflightRef = useRef(false);
+
   // Category workflow orchestration (generalizes the clarify one-shot). `WF` is
   // the category's ordered steps (user-configured via settings, else the
   // built-in default — frozen per mount; the sessionNonce remount resets it);
@@ -231,6 +294,9 @@ export function ChatPanel({
   const knowledgeDirsRef = useRef(new Set<string>());
   const lastAnswersWireRef = useRef("");
   const preflightAbortRef = useRef(false);
+  // Cancel handle for the in-flight RAG relevance judge turn (D70) — an isolated
+  // run whose id isn't in runIdRef, so Stop must reach it through this ref.
+  const ragJudgeCancelRef = useRef<(() => void) | null>(null);
   // Workflow completion (D59): true once any generative step produced a file;
   // reaching the terminal chat step then proposes saving the artifacts as
   // knowledge — once per session, dismissible.
@@ -264,6 +330,11 @@ export function ChatPanel({
     stepIndex: number | null;
   } | null>(null);
 
+  // Auto-retry counter for the current in-flight step (D68): resets implicitly
+  // when a different step starts failing. Survives within a session; a remount
+  // (new session) clears it.
+  const stepRetryRef = useRef<{ step: number; count: number }>({ step: -1, count: 0 });
+
   // Transient UI-level failure line (e.g. a session that failed to open) —
   // shown under the header instead of being silently swallowed (D57).
   const [uiError, setUiError] = useState<string | null>(null);
@@ -275,6 +346,10 @@ export function ChatPanel({
 
   const started = messages.length > 0;
   const sessionCapable = SESSION_AGENTS.includes(agentId);
+  // Remote (HTTP) agents (Fabrix) stream text only — no filesystem/tools — so
+  // the app persists their document-step output itself (D67). `agentId` is
+  // locked once a turn starts, so this is stable across the turn.
+  const isRemote = detected[agentId]?.source === "remote";
 
   // History popover.
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -461,7 +536,12 @@ export function ChatPanel({
             for (let i = msgs.length - 1; i >= 0; i--) {
               if (msgs[i].role === "assistant") {
                 const answers = parsePrefill(msgs[i].content, optionQuestions);
-                if (Object.keys(answers).length) onPrefill(answers);
+                // Merge the client-filled requirement back in — handlePrefill
+                // full-replaces clarifyPrefill, so without this the agent's
+                // answers would wipe the requirement field (D78).
+                const seed = seedPromptRef.current.trim();
+                const merged = seed ? { [REQUIREMENT_QUESTION.id]: seed, ...answers } : answers;
+                if (Object.keys(merged).length) onPrefill(merged);
                 break;
               }
             }
@@ -473,6 +553,33 @@ export function ChatPanel({
 
         const stepIdx = inflightStepRef.current;
         inflightStepRef.current = null;
+
+        // Built-in prompt-optimizer (D78): strip the ```prompt block out of the
+        // visible reply → canvas "프롬프트" tab, so it isn't re-sent in the
+        // sessionless transcript (which would re-trigger the block) or re-shown.
+        // Tag match only — no fallback (the rest of the reply is the real work
+        // output). A failed/canceled turn skips parsing (same as skill dedupe —
+        // the wire already reached the agent, so we don't rewind on stream fail).
+        if (promptInflightRef.current) {
+          promptInflightRef.current = false;
+          if (ev.status === "succeeded") {
+            const msgs = messagesRef.current; // live via mutateMessages
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i].role !== "assistant") continue;
+              const block = parsePromptBlock(msgs[i].content);
+              if (block) {
+                const idx = i;
+                mutateMessages((prev) =>
+                  prev.map((m, j) =>
+                    j === idx ? { ...m, content: stripPromptBlock(m.content) } : m,
+                  ),
+                );
+                onPromptResult(block);
+              }
+              break;
+            }
+          }
+        }
 
         // Clear the mid-stream flag on the whole list (matches persist()).
         mutateMessages((prev) =>
@@ -488,7 +595,20 @@ export function ChatPanel({
             setStepStatusAt(stepIdx, "done");
             if (step.file && resolvedWorkdirRef.current) {
               producedFileRef.current = true; // an artifact exists → completion may propose saving it (D59)
-              onOpenFile(joinWorkdirPath(resolvedWorkdirRef.current, step.file));
+              const abs = joinWorkdirPath(resolvedWorkdirRef.current, step.file);
+              if (isRemote) {
+                // Fabrix streams text but cannot write files — persist the reply
+                // ourselves, then open it (refreshNonce bump → existence probe
+                // finds it → FileViewer mounts). Write first, open after (D67).
+                const body = extractDocBody(lastAssistantContent(messagesRef.current));
+                void writeFile(abs, body)
+                  .then(() => onOpenFile(abs))
+                  .catch((e) =>
+                    mutateMessages((prev) => [...prev, note(`산출물 파일 저장 실패 — ${String(e)}`)]),
+                  );
+              } else {
+                onOpenFile(abs); // CLI agents wrote the file with their own tools
+              }
             }
             const nextIdx = stepIdx + 1;
             stepIndexRef.current = nextIdx;
@@ -507,18 +627,50 @@ export function ChatPanel({
           }
           // chat kind: terminal — nothing to advance.
         } else if (stepIdx != null) {
-          // Canceled/failed mid-workflow → halt auto-progress, drop to plain chat.
-          stepIndexRef.current = WF.length;
-          stepArmedRef.current = false;
-          setStepStatusAt(stepIdx, "halted");
-          mutateMessages((prev) => [
-            ...prev,
-            note(
-              ev.status === "canceled"
-                ? "작업을 중지했습니다 — 이후에는 일반 대화로 진행됩니다."
-                : "오류로 단계 진행을 중단했습니다 — '다시 시도'로 재개하거나 일반 대화로 진행하세요.",
-            ),
-          ]);
+          // A generative step's turn failed mid-workflow. If the failure looks
+          // transient (chiefly aipro's intermittent >45s first-response timeout —
+          // D68) and the per-step retry budget is left, drop the failed pair and
+          // AUTO-RETRY the same step (via the auto-turn nonce) before giving up.
+          const attempt = stepRetryRef.current.step === stepIdx ? stepRetryRef.current.count + 1 : 1;
+          const retryable =
+            ev.status === "failed" &&
+            isGenerative(WF[stepIdx].kind) &&
+            attempt <= MAX_STEP_RETRIES &&
+            isTransientFailure(lastAssistantError(messagesRef.current));
+          if (retryable) {
+            stepRetryRef.current = { step: stepIdx, count: attempt };
+            // Drop the failed pair so the (sessionless) transcript stays clean.
+            mutateMessages((prev) => {
+              const next = [...prev];
+              if (next.length && next[next.length - 1].role === "assistant") next.pop();
+              if (next.length && next[next.length - 1].role === "user") next.pop();
+              return next;
+            });
+            stepIndexRef.current = stepIdx;
+            stepArmedRef.current = true;
+            setStepStatusAt(stepIdx, "pending");
+            setAutoTurn((s) => ({
+              display: `${progressLabel(stepIdx, WF)} · 일시적 오류로 재시도 중 (${attempt}/${MAX_STEP_RETRIES})`,
+              nonce: (s?.nonce ?? 0) + 1,
+            }));
+          } else {
+            // Canceled / non-transient / budget exhausted → halt, drop to plain chat.
+            const exhausted = ev.status === "failed" && attempt > MAX_STEP_RETRIES;
+            stepRetryRef.current = { step: -1, count: 0 };
+            stepIndexRef.current = WF.length;
+            stepArmedRef.current = false;
+            setStepStatusAt(stepIdx, "halted");
+            mutateMessages((prev) => [
+              ...prev,
+              note(
+                ev.status === "canceled"
+                  ? "작업을 중지했습니다 — 이후에는 일반 대화로 진행됩니다."
+                  : exhausted
+                    ? `여러 번(${MAX_STEP_RETRIES}회) 재시도했지만 실패했습니다 — '다시 시도'로 재개하거나 일반 대화로 진행하세요.`
+                    : "오류로 단계 진행을 중단했습니다 — '다시 시도'로 재개하거나 일반 대화로 진행하세요.",
+              ),
+            ]);
+          }
         } else if (ev.status === "canceled") {
           // Plain-chat cancel: leave a consistent confirmation (the partial
           // reply above stays as-is).
@@ -575,7 +727,10 @@ export function ChatPanel({
    * turn, or decide to skip the step (unconfigured / empty / failed — the
    * foundation never blocks the flow). `codebase` is synchronous; `rag` and
    * `knowledge` fetch before the agent turn. */
-  const stepPreflight = async (step: StepDef): Promise<{ context?: string; skip?: string }> => {
+  const stepPreflight = async (
+    step: StepDef,
+    cwd: string,
+  ): Promise<{ context?: string; skip?: string }> => {
     if (step.kind === "rag") {
       if (!settings?.rag?.endpoint?.trim()) {
         return { skip: "RAG가 설정되지 않아 사내 문서 검색 단계를 건너뜁니다. (지식 화면에서 등록)" };
@@ -585,7 +740,24 @@ export function ChatPanel({
         const hits = await ragSearch(query);
         if (preflightAbortRef.current) return {};
         if (!hits.length) return { skip: "관련 사내 문서를 찾지 못해 검색 단계를 건너뜁니다." };
-        onRagResult(query, hits);
+        // Relevance judge (D70): an isolated turn decides whether these results
+        // actually help this task (and curates them). Not relevant → skip (no
+        // panel, no injection). Judge failure (verdict null) → fail open.
+        const judge = judgeRagRelevance({
+          agentId,
+          model: model === "default" ? null : model,
+          cwd,
+          task: query,
+          hits,
+        });
+        ragJudgeCancelRef.current = judge.cancel;
+        const verdict = await judge.promise;
+        ragJudgeCancelRef.current = null;
+        if (preflightAbortRef.current) return {};
+        if (verdict && verdict.relevant === false) {
+          return { skip: "검색된 사내 문서가 이번 작업과 관련이 적어 표시하지 않습니다." };
+        }
+        onRagResult(query, hits, verdict ?? null);
         return { context: formatRagContext(hits) };
       } catch (e) {
         return { skip: `사내 문서 검색 단계를 건너뜁니다 — ${ragUserError(String(e))}` };
@@ -727,10 +899,26 @@ export function ChatPanel({
         skillBodies.push(body);
       }
     }
+    // Built-in prompt-optimizer skill (D78): inject once on the first real work
+    // turn, independent of step arming — so guide's skipped rag step doesn't
+    // consume it; it rides the first turn that actually reaches the agent.
+    // unshift → wire top (above the step skills).
+    let promptInjectedNow = false;
+    if (!isPrefill && promptSkillPendingRef.current) {
+      promptSkillPendingRef.current = false;
+      promptInjectedNow = true;
+      promptInflightRef.current = true;
+      skillBodies.unshift(PROMPT_OPTIMIZER_SKILL);
+    }
+
     // A failed send never reached the agent — forget this turn's skill marks so
     // the retry (rearmStep) injects them again.
     const unwindSkills = () => {
       for (const id of injectedNow) injectedSkillIdsRef.current.delete(id);
+      if (promptInjectedNow) {
+        promptSkillPendingRef.current = true;
+        promptInflightRef.current = false;
+      }
     };
 
     // Foundation preflight (D44): resolve the step's wire context before the
@@ -738,14 +926,14 @@ export function ChatPanel({
     let preflightContext = "";
     if (!isPrefill && stepInject && step) {
       const fetches = step.kind === "rag" || step.kind === "knowledge";
-      const fetchNote = step.kind === "rag" ? "사내 문서 검색 중…" : "지식 베이스 확인 중…";
+      const fetchNote = step.kind === "rag" ? "사내 문서 검색·관련성 확인 중…" : "지식 베이스 확인 중…";
       if (fetches) {
         setStreaming(true); // Stop stays live during the fetch
         // Visible fetch feedback (D57): the network call can take a while
         // (HTTP timeout 120s) — announce it, then drop the transient note.
         mutateMessages((prev) => [...prev, note(fetchNote)]);
       }
-      const pf = await stepPreflight(step);
+      const pf = await stepPreflight(step, cwd);
       if (fetches) {
         setStreaming(false);
         mutateMessages((prev) =>
@@ -798,9 +986,18 @@ export function ChatPanel({
     const pathCtx =
       !isPrefill && stepInject && step && isGenerative(step.kind) ? pathContext(step, cwd) : "";
 
+    // Remote agents (Fabrix) can't run the "save with your file tool" instruction
+    // — the app writes their reply to `step.file` (D67). Tell them to emit only
+    // the clean document body (no tool talk / greetings) so the saved file is
+    // the document itself. Only for remote document steps; CLI wire unchanged.
+    const remoteDocCtx =
+      !isPrefill && isRemote && stepInject && step && isGenerative(step.kind) && step.file
+        ? "이 단계의 출력 전체가 그대로 문서 파일로 저장됩니다. 파일 저장 도구를 쓰거나 저장 여부를 언급하지 말고, 인사말·메타설명 없이 문서 본문(마크다운/HTML)만 출력하세요."
+        : "";
+
     const wire = isPrefill
       ? prefillInstruction(optionQuestions, seedPromptRef.current)
-      : [...skillBodies, stepInject ? step!.instruction : "", pathCtx, preflightContext, prompt]
+      : [...skillBodies, stepInject ? step!.instruction : "", pathCtx, remoteDocCtx, preflightContext, prompt]
           .filter(Boolean)
           .join("\n\n");
     if (!wire.trim()) {
@@ -895,6 +1092,9 @@ export function ChatPanel({
   };
 
   const stop = () => {
+    // Cancel an in-flight relevance judge turn (D70) — its isolated run id isn't
+    // in runIdRef, so it won't be reached by the branch below.
+    ragJudgeCancelRef.current?.();
     if (runIdRef.current) cancelRun(runIdRef.current).catch(() => {});
     // Streaming with no run id = a foundation preflight fetch is in flight;
     // flag it so send() aborts instead of spawning the turn.
@@ -985,7 +1185,12 @@ export function ChatPanel({
     seededRef.current = true;
     if (optionQuestions.length > 0) {
       onClarify(optionQuestions);
-      if (seedPromptRef.current.trim()) {
+      const seed = seedPromptRef.current.trim();
+      if (seed) {
+        // Client-fill the requirement field immediately from the launcher seed
+        // (noPrefill → the agent never fills it); the hidden prefill turn then
+        // fills the other options it can infer (D78).
+        onPrefill({ [REQUIREMENT_QUESTION.id]: seed });
         void send("", {
           system: true,
           prefill: true,
@@ -1015,9 +1220,13 @@ export function ChatPanel({
     const submission = answerSubmission;
     lastAnswersWireRef.current = submission.wire; // feeds the RAG query
     const seed = seedPromptRef.current.trim();
-    const wire = seed ? `${submission.wire}\n\n원래 요청:\n${seed}` : submission.wire;
+    const requirement = submission.requirement?.trim() ?? "";
+    // The requirement answer is already in submission.wire (D78), so only append
+    // the launcher seed when there was no requirement field. The user bubble
+    // prefers the requirement text over the seed.
+    const wire = !requirement && seed ? `${submission.wire}\n\n원래 요청:\n${seed}` : submission.wire;
     nonceSendInflightRef.current = true;
-    void send(wire, { display: seed || submission.display }).then((handled) => {
+    void send(wire, { display: requirement || seed || submission.display }).then((handled) => {
       nonceSendInflightRef.current = false;
       if (handled) lastAnswerNonceRef.current = submission.nonce;
     });
