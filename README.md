@@ -10,7 +10,7 @@
 
 `Windows` · `Tauri v2` · `Rust` · `React 19` · `TypeScript` · `Tailwind CSS v4`
 
-제작: **Samsung SDS** · 버전 `0.1.0`
+제작: **Samsung SDS** · 버전 `1.0.0`
 
 </div>
 
