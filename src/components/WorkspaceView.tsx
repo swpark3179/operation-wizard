@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { ChatPanel, defaultAgentId } from "./ChatPanel";
 import { CanvasPanel } from "./CanvasPanel";
 import type { KnowledgeSaveRequest } from "./KnowledgeSavePanel";
 import type { StepProgress } from "./WorkflowStepper";
 import { categoryLabel, type Category } from "./workspace";
+import { ensureProject } from "../lib/api";
 import { artifactsFor, joinWorkdirPath, normalizePathKey } from "../lib/artifacts";
+import { classifyCategory } from "../lib/categorize";
 import { formatClarifyAnswers, type ClarifyAnswer, type ClarifyQuestion } from "../lib/clarify";
-import { ragResultHtml } from "../lib/foundation";
+import { ragCuratedHtml, ragResultHtml } from "../lib/foundation";
+import type { RagVerdict } from "../lib/ragRelevance";
 import type { AgentInfo, DetectedAgent, RagHit, Settings, StoredSession } from "../lib/types";
 
 /** Canvas views: the fixed tabs (산출물/다이어그램 aggregate the workflow's
@@ -17,6 +21,7 @@ export type CanvasTab =
   | "files"
   | "requirements"
   | "rag"
+  | "prompt"
   | "artifacts"
   | "diagrams"
   | "knowledge-save"
@@ -62,6 +67,7 @@ export function WorkspaceView({
   initialAgentId,
   initialModel,
   category,
+  autoCategory,
   seedPrompt,
   agents,
   detected,
@@ -84,6 +90,9 @@ export function WorkspaceView({
   initialAgentId?: string | null;
   initialModel?: string | null;
   category: Category;
+  /** True when `category` is only a provisional default and the real category
+   * should be classified from `seedPrompt` before ChatPanel mounts (D81). */
+  autoCategory?: boolean;
   seedPrompt: string;
   agents: AgentInfo[];
   detected: Record<string, DetectedAgent>;
@@ -119,6 +128,9 @@ export function WorkspaceView({
   // The latest RAG search result, rendered as a canvas tab (in-memory HTML via
   // sandboxed iframe srcdoc — never written to disk, D46).
   const [ragResult, setRagResult] = useState<{ query: string; html: string } | null>(null);
+  // The optimized prompt the agent produced on the first work turn (D78),
+  // rendered as the "프롬프트" canvas tab (plain text — no iframe needed).
+  const [promptResult, setPromptResult] = useState<string | null>(null);
   // Remount key: bumping it starts a fresh ChatPanel (new session) or swaps in a
   // loaded session, resetting all of ChatPanel's state/refs in one shot.
   const [sessionNonce, setSessionNonce] = useState(0);
@@ -128,6 +140,16 @@ export function WorkspaceView({
   );
   // Only the very first chat (from the launcher) auto-sends the seed prompt.
   const [activeSeed, setActiveSeed] = useState(seedPrompt);
+  // Category auto-classification (D81): a composer start arrives with a
+  // provisional category ("plan") + autoCategory=true. While classifying, the
+  // chat column shows a placeholder; ChatPanel mounts once for the chosen
+  // category when it clears. Loaded sessions / explicit category cards (and an
+  // empty prompt) never classify — ChatPanel just mounts for `category`.
+  const [classifying, setClassifying] = useState(
+    () => !!autoCategory && !initialSession && !!seedPrompt.trim(),
+  );
+  const classifyStartedRef = useRef(false);
+  const classifyCancelRef = useRef<(() => void) | null>(null);
 
   // Requirements options: the category's fixed catalog is shown on entry →
   // canvas form → answers back to the chat as the first work turn. Optionally
@@ -169,9 +191,46 @@ export function WorkspaceView({
     [onBusyChange],
   );
   useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
+
+  // Run the classification turn once (D81). It needs a cwd (run.rs requires a
+  // non-empty working folder), so resolve/create the project first (idempotent
+  // ensureProject — writes the provisional "plan" once; the real category is
+  // persisted per-session by the mounted ChatPanel). Guarded by a ref like
+  // ChatPanel's boot effect (no cleanup → StrictMode double-invoke is a no-op).
+  // Any failure falls back to "plan", the historical default.
+  useEffect(() => {
+    if (!classifying || classifyStartedRef.current) return;
+    classifyStartedRef.current = true;
+    void (async () => {
+      let best: Category = "plan";
+      try {
+        const title = seedPrompt.trim().slice(0, 60) || categoryLabel(category);
+        const project = await ensureProject(projectId, initialWorkdir ?? "", title, "plan", null);
+        setResolvedWorkdir(project.workdir);
+        const judge = classifyCategory({
+          agentId: initialAgentId ?? defaultAgentId(agents, detected),
+          model: initialModel && initialModel !== "default" ? initialModel : null,
+          cwd: project.workdir,
+          seed: seedPrompt,
+        });
+        classifyCancelRef.current = judge.cancel;
+        best = (await judge.promise) ?? "plan";
+        classifyCancelRef.current = null;
+      } catch {
+        best = "plan";
+      }
+      setActiveCategory(best);
+      setClassifying(false);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [answerSubmission, setAnswerSubmission] = useState<{
     wire: string;
     display: string;
+    /** The raw requirement-field answer (D78) — lets ChatPanel show it as the
+     * user bubble and skip re-appending the launcher seed. */
+    requirement: string;
     nonce: number;
   } | null>(null);
 
@@ -187,6 +246,7 @@ export function WorkspaceView({
     setActiveSeed("");
     resetClarify();
     setRagResult(null); // codebasePath stays — it is project-scoped
+    setPromptResult(null);
     setOpenFiles([]);
     setArtifactSel(null);
     setKnowledgeSave(null); // next save is a new entry (D59)
@@ -201,6 +261,7 @@ export function WorkspaceView({
     setActiveSeed("");
     resetClarify();
     setRagResult(null);
+    setPromptResult(null);
     setOpenFiles([]);
     setArtifactSel(null);
     setKnowledgeSave(null);
@@ -210,10 +271,22 @@ export function WorkspaceView({
   };
 
   // RAG search results from the rag foundation step: build the (escaped)
-  // result document and surface it as the "검색 결과" tab.
-  const handleRagResult = (query: string, hits: RagHit[]) => {
-    setRagResult({ query, html: ragResultHtml(query, hits) });
+  // result document and surface it as the "검색 결과" tab. When the relevance
+  // judge returned curated sections (D70) render those; otherwise (fail open)
+  // fall back to the raw hit list.
+  const handleRagResult = (query: string, hits: RagHit[], verdict: RagVerdict | null) => {
+    const html = verdict?.sections?.length
+      ? ragCuratedHtml(query, verdict, hits)
+      : ragResultHtml(query, hits);
+    setRagResult({ query, html });
     setCanvasTab("rag");
+  };
+
+  // The optimized prompt from the first work turn (D78) → "프롬프트" tab. Auto-
+  // switch on arrival (D46 precedent) — surfacing it is the educational point.
+  const handlePromptResult = (text: string) => {
+    setPromptResult(text);
+    setCanvasTab("prompt");
   };
 
   const handleClarify = (questions: ClarifyQuestion[]) => {
@@ -347,7 +420,11 @@ export function WorkspaceView({
     }
     const rest = answers.filter((a) => a.type !== "folder");
     const { wire, display } = formatClarifyAnswers(rest);
-    setAnswerSubmission((s) => ({ wire, display, nonce: (s?.nonce ?? 0) + 1 }));
+    // The requirement answer stays IN the wire (it is the prompt optimizer's key
+    // input, D78) but is also carried out so ChatPanel can bubble/dedupe it.
+    const req = answers.find((a) => a.id === "userRequest");
+    const requirement = typeof req?.value === "string" ? req.value.trim() : "";
+    setAnswerSubmission((s) => ({ wire, display, requirement, nonce: (s?.nonce ?? 0) + 1 }));
     setClarify(null);
     setClarifyPrefill(null);
     setCanvasTab("files"); // back to the file explorer while the agent works
@@ -356,7 +433,25 @@ export function WorkspaceView({
   return (
     <div ref={layoutRef} className={"flex h-full min-h-0" + (resizing ? " select-none" : "")}>
       <div style={{ width: chatWidth }} className="flex min-h-0 shrink-0">
-        <ChatPanel
+        {classifying ? (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-3 border-r border-line bg-panel px-6 text-center">
+            <Loader2 size={22} className="animate-spin text-accent" />
+            <div className="text-[13.5px] font-medium text-ink-strong">
+              요청을 분석해 작업 유형을 선택하는 중…
+            </div>
+            <div className="text-[12px] leading-[1.5] text-ink-soft">
+              입력하신 요청에 가장 알맞은 업무 카테고리를 정하고 있습니다.
+            </div>
+            <button
+              type="button"
+              onClick={() => classifyCancelRef.current?.()}
+              className="mt-1 rounded-md border border-line bg-panel px-3 py-1.5 text-[12px] text-ink-muted transition-colors hover:bg-subtle"
+            >
+              중지
+            </button>
+          </div>
+        ) : (
+          <ChatPanel
           key={sessionNonce}
         projectId={projectId}
         onResolveWorkdir={setResolvedWorkdir}
@@ -379,11 +474,13 @@ export function WorkspaceView({
           onClarify={handleClarify}
           onPrefill={handlePrefill}
           onRagResult={handleRagResult}
+          onPromptResult={handlePromptResult}
           onStreamingChange={handleStreamingChange}
           onStepProgress={setStepProgress}
           onOpenAgents={onOpenAgents}
           onOpenKnowledgeSave={handleOpenKnowledgeSave}
-        />
+          />
+        )}
       </div>
       <div
         role="separator"
@@ -414,6 +511,7 @@ export function WorkspaceView({
         prefillNonce={prefillNonce}
         onSubmitAnswers={handleSubmitAnswers}
         ragResult={ragResult}
+        promptResult={promptResult}
         artifacts={artifacts}
         stepProgress={stepProgress}
         artifactSel={artifactSel}

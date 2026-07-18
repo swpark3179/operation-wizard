@@ -1,6 +1,7 @@
 import { AgentCard } from "./AgentCard";
 import { FabrixCard } from "./FabrixCard";
-import type { AgentInfo, DetectedAgent, FabrixConfig, Settings } from "../lib/types";
+import { AiProCard } from "./AiProCard";
+import type { AgentInfo, AiProConfig, DetectedAgent, FabrixConfig, Settings } from "../lib/types";
 
 export function AgentsView({
   agents,
@@ -11,6 +12,7 @@ export function AgentsView({
   settings,
   onSave,
   onSaveFabrix,
+  onSaveAiPro,
 }: {
   agents: AgentInfo[];
   detected: Record<string, DetectedAgent>;
@@ -23,6 +25,8 @@ export function AgentsView({
   onSave: (agentId: string, path: string | null) => Promise<void>;
   /** Save/clear the Fabrix connection config, then re-detect it (D64). */
   onSaveFabrix: (config: FabrixConfig | null) => Promise<void>;
+  /** Save/clear the AI Pro connection config, then re-detect it (D71). */
+  onSaveAiPro: (config: AiProConfig | null) => Promise<void>;
 }) {
   return (
     <div className="mx-auto max-w-[680px] px-6 py-7">
@@ -31,9 +35,9 @@ export function AgentsView({
           Agents
         </h2>
         <p className="mt-0.5 text-[13px] text-ink-muted">
-          Local CLI coding agents detected on this machine, plus the Fabrix remote
-          HTTP API. Expand a card's custom path (or enter Fabrix's connection info)
-          to configure it.
+          Local CLI coding agents detected on this machine, plus the Fabrix and
+          AI Pro remote HTTP APIs. Expand a card's custom path (or enter the
+          remote connection info) to configure it.
         </p>
       </div>
 
@@ -49,6 +53,17 @@ export function AgentsView({
               onRefresh={() => onRefresh(info.id)}
               settings={settings}
               onSaveFabrix={onSaveFabrix}
+            />
+          ) : info.id === "aipro" ? (
+            <AiProCard
+              key={info.id}
+              info={info}
+              agent={detected[info.id] ?? null}
+              loading={loading[info.id] ?? false}
+              error={errors[info.id] ?? null}
+              onRefresh={() => onRefresh(info.id)}
+              settings={settings}
+              onSaveAiPro={onSaveAiPro}
             />
           ) : (
             <AgentCard

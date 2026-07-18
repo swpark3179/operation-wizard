@@ -1,7 +1,9 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AgentInfo,
+  AiProConfig,
   ConfluenceConfig,
   DetectedAgent,
   FabrixConfig,
@@ -25,8 +27,10 @@ export function listAgents(): Promise<AgentInfo[]> {
   return invoke<AgentInfo[]>("list_agents");
 }
 
-export function detectAgent(agentId: string): Promise<DetectedAgent> {
-  return invoke<DetectedAgent>("detect_agent", { agentId });
+/** Detect one agent. `force` forces a live model fetch for the remote agent
+ * (Fabrix); without it a cached model list is used, no network call (D66). */
+export function detectAgent(agentId: string, force = false): Promise<DetectedAgent> {
+  return invoke<DetectedAgent>("detect_agent", { agentId, force });
 }
 
 export function getSettings(): Promise<Settings> {
@@ -47,7 +51,7 @@ export function setWorkflow(category: string, steps: StepDef[] | null): Promise<
   return invoke<Settings>("set_workflow", { category, steps });
 }
 
-/** Set (or clear, with null/empty base URL) the Confluence crawl config. */
+/** Set (or clear, with null/empty URL) the Confluence MCP connection (D82). */
 export function setConfluenceConfig(config: ConfluenceConfig | null): Promise<Settings> {
   return invoke<Settings>("set_confluence_config", { config });
 }
@@ -68,6 +72,17 @@ export function probeFabrix(): Promise<string> {
   return invoke<string>("probe_fabrix");
 }
 
+/** Set (or clear, with null/empty endpoint) the AI Pro connection config (D71). */
+export function setAiProConfig(config: AiProConfig | null): Promise<Settings> {
+  return invoke<Settings>("set_aipro_config", { config });
+}
+
+/** AI Pro connection test: fetches the OpenAI-compatible model list and returns a
+ * summary ("연결됨 (N개 모델)"). Rejects with a Korean message if unconfigured. */
+export function probeAiPro(): Promise<string> {
+  return invoke<string>("probe_aipro");
+}
+
 // ── RAG / Confluence ingestion / knowledge ───────────────────────────────────
 
 /** Search the user's RAG service (rag workflow step). Rejects with a Korean
@@ -76,17 +91,35 @@ export function ragSearch(query: string, topK?: number): Promise<RagHit[]> {
   return invoke<RagHit[]>("rag_search", { query, topK: topK ?? null });
 }
 
-/** Start a Confluence crawl+ingest; progress streams over `onEvent` until a
- * terminal `end` event. Returns the ingest id (pass to {@link cancelIngest}). */
-export function startConfluenceIngest(onEvent: Channel<IngestEvent>): Promise<string> {
-  return invoke<string>("start_confluence_ingest", { onEvent });
+/** RAG connection test: fetches the rag-chat model list and returns a summary
+ * ("연결됨 (N개 모델)"). Rejects with a Korean message if unconfigured/unreachable. */
+export function probeRag(): Promise<string> {
+  return invoke<string>("probe_rag");
+}
+
+/** What to collect via the Confluence MCP server (D82): a root page (getChild
+ * recursion) and/or a search query (searchContent). Passed per-run, not stored. */
+export interface ConfluenceTarget {
+  rootPageId?: string | null;
+  searchQuery?: string | null;
+}
+
+/** Start a Confluence MCP crawl; pages become one knowledge-base artifact entry.
+ * Progress streams over `onEvent` until a terminal `end` event. Returns the
+ * ingest id (pass to {@link cancelIngest}). */
+export function startConfluenceIngest(
+  target: ConfluenceTarget,
+  onEvent: Channel<IngestEvent>,
+): Promise<string> {
+  return invoke<string>("start_confluence_ingest", { target, onEvent });
 }
 
 export function cancelIngest(ingestId: string): Promise<void> {
   return invoke("cancel_ingest", { ingestId });
 }
 
-/** Settings-screen connection test: returns the crawl root's page title. */
+/** Settings-screen connection test (D82): handshakes with the MCP server and
+ * returns a tool summary ("연결됨 — N개 도구 (…)"). */
 export function probeConfluence(): Promise<string> {
   return invoke<string>("probe_confluence");
 }
@@ -147,6 +180,13 @@ export function readFile(path: string): Promise<string> {
   return invoke<string>("read_file", { path });
 }
 
+/** Write text to `path`, creating parent dirs (D67). Used to persist a remote
+ * agent's (Fabrix) document-step output — it streams text but cannot write
+ * files, so the app writes `<workdir>/<step.file>` itself. */
+export function writeFile(path: string, contents: string): Promise<void> {
+  return invoke("write_file", { path, contents });
+}
+
 // ── Conversation persistence (projects/sessions) ─────────────────────────────
 
 /** Create the project folder + manifest (idempotent). `workdir` empty → the
@@ -205,6 +245,18 @@ export function listProjects(): Promise<ProjectSummary[]> {
 export async function pickFolder(): Promise<string | null> {
   const res = await open({ directory: true, multiple: false });
   return typeof res === "string" ? res : null;
+}
+
+/** Open a folder (or file) path in the OS file explorer (D69). */
+export function openInExplorer(path: string): Promise<void> {
+  return openPath(path);
+}
+
+/** Open an http/https/mailto URL in the OS default browser/mail client (D76).
+ * Used for links inside previewed HTML/markdown so a click never navigates the
+ * app's WebView away. Rides on `opener:default` (allow-open-url) — no new grant. */
+export function openExternal(url: string): Promise<void> {
+  return openUrl(url);
 }
 
 // Re-export Channel so components can construct one without importing Tauri directly.

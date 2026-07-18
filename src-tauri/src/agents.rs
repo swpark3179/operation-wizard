@@ -169,14 +169,17 @@ fn codex_build_args(ctx: &RunCtx) -> Vec<String> {
     }
     a.push("--json".to_string());
     a.push("--skip-git-repo-check".to_string());
-    // Windows: codex needs a sandbox; `exec resume` rejects `--sandbox`, so a
-    // config override is used there instead.
+    // codex needs a sandbox; `exec resume` rejects `--sandbox`, so a config
+    // override is used there instead. workspace-write allows writing docs to the
+    // cwd (workspace root) and stays within enterprise-managed policy ceilings —
+    // danger-full-access is rejected where a managed `allowed_sandbox_modes`
+    // policy caps at workspace-write (see docs/design/05-decisions.md D80).
     if resuming {
         a.push("-c".to_string());
-        a.push("sandbox_mode=\"danger-full-access\"".to_string());
+        a.push("sandbox_mode=\"workspace-write\"".to_string());
     } else {
         a.push("--sandbox".to_string());
-        a.push("danger-full-access".to_string());
+        a.push("workspace-write".to_string());
     }
     push_model(&mut a, ctx.model);
     if !resuming {
@@ -201,25 +204,6 @@ fn gemini_build_args(ctx: &RunCtx) -> Vec<String> {
     ];
     push_include_directories(&mut a, ctx.extra_dirs);
     push_model(&mut a, ctx.model);
-    a
-}
-
-/// AI Pro (gemini-compatible, in-house). Same as gemini, but always pins an
-/// in-house model via `--model` — a missing/`default` model makes aipro request a
-/// public Gemini id its backend rejects ("Model not found").
-fn aipro_build_args(ctx: &RunCtx) -> Vec<String> {
-    let model = match ctx.model {
-        Some(m) if !m.is_empty() && m != "default" => m,
-        _ => "glm-5.1",
-    };
-    let mut a = vec![
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--yolo".to_string(),
-        "--model".to_string(),
-        model.to_string(),
-    ];
-    push_include_directories(&mut a, ctx.extra_dirs);
     a
 }
 
@@ -313,13 +297,16 @@ pub static AGENT_DEFS: [AgentDef; 7] = [
         // No simple line-based `models` command; Open Design fetches via its own
         // MMS routes (proxy infra, out of scope here) → fallback catalog only.
         models_probe: None,
+        // Aliases first (the CLI resolves them to the current generation, so they
+        // don't go stale); pinned ids track the current generation. Refresh the
+        // pinned ids when the lineup moves (see docs/design/05-decisions.md D79).
         fallback_models: &[
-            ("sonnet", "Sonnet (alias)"),
-            ("opus", "Opus (alias)"),
-            ("haiku", "Haiku (alias)"),
-            ("claude-opus-4-5", "claude-opus-4-5"),
-            ("claude-sonnet-4-5", "claude-sonnet-4-5"),
-            ("claude-haiku-4-5", "claude-haiku-4-5"),
+            ("opus", "Opus (최신)"),
+            ("sonnet", "Sonnet (최신)"),
+            ("haiku", "Haiku (최신)"),
+            ("claude-opus-4-8", "Claude Opus 4.8"),
+            ("claude-sonnet-5", "Claude Sonnet 5"),
+            ("claude-haiku-4-5", "Claude Haiku 4.5"),
         ],
         run: Some(RunSpec {
             build_args: claude_build_args,
@@ -410,16 +397,21 @@ pub static AGENT_DEFS: [AgentDef; 7] = [
         run: Some(RunSpec::plain()),
     },
     AgentDef {
-        // In-house tool, Gemini-CLI-compatible. Originally an Open Design local
-        // profile (`baseAgent: "gemini"` in ~/.open-design/agents.local.json);
-        // baked in here as a built-in def. Gemini-like → no model-listing
-        // command, so fallback-only. The profile's spawn env
-        // (GEMINI_CLI_TRUST_WORKSPACE) is run-time only and irrelevant to detection.
+        // In-house AI Pro — a remote OpenAI-compatible HTTP service (D71). It was
+        // once wired as a local gemini-compatible CLI (`aipro` binary), but the
+        // backend is actually an OpenAI-compatible API (chat
+        // `POST {endpoint}/chat/completions` + SSE, models `GET {endpoint}/models`),
+        // so detection and run go through `aipro.rs` — like Fabrix (D64), the
+        // CLI-oriented fields are empty and `run` is `None`. Connection config
+        // (endpoint + Bearer key) lives in `settings.aipro`, not a `*_BIN` path.
+        // Unlike Fabrix it keeps a `fallback_models` catalog: `detect_aipro` uses
+        // it when `/models` is unreachable and no cache exists (no synthetic
+        // `default` is added — the chat API needs a real model id).
         id: "aipro",
         name: "AI Pro",
-        kind: AgentKind::Local,
-        bin_candidates: &["aipro"],
-        env_var: Some("AIPRO_BIN"),
+        kind: AgentKind::Remote,
+        bin_candidates: &[],
+        env_var: None,
         extra_search_subdirs: &[],
         version_timeout: VERSION_TIMEOUT,
         models_probe: None,
@@ -428,13 +420,7 @@ pub static AGENT_DEFS: [AgentDef; 7] = [
             ("qwen3.6-27b", "Qwen3.6-27b"),
             ("gpt-oss-120b", "Gpt-Oss-120b"),
         ],
-        run: Some(RunSpec {
-            build_args: aipro_build_args,
-            prompt_via_stdin: true,
-            prompt_format: PromptFormat::Text,
-            stream_format: StreamFormat::GeminiJson,
-            env: GEMINI_ENV,
-        }),
+        run: None,
     },
     AgentDef {
         // Remote HTTP API agent (D64) — the first non-CLI agent. Detection and
@@ -507,21 +493,21 @@ mod tests {
     }
 
     #[test]
-    fn gemini_and_aipro_include_directories_for_extra_dirs() {
+    fn gemini_include_directories_for_extra_dirs() {
+        // (aipro was gemini-compatible here until D71 moved it to a remote HTTP
+        // agent — the `--include-directories` mapping now applies to gemini only.)
         // No extra dirs → no flag at all.
         assert!(!gemini_build_args(&ctx(&[])).iter().any(|s| s == "--include-directories"));
-        assert!(!aipro_build_args(&ctx(&[])).iter().any(|s| s == "--include-directories"));
 
         // One flag pair per non-blank dir, trimmed (D52).
         let dirs = vec!["F:\\legacy".to_string(), "  ".to_string(), " F:\\skills\\sa ".to_string()];
-        for args in [gemini_build_args(&ctx(&dirs)), aipro_build_args(&ctx(&dirs))] {
-            let pairs: Vec<&str> = args
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| *s == "--include-directories")
-                .map(|(i, _)| args[i + 1].as_str())
-                .collect();
-            assert_eq!(pairs, vec!["F:\\legacy", "F:\\skills\\sa"]);
-        }
+        let args = gemini_build_args(&ctx(&dirs));
+        let pairs: Vec<&str> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| *s == "--include-directories")
+            .map(|(i, _)| args[i + 1].as_str())
+            .collect();
+        assert_eq!(pairs, vec!["F:\\legacy", "F:\\skills\\sa"]);
     }
 }

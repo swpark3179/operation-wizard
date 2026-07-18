@@ -8,7 +8,7 @@
 // the backend worker — nothing to restore).
 
 import { useSyncExternalStore } from "react";
-import { Channel, cancelIngest, startConfluenceIngest } from "./api";
+import { Channel, cancelIngest, startConfluenceIngest, type ConfluenceTarget } from "./api";
 import type { IngestEvent } from "./types";
 
 export interface IngestProgress {
@@ -62,7 +62,7 @@ export function useIngestState(): IngestState {
 }
 
 /** Start a crawl+ingest run. No-op while one is already running. */
-export async function startIngest(): Promise<void> {
+export async function startIngest(target: ConfluenceTarget): Promise<void> {
   if (state.status === "running") return;
   patch({
     status: "running",
@@ -103,7 +103,7 @@ export async function startIngest(): Promise<void> {
         patch({
           status: "done",
           ingestId: null,
-          summary: `${label} — 임베딩 ${ev.ingested}건 · 실패 ${ev.failed}건`,
+          summary: `${label} — 수집 ${ev.ingested}건 · 실패 ${ev.failed}건`,
         });
         break;
       }
@@ -111,7 +111,7 @@ export async function startIngest(): Promise<void> {
   };
 
   try {
-    const id = await startConfluenceIngest(channel);
+    const id = await startConfluenceIngest(target, channel);
     // The end event may already have arrived for a very short run — don't
     // resurrect a finished state with a stale id. (Read via the accessor:
     // TS would otherwise keep the early-guard narrowing of `state`.)

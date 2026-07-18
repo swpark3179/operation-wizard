@@ -1,33 +1,37 @@
-//! Confluence → RAG ingestion pipeline (D48).
+//! Confluence collection via the official MCP server (D82).
 //!
-//! Recursively collects a page tree (or one space, flat) over the Confluence
-//! Server/DC REST API and hands each page's raw `body.storage` HTML to the
-//! user's RAG service (`rag.rs` — which owns summarization + embedding).
+//! Recursively collects a page tree (or a flat search result) through the
+//! in-house Confluence **MCP** server (`mcp.rs`, JSON-RPC over streamable HTTP)
+//! and saves the pages into the **local knowledge base** as one artifact entry
+//! (`knowledge.rs`) — which the workflow's `knowledge` foundation step then
+//! injects. This replaces the old REST crawl + WebView spike, both of which the
+//! corporate WAF kept 403-ing (D75/D77), and the dead `RagClient::ingest_page`
+//! sink (rag-chat has no ingest endpoint — D65).
+//!
 //! Progress streams to the settings UI over a `tauri::ipc::Channel`
 //! (`IngestEvent`), mirroring the run engine's transport; cancellation uses a
-//! flag registry (`IngestRegistry`, a child-process-free `RunRegistry`).
+//! flag registry (`IngestRegistry`, a child-process-free `RunRegistry`). The
+//! cancel flag is checked between MCP tool calls, so cancellation latency is at
+//! most one tool call.
 //!
-//! Auth is a Bearer PAT (Server/DC). Atlassian Cloud's Basic `email:api_token`
-//! auth is out of scope for v1. The crawl is an iterative BFS with visited-set
-//! dedupe and hard page/depth caps; the cancel flag is checked between HTTP
-//! calls, so cancellation latency is at most one request timeout.
-//!
-//! Testability: the JSON parsers are pure `fn(&str)`, and the crawl loop is
-//! generic over the `ConfluenceApi` trait + an ingest sink closure, so unit
-//! tests drive it with an in-memory fake (the `root: &Path` injection pattern,
-//! adapted to HTTP).
+//! Testability: the BFS `crawl` loop is generic over the `ConfluenceApi` trait +
+//! an ingest sink closure (driven by an in-memory fake in tests), and the JSON
+//! parsers are pure `fn(&str)`. Only the production `ConfluenceApi` impl
+//! (`McpConfluence`) and the sink changed — the engine and its tests are intact.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::ipc::Channel;
 use tauri::Manager;
 
-use crate::rag::{IngestPage, RagClient};
-use crate::settings::ConfluenceConfig;
+use crate::knowledge::KnowledgeEntry;
+use crate::mcp;
 
 /// Hard caps so a runaway wiki can't crawl forever (a stop is reported in `End`).
 const MAX_PAGES: usize = 2000;
@@ -43,9 +47,9 @@ pub enum IngestEvent {
     Started { root_id: String },
     /// One page fetched from Confluence (`fetched` = running count).
     PageFetched { page_id: String, title: String, fetched: u64 },
-    /// One page accepted by the RAG service (`ingested` = running count).
+    /// One page collected into the buffer (`ingested` = running count).
     PageIngested { page_id: String, title: String, ingested: u64 },
-    /// One page failed (fetch or RAG ingest); the crawl continues.
+    /// One page failed to fetch; the crawl continues.
     PageFailed { page_id: String, title: String, message: String },
     /// Fatal failure (auth, unreachable root) — followed by `End{failed}`.
     Error { message: String },
@@ -127,71 +131,267 @@ pub trait ConfluenceApi {
         -> Result<(Vec<PageStub>, bool), String>;
 }
 
-/// Per-request timeout. Generous (D53): slow corporate Confluence/RAG backends
-/// were hitting the previous 30s limit; the cancel flag still bounds
-/// cancellation latency to one request.
-const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+// ── MCP transport (D82) ─────────────────────────────────────────────────────
+// Confluence is reached through the official MCP server (`mcp.rs`) instead of
+// the REST API (403'd by the WAF — D75/D77). The BFS `crawl` engine and its
+// `ConfluenceApi` trait are unchanged; only the production impl + ingest sink
+// changed. Exact MCP tool I/O shapes are not known ahead of time, so the parsers
+// are tolerant (try several candidate keys; non-JSON text → the page body).
 
-/// Production implementation over `reqwest::blocking` (worker threads only).
-struct HttpConfluence {
-    base: String,
-    token: Option<String>,
-    http: reqwest::blocking::Client,
+/// Collection target from the settings UI (replaces the removed rootPageId /
+/// spaceKey config fields — D82). `root_page_id` drives a recursive getChild
+/// crawl; `search_query` seeds a flat searchContent listing.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfluenceTarget {
+    #[serde(default)]
+    pub root_page_id: Option<String>,
+    #[serde(default)]
+    pub search_query: Option<String>,
 }
 
-impl HttpConfluence {
-    fn new(cfg: &ConfluenceConfig) -> Result<Self, String> {
-        let base = cfg.base_url.trim().trim_end_matches('/').to_string();
-        if base.is_empty() {
-            return Err("Confluence base URL이 설정되지 않았습니다 — 지식 화면에서 등록해 주세요".into());
+/// First non-empty string among `keys`.
+fn pick_str(obj: &Value, keys: &[&str]) -> Option<String> {
+    for k in keys {
+        if let Some(s) = obj.get(*k).and_then(|x| x.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
         }
-        let http = reqwest::blocking::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .danger_accept_invalid_certs(cfg.allow_invalid_certs)
-            .build()
-            .map_err(|e| e.to_string())?;
-        Ok(Self { base, token: cfg.token.clone(), http })
+    }
+    None
+}
+
+/// Best-effort page body: Confluence storage/view HTML first, then simple
+/// `body`/`content`/`value`/`text`/`html` string fields.
+fn pick_body(obj: &Value) -> Option<String> {
+    for path in [["body", "storage", "value"], ["body", "view", "value"]] {
+        let mut cur = obj;
+        let mut ok = true;
+        for k in path {
+            match cur.get(k) {
+                Some(v) => cur = v,
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            if let Some(s) = cur.as_str() {
+                if !s.trim().is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+    for k in ["body", "content", "value", "text", "html"] {
+        if let Some(s) = obj.get(k).and_then(|x| x.as_str()) {
+            if !s.trim().is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Unwrap a single-page envelope (`{page|content|result|data: {...}}`) or the
+/// first array element — only when the inner value looks like a page (has an id
+/// or title), so a page whose own `content` field holds the body is not
+/// mistaken for an envelope.
+fn mcp_unwrap(v: &Value) -> &Value {
+    for k in ["page", "content", "result", "data"] {
+        if let Some(inner) = v.get(k) {
+            if inner.is_object() && (inner.get("id").is_some() || inner.get("title").is_some()) {
+                return inner;
+            }
+        }
+    }
+    if let Some(first) = v.as_array().and_then(|a| a.first()) {
+        return first;
+    }
+    v
+}
+
+/// Parse an MCP `getPageById`/`getPage` result text into a `ConfluencePage`.
+/// Reuses the tested REST parser for Confluence-shaped objects; otherwise
+/// tolerant; non-JSON text becomes the page body verbatim.
+fn parse_mcp_page(text: &str, requested_id: &str) -> Result<ConfluencePage, String> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Err("MCP 페이지 응답이 비어 있습니다".to_string());
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(t) {
+        let obj = mcp_unwrap(&v);
+        let rest_shaped = obj.get("id").and_then(|x| x.as_str()).is_some()
+            && obj
+                .get("body")
+                .and_then(|b| b.get("storage"))
+                .and_then(|s| s.get("value"))
+                .is_some();
+        if rest_shaped {
+            if let Ok(p) = parse_page(&obj.to_string()) {
+                return Ok(p);
+            }
+        }
+        let id = pick_str(obj, &["id", "pageId", "contentId", "content_id"])
+            .unwrap_or_else(|| requested_id.to_string());
+        let title = pick_str(obj, &["title", "name"]).unwrap_or_default();
+        let body_html = pick_body(obj).unwrap_or_default();
+        let webui = obj
+            .get("_links")
+            .and_then(|l| l.get("webui"))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| pick_str(obj, &["webui", "url", "link"]))
+            .unwrap_or_default();
+        return Ok(ConfluencePage { id, title, body_html, webui });
+    }
+    Ok(ConfluencePage {
+        id: requested_id.to_string(),
+        title: String::new(),
+        body_html: t.to_string(),
+        webui: String::new(),
+    })
+}
+
+/// Parse an MCP `getChild`/`searchContent` result text into page stubs. Tolerant
+/// of several container shapes; unparseable/empty → no stubs (not fatal).
+fn parse_mcp_stubs(text: &str) -> Vec<PageStub> {
+    let t = text.trim();
+    if t.is_empty() {
+        return vec![];
+    }
+    let v: Value = match serde_json::from_str(t) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    if v.get("results").and_then(|x| x.as_array()).is_some() {
+        if let Ok((stubs, _)) = parse_child_list(t) {
+            if !stubs.is_empty() {
+                return stubs;
+            }
+        }
+    }
+    let arr: Vec<Value> = if let Some(a) = v.as_array() {
+        a.clone()
+    } else {
+        ["results", "children", "pages", "content", "items", "value", "data"]
+            .iter()
+            .find_map(|k| v.get(*k).and_then(|x| x.as_array()).cloned())
+            .unwrap_or_default()
+    };
+    arr.iter()
+        .filter_map(|item| {
+            let id = pick_str(item, &["id", "pageId", "contentId", "content_id"])?;
+            let title = pick_str(item, &["title", "name"]).unwrap_or_default();
+            Some(PageStub { id, title })
+        })
+        .collect()
+}
+
+/// `ConfluenceApi` over the MCP session. Trait methods are `&self`, so the
+/// session lives in a `RefCell` (single-threaded crawl → no contention). Tool
+/// names + argument keys are resolved from the connected server's `tools/list`
+/// (with fallbacks) so the wire contract isn't hard-coded.
+struct McpConfluence {
+    sess: RefCell<mcp::McpSession>,
+    page_tool: String,
+    child_tool: String,
+    search_tool: String,
+    page_arg: String,
+    child_arg: String,
+    search_arg: String,
+}
+
+impl McpConfluence {
+    fn new(sess: mcp::McpSession) -> Self {
+        let page = sess
+            .tools
+            .iter()
+            .find(|t| t.name == "getPageById")
+            .cloned()
+            .or_else(|| sess.tools.iter().find(|t| t.name == "getPage").cloned());
+        let child = sess.tools.iter().find(|t| t.name == "getChild").cloned();
+        let search = sess.tools.iter().find(|t| t.name == "searchContent").cloned();
+        let page_arg =
+            page.as_ref().map(|t| mcp::arg_key_for(t, "id")).unwrap_or_else(|| "id".to_string());
+        let child_arg =
+            child.as_ref().map(|t| mcp::arg_key_for(t, "id")).unwrap_or_else(|| "id".to_string());
+        let search_arg = search
+            .as_ref()
+            .map(|t| mcp::arg_key_for(t, "query"))
+            .unwrap_or_else(|| "query".to_string());
+        McpConfluence {
+            page_tool: page.map(|t| t.name).unwrap_or_else(|| "getPageById".to_string()),
+            child_tool: child.map(|t| t.name).unwrap_or_else(|| "getChild".to_string()),
+            search_tool: search.map(|t| t.name).unwrap_or_else(|| "searchContent".to_string()),
+            page_arg,
+            child_arg,
+            search_arg,
+            sess: RefCell::new(sess),
+        }
     }
 
-    fn get(&self, url: &str) -> Result<String, String> {
-        let mut req = self.http.get(url);
-        if let Some(token) = self.token.as_deref() {
-            req = req.bearer_auth(token);
-        }
-        let res = req.send().map_err(|e| e.to_string())?;
-        let status = res.status();
-        if !status.is_success() {
-            return Err(format!("HTTP {status} — {url}"));
-        }
-        res.text().map_err(|e| e.to_string())
+    fn call(&self, tool: &str, arg_key: &str, arg_val: &str) -> Result<String, String> {
+        let mut m = serde_json::Map::new();
+        m.insert(arg_key.to_string(), Value::String(arg_val.to_string()));
+        self.sess.borrow_mut().call_tool(tool, Value::Object(m))
     }
 }
 
-impl ConfluenceApi for HttpConfluence {
+impl ConfluenceApi for McpConfluence {
     fn fetch_page(&self, id: &str) -> Result<ConfluencePage, String> {
-        let url = format!("{}/rest/api/content/{}?expand=body.storage", self.base, id);
-        parse_page(&self.get(&url)?)
+        let text = self.call(&self.page_tool, &self.page_arg, id)?;
+        parse_mcp_page(&text, id)
     }
 
     fn fetch_children(&self, id: &str, start: usize) -> Result<(Vec<PageStub>, bool), String> {
-        let url = format!(
-            "{}/rest/api/content/{}/child/page?limit={PAGE_LIMIT}&start={start}",
-            self.base, id
-        );
-        parse_child_list(&self.get(&url)?)
+        // MCP getChild returns all children at once — no REST-style pagination.
+        if start > 0 {
+            return Ok((vec![], false));
+        }
+        let text = self.call(&self.child_tool, &self.child_arg, id)?;
+        Ok((parse_mcp_stubs(&text), false))
     }
 
-    fn fetch_space_pages(
-        &self,
-        space_key: &str,
-        start: usize,
-    ) -> Result<(Vec<PageStub>, bool), String> {
-        let url = format!(
-            "{}/rest/api/content?spaceKey={space_key}&type=page&limit={PAGE_LIMIT}&start={start}",
-            self.base
-        );
-        parse_child_list(&self.get(&url)?)
+    fn fetch_space_pages(&self, query: &str, start: usize) -> Result<(Vec<PageStub>, bool), String> {
+        if start > 0 {
+            return Ok((vec![], false));
+        }
+        let text = self.call(&self.search_tool, &self.search_arg, query)?;
+        Ok((parse_mcp_stubs(&text), false))
     }
+}
+
+/// Escape the few chars that break out of an HTML text context.
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// Safe, readable file-name stem from a page title (illegal chars → space,
+/// collapsed, capped). The knowledge writer sanitizes again + dedupes.
+fn sanitize_title(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { ' ' } else { c })
+        .collect();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = cleaned.trim_matches([' ', '.']).to_string();
+    let base = if cleaned.is_empty() { "page" } else { &cleaned };
+    base.chars().take(60).collect()
+}
+
+/// Wrap a page's storage body as a self-contained HTML document for the
+/// knowledge artifact folder (read by agents via extraDirs; previewable).
+fn page_doc_html(page: &ConfluencePage) -> String {
+    format!(
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>{t}</title></head>\n<body>\n<h1>{t}</h1>\n<!-- Confluence page id={id} -->\n{body}\n</body></html>\n",
+        t = esc(&page.title),
+        id = page.id,
+        body = page.body_html,
+    )
 }
 
 /// Crawl outcome — the numbers behind the terminal `End` event.
@@ -374,28 +574,59 @@ pub struct IngestRegistry {
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
-/// Start a crawl+ingest on a worker thread; returns the ingest id immediately.
-/// Progress arrives on `on_event`; cancel with `cancel_ingest`.
+/// Build the artifact knowledge entry that stores a crawl's pages. `body` is the
+/// injected summary (a titles index); files are written by `save_knowledge_docs`.
+fn build_entry(label: &str, pages: &[(String, String, String)]) -> KnowledgeEntry {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut body = format!(
+        "출처: Confluence MCP\n대상: {label}\n수집 페이지: {}건\n\n포함 문서:\n",
+        pages.len()
+    );
+    for (_, _, title) in pages.iter().take(80) {
+        body.push_str("- ");
+        body.push_str(if title.trim().is_empty() { "(제목 없음)" } else { title });
+        body.push('\n');
+    }
+    if pages.len() > 80 {
+        body.push_str(&format!("… 외 {}건\n", pages.len() - 80));
+    }
+    KnowledgeEntry {
+        id: format!("confluence-{millis}"),
+        title: format!("Confluence 수집 — {label} ({}건)", pages.len()),
+        body,
+        kind: String::new(), // save_knowledge_docs sets "artifact"
+        files: Vec::new(),
+        source_project_id: None,
+        source_category: None,
+        source_title: Some(format!("Confluence MCP — {label}")),
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
+/// Start an MCP crawl on a worker thread; returns the ingest id immediately.
+/// The collected pages become one knowledge-base artifact entry (D82). Progress
+/// arrives on `on_event`; cancel with `cancel_ingest`.
 #[tauri::command]
 pub fn start_confluence_ingest(
     app: tauri::AppHandle,
+    target: ConfluenceTarget,
     on_event: Channel<IngestEvent>,
 ) -> Result<String, String> {
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    let settings = crate::settings::load(&config_dir);
-    let conf = settings
+    let config_dir = crate::ow_home()?;
+    let conf = crate::settings::load(&config_dir)
         .confluence
-        .clone()
-        .ok_or_else(|| "Confluence가 설정되지 않았습니다 — 지식 화면에서 등록해 주세요".to_string())?;
-    let rag_cfg = settings
-        .rag
-        .clone()
-        .ok_or_else(|| "RAG endpoint가 설정되지 않았습니다 — 지식 화면에서 등록해 주세요".to_string())?;
+        .filter(|c| !c.url.trim().is_empty())
+        .ok_or_else(|| "Confluence MCP가 설정되지 않았습니다 — 지식 화면에서 등록해 주세요".to_string())?;
 
-    // Build both clients up front so config errors surface before the thread.
-    let api = HttpConfluence::new(&conf)?;
-    let rag = RagClient::new(&rag_cfg, conf.allow_invalid_certs)?;
-    let base = api.base.clone();
+    let root_id = target.root_page_id.unwrap_or_default().trim().to_string();
+    let search = target.search_query.unwrap_or_default().trim().to_string();
+    if root_id.is_empty() && search.is_empty() {
+        return Err("수집 대상을 입력해 주세요 — 루트 페이지 ID 또는 검색어".to_string());
+    }
 
     let registry = app.state::<IngestRegistry>();
     let n = registry.counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -407,8 +638,8 @@ pub fn start_confluence_ingest(
         .map_err(|_| "ingest registry poisoned".to_string())?
         .insert(ingest_id.clone(), canceled.clone());
 
-    let root_id = conf.root_page_id.clone().unwrap_or_default();
-    let space_key = conf.space_key.clone().unwrap_or_default();
+    let url = conf.url.clone();
+    let auth = conf.auth_key.clone();
     let app_handle = app.clone();
     let id_for_thread = ingest_id.clone();
 
@@ -416,36 +647,67 @@ pub fn start_confluence_ingest(
         let emit = |ev: IngestEvent| {
             let _ = on_event.send(ev);
         };
-        emit(IngestEvent::Started {
-            root_id: if root_id.is_empty() { space_key.clone() } else { root_id.clone() },
-        });
+        let unregister = || {
+            if let Ok(mut flags) = app_handle.state::<IngestRegistry>().flags.lock() {
+                flags.remove(&id_for_thread);
+            }
+        };
+        let label = if !root_id.is_empty() {
+            format!("루트 {root_id}")
+        } else {
+            format!("검색 \"{search}\"")
+        };
+        emit(IngestEvent::Started { root_id: label.clone() });
+
+        // Handshake with the MCP server (network) on this worker thread.
+        let session = match mcp::McpSession::connect(&url, auth.as_deref(), false) {
+            Ok(s) => s,
+            Err(e) => {
+                emit(IngestEvent::Error { message: format!("Confluence MCP 연결 실패: {e}") });
+                emit(IngestEvent::End { status: "failed".to_string(), ingested: 0, failed: 0 });
+                unregister();
+                return;
+            }
+        };
+        let api = McpConfluence::new(session);
+
+        // Buffer each fetched page (file name, html, title). The sink never
+        // fails (buffering), so `ingested` == `fetched`; `failed` counts fetch
+        // failures inside `crawl`.
+        let buf: RefCell<Vec<(String, String, String)>> = RefCell::new(Vec::new());
         let outcome = crawl(
             &api,
             Some(root_id.as_str()).filter(|s| !s.is_empty()),
-            Some(space_key.as_str()).filter(|s| !s.is_empty()),
+            Some(search.as_str()).filter(|s| !s.is_empty()),
             &canceled,
             |page| {
-                rag.ingest_page(&IngestPage {
-                    id: page.id.clone(),
-                    title: page.title.clone(),
-                    url: if page.webui.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{base}{}", page.webui)
-                    },
-                    content_html: page.body_html.clone(),
-                })
+                let name = format!("{}-{}.html", sanitize_title(&page.title), page.id);
+                buf.borrow_mut().push((name, page_doc_html(page), page.title.clone()));
+                Ok(())
             },
             emit,
         );
+
+        // Save whatever was collected (even a partial/canceled crawl) as one
+        // artifact knowledge entry — the workflow's knowledge step injects it.
+        let pages = buf.into_inner();
+        let mut status = outcome.status.clone();
+        if !pages.is_empty() {
+            let docs: Vec<(String, String)> =
+                pages.iter().map(|(n, h, _)| (n.clone(), h.clone())).collect();
+            let entry = build_entry(&label, &pages);
+            if let Err(e) = crate::knowledge::save_knowledge_docs(entry, docs) {
+                let _ = on_event
+                    .send(IngestEvent::Error { message: format!("지식 베이스 저장 실패: {e}") });
+                status = "failed".to_string();
+            }
+        }
         let _ = on_event.send(IngestEvent::End {
-            status: outcome.status,
+            status,
             ingested: outcome.ingested,
             failed: outcome.failed,
         });
-        if let Ok(mut flags) = app_handle.state::<IngestRegistry>().flags.lock() {
-            flags.remove(&id_for_thread);
-        }
+        unregister();
     });
 
     Ok(ingest_id)
@@ -468,28 +730,24 @@ pub fn cancel_ingest(
     }
 }
 
-/// Settings-screen connection test: fetch the configured root page (or the
-/// space's first page) and return its title.
+/// Settings-screen connection test (D82): handshake with the MCP server and
+/// report the tool count/names. Verifies the URL + `x-auth` key without needing
+/// a target page. `async` + `spawn_blocking` (same pattern as `probe_rag`).
 #[tauri::command]
-pub async fn probe_confluence(app: tauri::AppHandle) -> Result<String, String> {
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+pub async fn probe_confluence() -> Result<String, String> {
+    let config_dir = crate::ow_home()?;
     let conf = crate::settings::load(&config_dir)
         .confluence
-        .ok_or_else(|| "Confluence가 설정되지 않았습니다 — 지식 화면에서 등록해 주세요".to_string())?;
+        .filter(|c| !c.url.trim().is_empty())
+        .ok_or_else(|| "Confluence MCP가 설정되지 않았습니다 — 지식 화면에서 등록해 주세요".to_string())?;
 
     tauri::async_runtime::spawn_blocking(move || {
-        let api = HttpConfluence::new(&conf)?;
-        if let Some(root) = conf.root_page_id.as_deref().filter(|s| !s.trim().is_empty()) {
-            return Ok(api.fetch_page(root.trim())?.title);
+        let session = mcp::McpSession::connect(&conf.url, conf.auth_key.as_deref(), false)?;
+        if session.tools.is_empty() {
+            return Ok::<String, String>("연결됨 — 사용 가능한 도구가 없습니다".to_string());
         }
-        if let Some(space) = conf.space_key.as_deref().filter(|s| !s.trim().is_empty()) {
-            let (stubs, _) = api.fetch_space_pages(space.trim(), 0)?;
-            return stubs
-                .first()
-                .map(|s| s.title.clone())
-                .ok_or_else(|| "스페이스에 페이지가 없습니다".to_string());
-        }
-        Err("루트 페이지 ID 또는 스페이스 키를 설정해 주세요".to_string())
+        let names: Vec<&str> = session.tools.iter().map(|t| t.name.as_str()).take(10).collect();
+        Ok(format!("연결됨 — {}개 도구 ({})", session.tools.len(), names.join(", ")))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -518,6 +776,42 @@ mod tests {
         assert_eq!(bare.body_html, "");
         assert!(parse_page(r#"{ "title": "no id" }"#).is_err());
         assert!(parse_page("not json").is_err());
+    }
+
+    #[test]
+    fn parses_mcp_page_shapes() {
+        // REST-shaped Confluence content object → reuses the tested parser.
+        let rest = r#"{"id":"123","title":"설계","body":{"storage":{"value":"<p>본문</p>"}}}"#;
+        let p = parse_mcp_page(rest, "123").unwrap();
+        assert_eq!(p.id, "123");
+        assert_eq!(p.body_html, "<p>본문</p>");
+
+        // Simplified shape: body under `content`, id under `pageId`, title `name`.
+        let simple = r#"{"pageId":"9","name":"제목","content":"<p>x</p>"}"#;
+        let p = parse_mcp_page(simple, "req").unwrap();
+        assert_eq!(p.id, "9");
+        assert_eq!(p.title, "제목");
+        assert_eq!(p.body_html, "<p>x</p>");
+
+        // Envelope ({page:{...}}) + view body; then non-JSON text fallback.
+        let env = r#"{"page":{"id":"5","body":{"view":{"value":"<b>v</b>"}}}}"#;
+        assert_eq!(parse_mcp_page(env, "5").unwrap().body_html, "<b>v</b>");
+        let plain = parse_mcp_page("just some text", "42").unwrap();
+        assert_eq!(plain.id, "42");
+        assert_eq!(plain.body_html, "just some text");
+    }
+
+    #[test]
+    fn parses_mcp_stub_shapes() {
+        let rest = r#"{"results":[{"id":"1","title":"a"},{"id":"2","title":"b"}]}"#;
+        assert_eq!(parse_mcp_stubs(rest).len(), 2);
+
+        let children = r#"{"children":[{"pageId":"3","name":"c"}]}"#;
+        assert_eq!(parse_mcp_stubs(children), vec![PageStub { id: "3".into(), title: "c".into() }]);
+
+        // Bare array parsed; junk → empty (not fatal).
+        assert_eq!(parse_mcp_stubs(r#"[{"id":"7"}]"#).len(), 1);
+        assert!(parse_mcp_stubs("not json").is_empty());
     }
 
     #[test]

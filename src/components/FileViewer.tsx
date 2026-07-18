@@ -3,6 +3,7 @@ import { Eye, Code2, FileText, ListTree, ClipboardCopy, Check } from "lucide-rea
 import { MarkdownView } from "./Markdown";
 import { readFile } from "../lib/api";
 import { copyHtml } from "../lib/clipboard";
+import { withLinkGuard } from "../lib/linkGuard";
 
 function isHtml(path: string): boolean {
   return /\.html?$/i.test(path);
@@ -13,10 +14,14 @@ function isMarkdown(path: string): boolean {
 }
 
 /** Minimal port of Open Design's `buildSrcdoc`: full documents pass through;
- * fragments get a doctype shell. Rendered in a sandboxed iframe (no same-origin). */
+ * fragments get a doctype shell. Rendered in a sandboxed iframe (no same-origin).
+ * `withLinkGuard` injects a click guard so in-HTML links open in the OS browser
+ * instead of navigating the preview pane (D76). */
 function buildSrcdoc(content: string): string {
-  if (/^\s*(<!doctype|<html)/i.test(content)) return content;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>${content}</body></html>`;
+  const doc = /^\s*(<!doctype|<html)/i.test(content)
+    ? content
+    : `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>${content}</body></html>`;
+  return withLinkGuard(doc);
 }
 
 export function FileViewer({

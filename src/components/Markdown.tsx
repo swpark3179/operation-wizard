@@ -9,6 +9,8 @@ import { Check, Copy } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { copyText } from "../lib/clipboard";
+import { openExternal } from "../lib/api";
+import { isExternalUrl } from "../lib/linkGuard";
 
 type MermaidModule = typeof import("mermaid").default;
 
@@ -114,6 +116,23 @@ export function MarkdownView({ content }: { content: string }) {
         components={{
           pre({ children }) {
             return <CodeBlock>{children}</CodeBlock>;
+          },
+          // Top-frame markdown links (chat + .md preview): a plain click would
+          // navigate the app's WebView away — always prevent it and route
+          // external URLs to the OS browser (D76).
+          a({ href, children, ...props }) {
+            return (
+              <a
+                {...props}
+                href={href}
+                onClick={(e) => {
+                  e.preventDefault();
+                  if (href && isExternalUrl(href)) void openExternal(href).catch(() => {});
+                }}
+              >
+                {children}
+              </a>
+            );
           },
           code({ className, children, ...props }) {
             const lang = /language-(\w+)/.exec(className ?? "")?.[1];

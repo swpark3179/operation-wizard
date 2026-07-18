@@ -107,11 +107,11 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// Root: `%USERPROFILE%\.operation-wizard\projects` (Windows; same home
-/// resolution the resolver uses). Parents are created lazily on write.
+/// Root: `~/.operation-wizard\projects` (Windows `%USERPROFILE%\...`). Resolved
+/// through the shared `crate::ow_home()` so the app home folder is defined once
+/// (D72). Parents are created lazily on write.
 fn projects_root() -> Result<PathBuf, String> {
-    let up = std::env::var("USERPROFILE").map_err(|_| "USERPROFILE not set".to_string())?;
-    Ok(PathBuf::from(up).join(".operation-wizard").join("projects"))
+    Ok(crate::ow_home()?.join("projects"))
 }
 
 /// Reject ids that could escape their parent dir (project or session folder name).

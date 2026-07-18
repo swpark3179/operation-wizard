@@ -24,6 +24,17 @@ export const CODEBASE_QUESTION: ClarifyQuestion = {
   required: true,
 };
 
+/** The requirement field, prepended to the FRONT of every category's form so
+ * "what do you want to do" comes first (D78). Required + client-filled from the
+ * launcher seed (noPrefill → the agent never re-words it). */
+export const REQUIREMENT_QUESTION: ClarifyQuestion = {
+  id: "userRequest",
+  label: "무엇을 하고 싶으신가요? 원하는 작업을 자유롭게 설명해 주세요.",
+  type: "text",
+  required: true,
+  noPrefill: true,
+};
+
 export const CATEGORY_OPTIONS: Record<Category, ClarifyQuestion[]> = {
   plan: [
     {
@@ -150,5 +161,9 @@ export function optionsFor(category: Category, settings: Settings | null): Clari
   // `codebase` step (D63) — a Confluence/knowledge-only flow like guide has
   // none, so it shows no folder picker.
   const needsCodebase = workflowFor(category, settings).some((s) => s.kind === "codebase");
-  return needsCodebase ? [CODEBASE_QUESTION, ...base] : base;
+  // The requirement field always comes first ("뭘 하고 싶은지 우선" — D78); the
+  // codebase folder question follows it when the workflow has a codebase step.
+  return needsCodebase
+    ? [REQUIREMENT_QUESTION, CODEBASE_QUESTION, ...base]
+    : [REQUIREMENT_QUESTION, ...base];
 }

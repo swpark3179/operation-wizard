@@ -43,6 +43,10 @@ export function HomeArea({
   // session carries its own; D60).
   const [initialAgentId, setInitialAgentId] = useState<string | null>(null);
   const [initialModel, setInitialModel] = useState<string | null>(null);
+  // True when the workspace should auto-classify the category from the launcher
+  // prompt (composer start — D81); false for an explicit category card / a
+  // reopened session.
+  const [autoCategory, setAutoCategory] = useState(false);
 
   // Reset to the launcher whenever Home is (re)selected in the nav rail.
   useEffect(() => {
@@ -55,6 +59,7 @@ export function HomeArea({
     setInitialCodebasePath(null);
     setInitialAgentId(null);
     setInitialModel(null);
+    setAutoCategory(false);
   }, [resetNonce]);
 
   if (screen === "workspace" && category && projectId) {
@@ -66,6 +71,7 @@ export function HomeArea({
         initialAgentId={initialAgentId}
         initialModel={initialModel}
         category={category}
+        autoCategory={autoCategory}
         seedPrompt={seedPrompt}
         agents={agents}
         detected={detected}
@@ -81,6 +87,7 @@ export function HomeArea({
           setProjectId(null);
           setInitialWorkdir(null);
           setInitialCodebasePath(null);
+          setAutoCategory(false);
         }}
       />
     );
@@ -94,7 +101,7 @@ export function HomeArea({
       // New chat / category → a brand-new project. `workdir` is the folder the
       // user optionally picked on Home; null → auto (own workspace/ subfolder).
       // `agentId`/`model` seed the ChatPanel composer (D60).
-      onStart={(cat, prompt, workdir, agentId, model) => {
+      onStart={(cat, prompt, workdir, agentId, model, auto) => {
         setProjectId(crypto.randomUUID());
         setInitialWorkdir(workdir ?? null);
         setInitialCodebasePath(null);
@@ -102,6 +109,7 @@ export function HomeArea({
         setInitialModel(model ?? null);
         setLoadedSession(null);
         setCategory(cat);
+        setAutoCategory(!!auto);
         setSeedPrompt(prompt);
         setScreen("workspace");
       }}
@@ -115,6 +123,7 @@ export function HomeArea({
         setInitialModel(null);
         setLoadedSession(session);
         setCategory((session.category as Category) ?? "plan");
+        setAutoCategory(false); // a reopened session keeps its stored category
         setSeedPrompt("");
         setScreen("workspace");
       }}

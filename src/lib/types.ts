@@ -71,19 +71,14 @@ export interface StepDef {
   output?: string | null;
 }
 
-/** Confluence crawl source for RAG ingestion (mirrors settings.rs). The token
- * is stored as plain text in settings.json — use a read-only-scope PAT. */
+/** Confluence connection via the official MCP server (mirrors settings.rs — D82).
+ * The `authKey` (x-auth header) is plain text in settings.json — use a
+ * read-only-scope key. The collection target is passed per-run, not stored. */
 export interface ConfluenceConfig {
-  /** Base URL including any context path, e.g. "https://wiki.example.com/confluence". */
-  baseUrl: string;
-  /** Bearer PAT (Confluence Server/DC). */
-  token?: string | null;
-  /** Crawl root page id (descendants collected recursively). */
-  rootPageId?: string | null;
-  /** Alternative: flat listing of one space's pages. */
-  spaceKey?: string | null;
-  /** Opt-in for corporate TLS-inspection proxies whose CA is not installed. */
-  allowInvalidCerts: boolean;
+  /** MCP endpoint, e.g. "https://sdsdev.co.kr/mcp-confluence/mcp". */
+  url: string;
+  /** `x-auth` request header value. */
+  authKey?: string | null;
 }
 
 /** The user's RAG service endpoint (mirrors settings.rs). The two keys are
@@ -94,6 +89,11 @@ export interface RagConfig {
   passKey?: string | null;
   /** Search result count requested by the rag workflow step. */
   topK?: number | null;
+  /** Fabrix rag-chat knowledge asset id; empty → a built-in sample asset. */
+  knowledgeAssetId?: string | null;
+  /** Backend-owned cache of the last fetched model list (read-only mirror —
+   * the frontend never sends it; save/연결 테스트 refresh it — D66). */
+  models?: ModelOption[];
 }
 
 /** Connection config for the Fabrix remote HTTP agent (mirrors settings.rs,
@@ -108,6 +108,28 @@ export interface FabrixConfig {
   openapiToken?: string | null;
   /** Opt-in for corporate TLS-inspection proxies whose CA is not installed. */
   allowInvalidCerts: boolean;
+  /** Backend-owned cache of the last fetched model list (read-only mirror —
+   * shown at app start without a network call; save/refresh/연결 테스트 refresh
+   * it, D66). The frontend never sends this field. */
+  models?: ModelOption[];
+}
+
+/** Connection config for the AI Pro remote HTTP agent (mirrors settings.rs,
+ * D71). AI Pro is OpenAI-compatible, so it authenticates with a single Bearer
+ * key (vs. Fabrix's two headers). The key is stored plain text in settings.json
+ * — same caveat as `FabrixConfig`. */
+export interface AiProConfig {
+  /** Base endpoint, e.g. "https://aipro.sdsdev.co.kr/open/api/v1" (the /models
+   * and /chat/completions paths are appended). */
+  endpointUrl: string;
+  /** `Authorization: Bearer <apiKey>` value. */
+  apiKey?: string | null;
+  /** Opt-in for corporate TLS-inspection proxies whose CA is not installed. */
+  allowInvalidCerts: boolean;
+  /** Backend-owned cache of the last fetched model list (read-only mirror —
+   * shown at app start without a network call; save/refresh/연결 테스트 refresh
+   * it, D66). The frontend never sends this field. */
+  models?: ModelOption[];
 }
 
 export interface Settings {
@@ -123,6 +145,8 @@ export interface Settings {
   rag?: RagConfig | null;
   /** Fabrix remote HTTP agent connection; absent/null → not configured (D64). */
   fabrix?: FabrixConfig | null;
+  /** AI Pro remote HTTP agent connection; absent/null → not configured (D71). */
+  aipro?: AiProConfig | null;
 }
 
 // ── Agent runs (mirrors src-tauri/src/run.rs) ────────────────────────────────
@@ -261,9 +285,10 @@ export const DIAGNOSTIC_HINT: Record<string, string> = {
     "Not found on PATH or known toolchain dirs. Set a custom path below.",
   "not-executable": "The resolved file is not executable.",
   "missing-target": "The shim points to a missing target (e.g. a removed runtime).",
-  // Remote (HTTP) agent diagnostics — Fabrix (D64).
+  // Remote (HTTP) agent diagnostics — Fabrix (D64) / AI Pro (D71). Agent-neutral
+  // wording since the map is keyed by diagnostic code, shared across both cards.
   "not-configured":
-    "Fabrix 연결 정보가 없습니다. 아래에서 ENDPOINT_URL·클라이언트·토큰을 저장하세요.",
+    "연결 정보가 없습니다. 아래에서 엔드포인트와 인증 정보를 저장하세요.",
   unreachable:
-    "Fabrix 엔드포인트에 연결하지 못했습니다. URL·자격증명·네트워크를 확인하세요.",
+    "엔드포인트에 연결하지 못했습니다. URL·자격증명·네트워크를 확인하세요.",
 };

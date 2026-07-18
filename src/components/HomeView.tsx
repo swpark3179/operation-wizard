@@ -4,10 +4,10 @@ import {
   ArrowUp,
   AlertTriangle,
   Check,
-  ClipboardList,
   FolderOpen,
   Loader2,
   Pencil,
+  Wand2,
   X,
 } from "lucide-react";
 import { defaultAgentId } from "./ChatPanel";
@@ -36,13 +36,16 @@ export function HomeView({
   onOpenAgents?: () => void;
   /** Start a new project. `workdir` = a folder chosen on Home, or undefined →
    * auto. `agentId`/`model` = the composer's picks, seeding the workspace
-   * ChatPanel (still changeable there before the first turn). */
+   * ChatPanel (still changeable there before the first turn). `autoCategory` =
+   * true when the category should be auto-classified from the prompt (composer
+   * send, D81); category cards pass their explicit id with it false. */
   onStart: (
     category: Category,
     prompt: string,
     workdir?: string,
     agentId?: string,
     model?: string,
+    autoCategory?: boolean,
   ) => void;
   /** Open a recent project's latest session (adopts its id + resolved workdir
    * + stored codebase path). */
@@ -90,10 +93,12 @@ export function HomeView({
     setModel("default"); // the previous agent's model id means nothing here
   };
 
-  const start = (category: Category) =>
-    onStart(category, prompt.trim(), chosenFolder ?? undefined, agentId, model);
+  // `auto` = classify the category from the prompt (composer send — D81); a
+  // category card passes its explicit id with auto=false.
+  const start = (category: Category, auto = false) =>
+    onStart(category, prompt.trim(), chosenFolder ?? undefined, agentId, model, auto);
 
-  const send = () => start("plan");
+  const send = () => start("plan", true);
 
   const chooseFolder = async () => {
     try {
@@ -163,7 +168,7 @@ export function HomeView({
             Samsung SDS · Operation Wizard
           </div>
           <h1 className="mb-2 font-serif text-[30px] font-semibold tracking-[-0.02em] text-ink-strong">
-            운영 작업 도우미
+            운영 작업 마법사
           </h1>
           <p className="text-[14px] leading-[1.6] text-ink-muted">
             로컬 CLI 에이전트로 운영 업무를 정해진 절차에 따라 진행합니다.
@@ -233,9 +238,12 @@ export function HomeView({
             className="max-h-[200px] min-h-[52px] w-full resize-none overflow-y-auto bg-transparent text-[14.5px] leading-[1.55] text-ink outline-none placeholder:text-ink-faint"
           />
           <div className="mt-1.5 flex items-center gap-2">
-            <span className="inline-flex shrink-0 items-center gap-1.5 text-[12px] text-ink-soft">
-              <ClipboardList size={14} />
-              개발 계획 수립
+            <span
+              className="inline-flex shrink-0 items-center gap-1.5 text-[12px] text-ink-soft"
+              title="입력한 요청을 분석해 가장 알맞은 업무 카테고리로 시작합니다"
+            >
+              <Wand2 size={14} />
+              작업 유형 자동 선택
             </span>
             {/* agent + model picked before starting (mirrors the ChatPanel
                 composer; the workspace opens with these — D60) */}
