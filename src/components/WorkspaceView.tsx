@@ -7,6 +7,7 @@ import { categoryLabel, type Category } from "./workspace";
 import { artifactsFor, joinWorkdirPath, normalizePathKey } from "../lib/artifacts";
 import { formatClarifyAnswers, type ClarifyAnswer, type ClarifyQuestion } from "../lib/clarify";
 import { ragResultHtml } from "../lib/foundation";
+import { REQUIREMENT_QUESTION } from "../lib/options";
 import type { AgentInfo, DetectedAgent, RagHit, Settings, StoredSession } from "../lib/types";
 
 /** Canvas views: the fixed tabs (산출물/다이어그램 aggregate the workflow's
@@ -16,6 +17,7 @@ import type { AgentInfo, DetectedAgent, RagHit, Settings, StoredSession } from "
 export type CanvasTab =
   | "files"
   | "requirements"
+  | "prompt"
   | "rag"
   | "artifacts"
   | "diagrams"
@@ -119,6 +121,10 @@ export function WorkspaceView({
   // The latest RAG search result, rendered as a canvas tab (in-memory HTML via
   // sandboxed iframe srcdoc — never written to disk, D46).
   const [ragResult, setRagResult] = useState<{ query: string; html: string } | null>(null);
+  // The optimized prompt parsed from the first work turn's ```prompt fence,
+  // shown as the "프롬프트" canvas tab (educational display — D65). Stays for
+  // the session like ragResult; cleared on new/opened session.
+  const [promptResult, setPromptResult] = useState<string | null>(null);
   // Remount key: bumping it starts a fresh ChatPanel (new session) or swaps in a
   // loaded session, resetting all of ChatPanel's state/refs in one shot.
   const [sessionNonce, setSessionNonce] = useState(0);
@@ -172,6 +178,9 @@ export function WorkspaceView({
   const [answerSubmission, setAnswerSubmission] = useState<{
     wire: string;
     display: string;
+    /** The requirement question's answer (D65) — the canonical "what the user
+     * wants". Supersedes the launcher seed as the first turn's 원래 요청. */
+    requirement: string;
     nonce: number;
   } | null>(null);
 
@@ -187,6 +196,7 @@ export function WorkspaceView({
     setActiveSeed("");
     resetClarify();
     setRagResult(null); // codebasePath stays — it is project-scoped
+    setPromptResult(null);
     setOpenFiles([]);
     setArtifactSel(null);
     setKnowledgeSave(null); // next save is a new entry (D59)
@@ -201,6 +211,7 @@ export function WorkspaceView({
     setActiveSeed("");
     resetClarify();
     setRagResult(null);
+    setPromptResult(null);
     setOpenFiles([]);
     setArtifactSel(null);
     setKnowledgeSave(null);
@@ -214,6 +225,13 @@ export function WorkspaceView({
   const handleRagResult = (query: string, hits: RagHit[]) => {
     setRagResult({ query, html: ragResultHtml(query, hits) });
     setCanvasTab("rag");
+  };
+
+  // The optimized prompt parsed from the first work turn (D65) — surface it as
+  // the "프롬프트" tab (auto-switch, D46 precedent: showing it IS the feature).
+  const handlePromptResult = (text: string) => {
+    setPromptResult(text);
+    setCanvasTab("prompt");
   };
 
   const handleClarify = (questions: ClarifyQuestion[]) => {
@@ -347,7 +365,12 @@ export function WorkspaceView({
     }
     const rest = answers.filter((a) => a.type !== "folder");
     const { wire, display } = formatClarifyAnswers(rest);
-    setAnswerSubmission((s) => ({ wire, display, nonce: (s?.nonce ?? 0) + 1 }));
+    // The requirement answer stays IN the wire (it feeds the prompt-optimizer
+    // skill); it also rides separately so ChatPanel can use it as the user
+    // bubble and skip the duplicate "원래 요청" seed suffix (D65).
+    const req = rest.find((a) => a.id === REQUIREMENT_QUESTION.id);
+    const requirement = typeof req?.value === "string" ? req.value.trim() : "";
+    setAnswerSubmission((s) => ({ wire, display, requirement, nonce: (s?.nonce ?? 0) + 1 }));
     setClarify(null);
     setClarifyPrefill(null);
     setCanvasTab("files"); // back to the file explorer while the agent works
@@ -379,6 +402,7 @@ export function WorkspaceView({
           onClarify={handleClarify}
           onPrefill={handlePrefill}
           onRagResult={handleRagResult}
+          onPromptResult={handlePromptResult}
           onStreamingChange={handleStreamingChange}
           onStepProgress={setStepProgress}
           onOpenAgents={onOpenAgents}
@@ -414,6 +438,7 @@ export function WorkspaceView({
         prefillNonce={prefillNonce}
         onSubmitAnswers={handleSubmitAnswers}
         ragResult={ragResult}
+        promptResult={promptResult}
         artifacts={artifacts}
         stepProgress={stepProgress}
         artifactSel={artifactSel}

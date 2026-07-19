@@ -285,8 +285,8 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     (같은 세션 재전송 — 실패 쌍 제거 + 워크플로우 커서 복원, D57) + 2차 액션 **"새 세션으로 다시
     시도"**를 함께 노출한다. codex의 `invalid peer certificate: BadSignature`는 codex CLI 자체의 사내
     TLS 프록시 인증서 불신 오류로, 앱은 안내+새 세션 복구만 제공한다([05](05-decisions.md) D28).
-  - `CanvasPanel`: 툴바에 **요구사항 / 검색 결과 / 산출물 / 다이어그램 / 지식 저장 / 파일 + 열린
-    파일별 뷰어 탭** 토글(D49/D58/D59). **'파일' 탭은 파일 트리 목록 전용**(`listDir`, 지연 확장, `refreshNonce`로 문서 생성 후
+  - `CanvasPanel`: 툴바에 **요구사항 / 프롬프트 / 검색 결과 / 산출물 / 다이어그램 / 지식 저장 / 파일 +
+    열린 파일별 뷰어 탭** 토글(D49/D58/D59/D65). **'파일' 탭은 파일 트리 목록 전용**(`listDir`, 지연 확장, `refreshNonce`로 문서 생성 후
     리로드)이고, 트리에서 파일을 클릭하면 그 파일의 **`file:<path>` 뷰어 탭**(`FileViewer`, 닫기 × 버튼)이
     생성·활성화된다 — 파일 목록과 문서 내용을 동시에 볼 필요 없이 탭으로 오간다. **워크플로우 단계가
     생성한 산출물은 파일 탭 대신 '산출물' 탭으로 라우팅**된다(D58 — D49 개정). 닫힌/없는 파일 탭은
@@ -302,7 +302,10 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     ` ```summary ` 펜스 계약+평문 폴백, 편집 가능·저장 비블록)+저장(`save_knowledge_files`). entryId는
     세션당 고정이라 같은 세션 재저장은 upsert. 또는 요구사항 폼(`RequirementsForm`, **accent 카드 그리드** — [05](05-decisions.md) D35).
     **'요구사항' 탭 pill은 폼이 사용자 답변을 기다리는 동안만 렌더**되고, 제출/초기화로 `clarify`가 비면
-    탭이 사라진다(`effectiveTab` 파생으로 pill 없는 상태 방어 — D41). **'검색 결과' 탭**은 rag 기반 단계가
+    탭이 사라진다(`effectiveTab` 파생으로 pill 없는 상태 방어 — D41). **'프롬프트' 탭**(D65)은 첫 작업
+    턴의 ` ```prompt ` 펜스(프롬프트 최적화 내장 스킬의 산출)가 파싱되면 나타나 세션 동안 유지된다 —
+    안내줄 + 복사 버튼 + `<pre>` 평문으로 최적화된 프롬프트를 보여줘 사용자가 프롬프팅 기법을 학습한다
+    (도착 시 자동 전환, 새 세션/기록 열기 시 초기화). **'검색 결과' 탭**은 rag 기반 단계가
     결과를 얻으면 나타나 세션 동안 유지되며, 클라이언트가 `RagHit[]`에서 생성한 이스케이프된 자립형
     HTML을 sandbox iframe(srcdoc)으로 렌더한다(D46). 프로젝트에 **코드베이스 경로**가 있으면 파일 탭
     툴바에 **루트 전환 세그먼트(작업 폴더 ↔ 코드베이스)**가 나타나 분석 대상 코드베이스를 브라우징할
@@ -324,12 +327,16 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 
 - **① 고정 선택지(옵션, 프리플로우)** — `lib/options.ts`의 `CATEGORY_OPTIONS: Record<Category,
   ClarifyQuestion[]>` + `optionsFor(category, settings)`. 카테고리 진입 시 **즉시**(에이전트 대기 없이)
-  `onClarify`로 캔버스 '요구사항' 폼에 렌더한다. **기반 단계가 활성인 카테고리는 폼 맨 앞에 필수
-  `codebasePath` folder 질문**(네이티브 폴더 픽커)이 프리펜드된다(D45) — 답변은 wire가 아니라
+  `onClarify`로 캔버스 '요구사항' 폼에 렌더한다. **모든 카테고리의 폼 맨 앞에 필수 `userRequest`
+  text 질문**("무엇을 하고 싶으신가요")이 프리펜드되고(D65 — 홈 seed가 있으면 클라이언트가 원문으로
+  즉시 채움, `noPrefill`로 에이전트 프리필 제외; 답변은 answers wire에 남고 첫 턴의 사용자 버블·
+  기존 "원래 요청" 접미사를 대체), **기반 단계가 활성인 카테고리는 그 다음에 필수
+  `codebasePath` folder 질문**(네이티브 폴더 픽커)이 프리펜드된다(D45) — folder 답변은 wire가 아니라
   구조적으로(`WorkspaceView.codebasePath` 상태) 전달·영속된다. 홈 프롬프트로 시작했으면 **숨김 프리필
   턴**을 격리 실행(세션 id/resume 미사용, 영속화·스텝커서 불변; `send(_,{prefill:true})`)해
-  `prefillInstruction`으로 아는 항목만 ` ```prefill ` JSON으로 채우고(**folder 질문은 프리필 제외**)
-  `parsePrefill`로 검증 후 `onPrefill`로 폼을 미리 채운다. 폼 제출이 **첫 작업 턴**을 발사한다. 옵션이 빈
+  `prefillInstruction`으로 아는 항목만 ` ```prefill ` JSON으로 채우고(**folder·noPrefill 질문은 프리필
+  제외**) `parsePrefill`로 검증 후 `onPrefill`로 폼을 미리 채운다(에이전트 답은 seed 채움과 병합).
+  폼 제출이 **첫 작업 턴**을 발사한다. 옵션이 빈
   카테고리는 이 단계를 건너뛰고 seed를 첫 작업 턴으로 자동 전송. **폼이 답변을 기다리는 동안 채팅 컴포저는
   차단**되고(프리필/자동전진 턴만 실행), '요구사항' 탭은 이 대기 동안만 표시된다(D41).
 - **①.5 기반 3단계(foundation, D44)** — 워크플로우 맨 앞에 고정(pinned)되는 필수 단계:
@@ -378,9 +385,12 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   턴 표시) + `codebasePathRef`/`skillDirsRef`(extraDirs 소스) + `preflightAbortRef`(preflight 중 Stop).
   `WF`/스킬 맵은 **마운트 시 고정**(remount가 리셋). 로드 세션은 커서를 끝으로 시작 → 일반
   대화(재주입 없음). `send()`는 **workdir 확정(`ensure_project`)을 preflight·wire 조립보다 먼저** 수행해
-  첫 턴에도 절대경로를 알 수 있다(D52). wire 조립은 `[step.skillIds의 스킬 body들(armed, 세션형 dedupe;
+  첫 턴에도 절대경로를 알 수 있다(D52). wire 조립은 `[프롬프트 최적화 내장 스킬(첫 실제 작업 턴 1회,
+  단계와 무관 — D65) → step.skillIds의 스킬 body들(armed, 세션형 dedupe;
   dir 있으면 리소스 폴더 안내 부착) → step.instruction(armed) → 경로 컨텍스트(`pathContext` — 생성형
   단계: 작업 폴더/코드베이스 절대경로 + 탐색 시작점 지시, D52) → preflight 컨텍스트(기반 단계) → prompt]`.
+  내장 스킬의 ` ```prompt ` 산출은 `end`에서 파싱되어 캔버스 '프롬프트' 탭으로 리프트되고 채팅
+  content에서는 안내문으로 치환된다(persist 전 — 세션리스 transcript에 펜스 미노출, D65).
   메시지 상태 변경은 전부 **동기 커밋 헬퍼(`mutateMessages`)** 경유(stale ref로 인한 응답 소실 방지,
   D55); 폼 제출/자동전진 nonce는 `send()`가 턴을 실제로 처리했을 때만 소비된다(스트리밍 중 제출은
   유실되지 않고 재시도 — D55). 커서와 나란히 **`stepProgress` state**(단계별 진행 상태)가 갱신되어

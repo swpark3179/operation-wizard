@@ -36,7 +36,8 @@ import {
 } from "../lib/clarify";
 import { joinWorkdirPath } from "../lib/artifacts";
 import { buildRagQuery, formatKnowledgeContext, formatRagContext, ragUserError } from "../lib/foundation";
-import { optionsFor } from "../lib/options";
+import { optionsFor, REQUIREMENT_QUESTION } from "../lib/options";
+import { PROMPT_OPTIMIZER_SKILL, parsePromptBlock, stripPromptBlock } from "../lib/promptCraft";
 import { resolveSkills } from "../lib/skills";
 import { isGenerative, progressLabel, runtimeWorkflowFor } from "../lib/workflow";
 import type {
@@ -98,6 +99,7 @@ export function ChatPanel({
   onClarify,
   onPrefill,
   onRagResult,
+  onPromptResult,
   onStreamingChange,
   onStepProgress,
   onOpenAgents,
@@ -125,8 +127,10 @@ export function ChatPanel({
   codebasePath: string | null;
   /** A saved session to rehydrate (view + continue), or null for a fresh chat. */
   initialSession: StoredSession | null;
-  /** Requirements-form answers to send as the next turn (nonce-guarded). */
-  answerSubmission: { wire: string; display: string; nonce: number } | null;
+  /** Requirements-form answers to send as the next turn (nonce-guarded).
+   * `requirement` is the "무엇을 하고 싶으신가요" answer (D65) — the canonical
+   * request text (user bubble; supersedes the "원래 요청" seed suffix). */
+  answerSubmission: { wire: string; display: string; requirement: string; nonce: number } | null;
   /** True while the requirements form awaits the user — manual chat input is
    * blocked until the form is submitted (hidden prefill / auto turns still run). */
   formPending: boolean;
@@ -142,6 +146,9 @@ export function ChatPanel({
   onPrefill: (answers: Record<string, string | string[]>) => void;
   /** RAG search results from the rag foundation step → canvas "검색 결과" tab. */
   onRagResult: (query: string, hits: RagHit[]) => void;
+  /** The first work turn's optimized prompt (```prompt fence) → canvas
+   * "프롬프트" tab (D65). */
+  onPromptResult: (text: string) => void;
   /** Mirror streaming state up (canvas form disables while streaming). */
   onStreamingChange: (streaming: boolean) => void;
   /** Mirror the workflow step progress up (canvas 산출물 tab shows per-artifact
@@ -214,6 +221,12 @@ export function ChatPanel({
   const optionQuestions = useRef(optionsFor(category, settings)).current;
   const skillMapRef = useRef(resolveSkills(settings));
   const injectedSkillIdsRef = useRef(new Set<string>());
+  // Prompt-optimizer built-in skill (D65): injected once per conversation into
+  // the FIRST actual work turn (independent of step arming, so a skipped first
+  // foundation step re-injects on the chained turn). Loaded sessions never.
+  const promptSkillPendingRef = useRef(!initialSession);
+  // Marks the turn whose `end` should parse the ```prompt fence.
+  const promptInflightRef = useRef(false);
   const seedPromptRef = useRef(seedPrompt); // original launcher prompt (folded into the first work turn)
   const prefillInflightRef = useRef(false); // this turn is the hidden prefill pass
   const bootedRef = useRef(false); // options/prefill/seed boot runs once
@@ -461,7 +474,14 @@ export function ChatPanel({
             for (let i = msgs.length - 1; i >= 0; i--) {
               if (msgs[i].role === "assistant") {
                 const answers = parsePrefill(msgs[i].content, optionQuestions);
-                if (Object.keys(answers).length) onPrefill(answers);
+                // onPrefill replaces the form's answers wholesale — carry the
+                // client-seeded requirement value along so this later pass
+                // never wipes it (D65).
+                const seed = seedPromptRef.current.trim();
+                const merged = seed
+                  ? { [REQUIREMENT_QUESTION.id]: seed, ...answers }
+                  : answers;
+                if (Object.keys(merged).length) onPrefill(merged);
                 break;
               }
             }
@@ -478,6 +498,32 @@ export function ChatPanel({
         mutateMessages((prev) =>
           prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)),
         );
+
+        // Prompt-optimizer turn (D65): lift the ```prompt fence to the canvas
+        // "프롬프트" tab and swap it for a short note in the stored content —
+        // BEFORE persist(), so saved sessions and sessionless transcripts carry
+        // the note, never the fence (the agent must not re-emit it). A missing
+        // fence is a graceful no-op (plain agents may ignore the contract).
+        if (promptInflightRef.current) {
+          promptInflightRef.current = false;
+          if (ev.status === "succeeded") {
+            const msgs = messagesRef.current;
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i].role !== "assistant") continue;
+              const block = parsePromptBlock(msgs[i].content);
+              if (block) {
+                const idx = i;
+                mutateMessages((prev) =>
+                  prev.map((m, j) =>
+                    j === idx ? { ...m, content: stripPromptBlock(m.content) } : m,
+                  ),
+                );
+                onPromptResult(block);
+              }
+              break;
+            }
+          }
+        }
 
         if (stepIdx != null && ev.status === "succeeded") {
           const step = WF[stepIdx];
@@ -727,10 +773,26 @@ export function ChatPanel({
         skillBodies.push(body);
       }
     }
+    // Prompt-optimizer built-in skill (D65): once per conversation, on the
+    // first actual work turn — prepended ABOVE the step skills so the "open
+    // with a ```prompt fence" framing leads the wire. Deliberately not tied to
+    // step arming: if the first foundation step skips in preflight, the unwind
+    // below restores the flag and the chained re-entry injects it again.
+    let promptInjectedNow = false;
+    if (!isPrefill && promptSkillPendingRef.current) {
+      promptSkillPendingRef.current = false;
+      promptInjectedNow = true;
+      promptInflightRef.current = true;
+      skillBodies.unshift(PROMPT_OPTIMIZER_SKILL);
+    }
     // A failed send never reached the agent — forget this turn's skill marks so
     // the retry (rearmStep) injects them again.
     const unwindSkills = () => {
       for (const id of injectedNow) injectedSkillIdsRef.current.delete(id);
+      if (promptInjectedNow) {
+        promptSkillPendingRef.current = true;
+        promptInflightRef.current = false;
+      }
     };
 
     // Foundation preflight (D44): resolve the step's wire context before the
@@ -986,6 +1048,9 @@ export function ChatPanel({
     if (optionQuestions.length > 0) {
       onClarify(optionQuestions);
       if (seedPromptRef.current.trim()) {
+        // The requirement field gets the launcher prompt verbatim, immediately
+        // and client-side (D65) — the agent prefill below fills the rest.
+        onPrefill({ [REQUIREMENT_QUESTION.id]: seedPromptRef.current.trim() });
         void send("", {
           system: true,
           prefill: true,
@@ -1015,9 +1080,14 @@ export function ChatPanel({
     const submission = answerSubmission;
     lastAnswersWireRef.current = submission.wire; // feeds the RAG query
     const seed = seedPromptRef.current.trim();
-    const wire = seed ? `${submission.wire}\n\n원래 요청:\n${seed}` : submission.wire;
+    // The requirement answer (D65) is the canonical request: it is already in
+    // the answers wire, so the "원래 요청" seed suffix would duplicate it; the
+    // user bubble shows it (the user's own words) over the compact summary.
+    const requirement = submission.requirement.trim();
+    const wire =
+      !requirement && seed ? `${submission.wire}\n\n원래 요청:\n${seed}` : submission.wire;
     nonceSendInflightRef.current = true;
-    void send(wire, { display: seed || submission.display }).then((handled) => {
+    void send(wire, { display: requirement || seed || submission.display }).then((handled) => {
       nonceSendInflightRef.current = false;
       if (handled) lastAnswerNonceRef.current = submission.nonce;
     });

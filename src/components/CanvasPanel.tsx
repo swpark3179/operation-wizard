@@ -6,6 +6,8 @@ import {
   FolderTree,
   RefreshCw,
   ChevronRight,
+  Check,
+  ClipboardCopy,
   X,
 } from "lucide-react";
 import { ArtifactsPanel } from "./ArtifactsPanel";
@@ -17,6 +19,7 @@ import type { StepProgress } from "./WorkflowStepper";
 import { fileTabId, fileTabPath, type CanvasTab } from "./WorkspaceView";
 import { listDir } from "../lib/api";
 import type { ArtifactDef } from "../lib/artifacts";
+import { copyText } from "../lib/clipboard";
 import type { ClarifyAnswer, ClarifyQuestion } from "../lib/clarify";
 import type { FileEntry, KnowledgeEntry } from "../lib/types";
 
@@ -124,6 +127,7 @@ export function CanvasPanel({
   prefillNonce,
   onSubmitAnswers,
   ragResult,
+  promptResult,
   artifacts,
   stepProgress,
   artifactSel,
@@ -157,6 +161,8 @@ export function CanvasPanel({
   onSubmitAnswers: (answers: ClarifyAnswer[]) => void;
   /** The latest RAG search result (in-memory HTML for the "검색 결과" tab, D46). */
   ragResult: { query: string; html: string } | null;
+  /** The first work turn's optimized prompt (the "프롬프트" tab, D65), or null. */
+  promptResult: string | null;
   /** The workflow's document artifacts (D58) — gates the 산출물/다이어그램 tabs. */
   artifacts: ArtifactDef[];
   /** Live workflow status mirrored from ChatPanel (null → existence-only). */
@@ -175,6 +181,13 @@ export function CanvasPanel({
 }) {
   const [root, setRoot] = useState<FileEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Copy feedback for the 프롬프트 tab (FileViewer's Copy→Check pattern).
+  const [copiedPrompt, setCopiedPrompt] = useState(false);
+  const copyPrompt = async () => {
+    if (!promptResult || !(await copyText(promptResult))) return;
+    setCopiedPrompt(true);
+    setTimeout(() => setCopiedPrompt(false), 1500);
+  };
   // Which folder the file tree shows: the workdir (outputs) or the analyzed
   // codebase. Falls back to the workdir while no codebase is set.
   const [rootChoice, setRootChoice] = useState<"workdir" | "codebase">("workdir");
@@ -215,6 +228,10 @@ export function CanvasPanel({
       ? clarify?.length
         ? "requirements"
         : "files"
+      : tab === "prompt"
+        ? promptResult
+          ? "prompt"
+          : "files"
       : tab === "rag"
         ? ragResult
           ? "rag"
@@ -290,6 +307,7 @@ export function CanvasPanel({
       <div className="flex h-[46px] shrink-0 items-center gap-2 border-b border-line bg-panel px-3.5">
         <div className="flex min-w-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-line bg-subtle p-0.5">
           {!!clarify?.length && tabBtn("requirements", "요구사항", true)}
+          {!!promptResult && tabBtn("prompt", "프롬프트")}
           {!!ragResult && tabBtn("rag", "검색 결과")}
           {hasArtifacts && tabBtn("artifacts", "산출물")}
           {hasArtifacts && tabBtn("diagrams", "다이어그램")}
@@ -355,6 +373,34 @@ export function CanvasPanel({
           disabled={streaming}
           onSubmit={onSubmitAnswers}
         />
+      ) : effectiveTab === "prompt" && promptResult ? (
+        // The optimized prompt from the first work turn (D65): educational
+        // display + copy-to-reuse. Plain client-held text — no iframe needed.
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex shrink-0 items-center gap-2 border-b border-line bg-panel px-3.5 py-2">
+            <p className="min-w-0 flex-1 text-[12px] leading-snug text-ink-soft">
+              제출한 요구사항으로 AI가 구성한 최적 프롬프트입니다. 이렇게 요청하면 더 정확한
+              결과를 얻을 수 있어요.
+            </p>
+            <button
+              type="button"
+              onClick={() => void copyPrompt()}
+              title="프롬프트 복사"
+              className={
+                "inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-line px-2 py-1 text-[11.5px] transition-colors " +
+                (copiedPrompt ? "border-ok text-ok" : "text-ink-soft hover:bg-subtle")
+              }
+            >
+              {copiedPrompt ? <Check size={12} /> : <ClipboardCopy size={12} />}
+              {copiedPrompt ? "복사됨" : "복사"}
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto p-3.5">
+            <pre className="whitespace-pre-wrap rounded-lg border border-line bg-panel p-3.5 font-mono text-[12.5px] leading-relaxed text-ink">
+              {promptResult}
+            </pre>
+          </div>
+        </div>
       ) : effectiveTab === "rag" && ragResult ? (
         // In-memory result document, sandboxed exactly like the file viewer's
         // HTML preview (allow-scripts, no same-origin) — D46.

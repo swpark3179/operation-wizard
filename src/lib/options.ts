@@ -13,6 +13,20 @@ import type { Category } from "../components/workspace";
 import type { Settings } from "./types";
 import { workflowFor } from "./workflow";
 
+/** The requirement question — "what do you want to do" — prepended to EVERY
+ * category's form so the intent always comes first (D65). Required; when the
+ * chat starts from the launcher prompt the client seeds it with that text
+ * verbatim (`noPrefill` keeps the agent prefill pass from rewriting it). Its
+ * answer stays in the answers wire (it feeds the prompt-optimizer skill) and
+ * replaces the old "원래 요청" seed suffix on the first work turn. */
+export const REQUIREMENT_QUESTION: ClarifyQuestion = {
+  id: "userRequest",
+  label: "무엇을 하고 싶으신가요? 원하는 작업을 자유롭게 설명해 주세요.",
+  type: "text",
+  required: true,
+  noPrefill: true,
+};
+
 /** The mandatory codebase-folder question, prepended when the category's
  * foundation phase applies (D45). Excluded from prefill (folder type); its
  * answer is delivered structurally (WorkspaceView state → ChatPanel prop), not
@@ -150,5 +164,9 @@ export function optionsFor(category: Category, settings: Settings | null): Clari
   // `codebase` step (D63) — a Confluence/knowledge-only flow like guide has
   // none, so it shows no folder picker.
   const needsCodebase = workflowFor(category, settings).some((s) => s.kind === "codebase");
-  return needsCodebase ? [CODEBASE_QUESTION, ...base] : base;
+  // The requirement question always leads — what the user wants comes before
+  // any setup choice (D65).
+  return needsCodebase
+    ? [REQUIREMENT_QUESTION, CODEBASE_QUESTION, ...base]
+    : [REQUIREMENT_QUESTION, ...base];
 }

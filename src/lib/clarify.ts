@@ -24,6 +24,10 @@ export interface ClarifyQuestion {
   /** Choices for single/multi (required for those types). */
   options?: string[];
   required?: boolean;
+  /** Excluded from the agent prefill protocol (like folder questions) — used
+   * for questions the client fills deterministically itself, e.g. the
+   * requirement question seeded from the launcher prompt (D65). */
+  noPrefill?: boolean;
 }
 
 export interface ClarifyAnswer {
@@ -170,9 +174,10 @@ function serializeQuestion(q: ClarifyQuestion): string {
 
 /** Build the instruction that asks the agent to prefill known option answers
  * from the user's request. Prepended (invisibly) to a hidden prefill turn.
- * Folder questions are excluded — an agent cannot know local paths. */
+ * Folder questions are excluded — an agent cannot know local paths — and so
+ * are `noPrefill` questions the client fills itself (D65). */
 export function prefillInstruction(questions: ClarifyQuestion[], userPrompt: string): string {
-  questions = questions.filter((q) => q.type !== "folder");
+  questions = questions.filter((q) => q.type !== "folder" && !q.noPrefill);
   return `[시스템 지시: 요청 자동 분석 단계]
 아래는 사용자가 답해야 할 선택 항목 목록입니다. 사용자의 요청을 읽고, 요청에서 "확실하게" 알 수 있는 항목만 골라 답을 채우세요.
 
@@ -217,6 +222,7 @@ export function parsePrefill(
       const q = byId.get(id);
       if (!q) continue;
       if (q.type === "folder") continue; // never agent-fillable (defensive)
+      if (q.noPrefill) continue; // client-filled question — agent value ignored (D65)
       if (q.type === "text") {
         if (typeof raw === "string" && raw.trim()) out[id] = raw;
       } else if (q.type === "single") {
