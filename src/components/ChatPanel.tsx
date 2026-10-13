@@ -39,7 +39,7 @@ import { joinWorkdirPath } from "../lib/artifacts";
 import { buildRagQuery, formatKnowledgeContext, formatRagContext, ragUserError } from "../lib/foundation";
 import { judgeRagRelevance, type RagVerdict } from "../lib/ragRelevance";
 import { optionsFor, REQUIREMENT_QUESTION } from "../lib/options";
-import { PROMPT_OPTIMIZER_SKILL, parsePromptBlock, stripPromptBlock } from "../lib/promptCraft";
+import { PROMPT_NOTE, PROMPT_OPTIMIZER_SKILL, parsePromptBlock, stripPromptBlock } from "../lib/promptCraft";
 import { resolveSkills } from "../lib/skills";
 import { isGenerative, progressLabel, runtimeWorkflowFor } from "../lib/workflow";
 import type {
@@ -65,6 +65,13 @@ export function defaultAgentId(agents: AgentInfo[], detected: Record<string, Det
   if (detected.claude?.available) return "claude";
   const firstAvailable = agents.find((a) => detected[a.id]?.available);
   return firstAvailable?.id ?? agents[0]?.id ?? "claude";
+}
+
+/** Agent for a saved session whose agent is no longer registered (AI Pro was
+ * removed — D83). AI Pro was sessionless, so prefer the sessionless FabriX
+ * (the transcript replay then continues the conversation), else the default. */
+function fallbackForRemovedAgent(agents: AgentInfo[], detected: Record<string, DetectedAgent>): string {
+  return detected.fabrix?.available ? "fabrix" : defaultAgentId(agents, detected);
 }
 
 /** Flatten the conversation into a plain transcript for sessionless agents. */
@@ -97,8 +104,9 @@ function lastAssistantError(msgs: ChatMessage[]): string {
 }
 
 /** Per-step automatic-retry budget for a workflow turn that failed with a
- * transient error — chiefly the aipro backend's intermittent >45s first-response
- * timeout, which aborts otherwise-fine multi-step workflows (D68). */
+ * transient error (stream/timeout/network hiccups — first seen as the former
+ * AI Pro backend's intermittent >45s first-response timeout), which would
+ * otherwise abort a multi-step workflow (D68). */
 const MAX_STEP_RETRIES = 2;
 
 /** Does a failed turn's error look transient (worth an automatic retry)? Targets
@@ -119,7 +127,8 @@ function isTransientFailure(msg: string): boolean {
 }
 
 /** Turn a remote agent's document reply into the file body (D67): if the whole
- * reply is one fenced code block (```md … ```), unwrap it; else trim as-is. */
+ * reply is one fenced code block (```md … ```), unwrap it; else trim as-is.
+ * The caller passes only the text after the turn's last tool call (D84). */
 function extractDocBody(content: string): string {
   const trimmed = content.trim();
   const m = trimmed.match(/^```[^\n]*\n([\s\S]*?)\n?```$/);
@@ -215,15 +224,28 @@ export function ChatPanel({
   const [input, setInput] = useState("");
   const inputRef = useAutoGrow(input, 160);
   const [streaming, setStreaming] = useState(false);
-  const [agentId, setAgentId] = useState<string>(
-    () => initialSession?.agentId ?? initialAgentId ?? defaultAgentId(agents, detected),
+  // A saved session whose agent no longer exists (`aipro`, removed in D83)
+  // reopens on a fallback agent with a reset model instead of failing every
+  // turn with "unknown agent".
+  const [sessionAgentRemoved] = useState(
+    () =>
+      !!initialSession?.agentId &&
+      agents.length > 0 &&
+      !agents.some((a) => a.id === initialSession.agentId),
   );
-  const [model, setModel] = useState<string>(
-    () => initialSession?.model ?? initialModel ?? "default",
+  const [agentId, setAgentId] = useState<string>(() =>
+    sessionAgentRemoved
+      ? fallbackForRemovedAgent(agents, detected)
+      : (initialSession?.agentId ?? initialAgentId ?? defaultAgentId(agents, detected)),
+  );
+  const [model, setModel] = useState<string>(() =>
+    sessionAgentRemoved ? "default" : (initialSession?.model ?? initialModel ?? "default"),
   );
   // A Home-picked agent is an explicit choice — the detection-sync effect below
   // must not override it with the auto default (D60).
-  const agentPinnedRef = useRef(!!initialSession?.agentId || !!initialAgentId);
+  const agentPinnedRef = useRef(
+    (!!initialSession?.agentId && !sessionAgentRemoved) || !!initialAgentId,
+  );
 
   const runIdRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(initialSession?.cliSessionId ?? null);
@@ -255,6 +277,11 @@ export function ChatPanel({
   const promptSkillPendingRef = useRef(!initialSession);
   // Marks the turn whose `end` must parse a ```prompt block (like inflightStepRef).
   const promptInflightRef = useRef(false);
+  // The current turn's text since its last tool call (D84). A remote agent's
+  // document is its final answer after the read-only tool rounds, so this —
+  // not the whole reply (which also holds pre-tool narration) — is what the
+  // D67 path writes to `step.file`. Reset per send; cleared on tool events.
+  const remoteTailRef = useRef("");
 
   // Category workflow orchestration (generalizes the clarify one-shot). `WF` is
   // the category's ordered steps (user-configured via settings, else the
@@ -346,9 +373,10 @@ export function ChatPanel({
 
   const started = messages.length > 0;
   const sessionCapable = SESSION_AGENTS.includes(agentId);
-  // Remote (HTTP) agents (Fabrix) stream text only — no filesystem/tools — so
-  // the app persists their document-step output itself (D67). `agentId` is
-  // locked once a turn starts, so this is stable across the turn.
+  // Remote (HTTP) agents (FabriX) can read files through the app's read-only
+  // tool loop but never write, so the app persists their document-step output
+  // itself (D67/D84). `agentId` is locked once a turn starts, so this is
+  // stable across the turn.
   const isRemote = detected[agentId]?.source === "remote";
 
   // History popover.
@@ -398,8 +426,9 @@ export function ChatPanel({
   const models = detected[agentId]?.models ?? [];
 
   // Ensure a concrete model is selected when the current value isn't valid for
-  // the chosen agent. Fabrix (D64) lists real modelIds with no "default" option,
-  // so the "default" sentinel would send no modelId — snap to the first model.
+  // the chosen agent. FabriX (D64/D84) lists real modelIds with no "default"
+  // option (its configured default first) — snap to the first model (the
+  // backend also resolves a missing/unknown id to the default).
   // CLI agents include a "default" option, so this never fires for them.
   useEffect(() => {
     if (started) return;
@@ -487,6 +516,7 @@ export function ChatPanel({
         if (ev.sessionId && !prefillInflightRef.current) sessionIdRef.current = ev.sessionId;
         break;
       case "textDelta":
+        remoteTailRef.current += ev.delta;
         updateLastAssistant((m) => ({ ...m, content: m.content + ev.delta }));
         break;
       case "stdout":
@@ -496,12 +526,14 @@ export function ChatPanel({
         updateLastAssistant((m) => ({ ...m, thinking: m.thinking + ev.delta }));
         break;
       case "toolUse":
+        remoteTailRef.current = ""; // the document is what comes after the last tool call
         updateLastAssistant((m) => ({
           ...m,
           events: [...m.events, { kind: "toolUse", id: ev.id, name: ev.name, input: ev.input }],
         }));
         break;
       case "toolResult":
+        remoteTailRef.current = "";
         updateLastAssistant((m) => ({
           ...m,
           events: [
@@ -597,15 +629,27 @@ export function ChatPanel({
               producedFileRef.current = true; // an artifact exists → completion may propose saving it (D59)
               const abs = joinWorkdirPath(resolvedWorkdirRef.current, step.file);
               if (isRemote) {
-                // Fabrix streams text but cannot write files — persist the reply
-                // ourselves, then open it (refreshNonce bump → existence probe
-                // finds it → FileViewer mounts). Write first, open after (D67).
-                const body = extractDocBody(lastAssistantContent(messagesRef.current));
-                void writeFile(abs, body)
-                  .then(() => onOpenFile(abs))
-                  .catch((e) =>
-                    mutateMessages((prev) => [...prev, note(`산출물 파일 저장 실패 — ${String(e)}`)]),
+                // FabriX can only *read* files (tool loop, D84) — persist the
+                // reply ourselves, then open it (refreshNonce bump → existence
+                // probe finds it → FileViewer mounts). Write first, open after
+                // (D67). Only the text after the turn's last tool call is the
+                // document (pre-tool narration is not), and the first work
+                // turn's ```prompt block / PROMPT_NOTE is removed. Never write
+                // an empty file.
+                const body =
+                  extractDocBody(stripPromptBlock(remoteTailRef.current, "")) ||
+                  extractDocBody(
+                    stripPromptBlock(lastAssistantContent(messagesRef.current), "").replace(PROMPT_NOTE, ""),
                   );
+                if (body) {
+                  void writeFile(abs, body)
+                    .then(() => onOpenFile(abs))
+                    .catch((e) =>
+                      mutateMessages((prev) => [...prev, note(`산출물 파일 저장 실패 — ${String(e)}`)]),
+                    );
+                } else {
+                  mutateMessages((prev) => [...prev, note("응답이 비어 있어 산출물 파일을 저장하지 않았습니다.")]);
+                }
               } else {
                 onOpenFile(abs); // CLI agents wrote the file with their own tools
               }
@@ -628,8 +672,8 @@ export function ChatPanel({
           // chat kind: terminal — nothing to advance.
         } else if (stepIdx != null) {
           // A generative step's turn failed mid-workflow. If the failure looks
-          // transient (chiefly aipro's intermittent >45s first-response timeout —
-          // D68) and the per-step retry budget is left, drop the failed pair and
+          // transient (stream/timeout/network — D68) and the per-step retry
+          // budget is left, drop the failed pair and
           // AUTO-RETRY the same step (via the auto-turn nonce) before giving up.
           const attempt = stepRetryRef.current.step === stepIdx ? stepRetryRef.current.count + 1 : 1;
           const retryable =
@@ -986,13 +1030,14 @@ export function ChatPanel({
     const pathCtx =
       !isPrefill && stepInject && step && isGenerative(step.kind) ? pathContext(step, cwd) : "";
 
-    // Remote agents (Fabrix) can't run the "save with your file tool" instruction
-    // — the app writes their reply to `step.file` (D67). Tell them to emit only
-    // the clean document body (no tool talk / greetings) so the saved file is
-    // the document itself. Only for remote document steps; CLI wire unchanged.
+    // Remote agents (FabriX) have read-only file tools but cannot write — the
+    // app writes their final reply to `step.file` (D67/D84). Tell them to read
+    // what they need with the tools, then emit only the clean document body
+    // (no tool talk / greetings) so the saved file is the document itself.
+    // Only for remote document steps; CLI wire unchanged.
     const remoteDocCtx =
       !isPrefill && isRemote && stepInject && step && isGenerative(step.kind) && step.file
-        ? "이 단계의 출력 전체가 그대로 문서 파일로 저장됩니다. 파일 저장 도구를 쓰거나 저장 여부를 언급하지 말고, 인사말·메타설명 없이 문서 본문(마크다운/HTML)만 출력하세요."
+        ? "이 단계의 최종 답변 전체가 그대로 문서 파일로 저장됩니다(저장은 앱이 처리). 필요하면 먼저 읽기 전용 파일 도구(list_dir·find_files·search_text·read_file)로 근거 파일을 읽은 뒤, 최종 답변에는 파일 저장 도구 사용·저장 여부 언급·인사말·메타설명 없이 문서 본문(마크다운/HTML)만 출력하세요."
         : "";
 
     const wire = isPrefill
@@ -1050,6 +1095,7 @@ export function ChatPanel({
     // for the hidden prefill turn — it is not a saved conversation).
     if (!isPrefill) persist(nextMessages);
 
+    remoteTailRef.current = "";
     setStreaming(true);
     const channel = new Channel<RunEvent>();
     channel.onmessage = handleEvent;
@@ -1065,15 +1111,19 @@ export function ChatPanel({
           model: model === "default" ? null : model,
           sessionId: useSession ? sessionIdRef.current : null,
           resume: useSession ? resumeRef.current : false,
-          // Every turn: claude maps these to --add-dir, gemini/aipro to
+          // Every turn: claude maps these to --add-dir, gemini to
           // --include-directories (codebase + skill resource folders, D52; +
           // the knowledge artifacts root once its index was injected, D59);
-          // codex is full-access, plain agents rely on the prompt mentions.
+          // FabriX uses them (+ cwd) as its read-only tool sandbox (D84);
+          // codex reads broadly, plain agents rely on the prompt mentions.
           extraDirs: [
             ...(codebasePathRef.current ? [codebasePathRef.current] : []),
             ...skillDirsRef.current,
             ...knowledgeDirsRef.current,
           ],
+          // The hidden prefill turn only fills the option form (one fenced
+          // JSON reply) — no FabriX tool rounds (D84).
+          ...(isPrefill ? { tools: false } : {}),
         },
         channel,
       );

@@ -124,59 +124,40 @@ pub struct RagConfig {
     pub models: Vec<ModelOption>,
 }
 
-/// Connection config for the Fabrix remote HTTP agent (D64). Unlike the local
-/// CLI agents (a `customBin` path), Fabrix needs an endpoint + two request
-/// headers. Stored here — same root as `rag`/`confluence` — so it persists
-/// across runs. The token is plain text: same caveat as `RagConfig`/
-/// `ConfluenceConfig` (local single-user app; prefer a scoped token).
+/// Connection config for the FabriX remote HTTP agent — the FabriX LLM Serving
+/// API (OpenAI-compatible; D64 → D84). Unlike the local CLI agents (a
+/// `customBin` path), FabriX needs an endpoint + two auth headers; the model is
+/// chosen per request with the `x-llm-model-id` header. Stored here — same root
+/// as `rag`/`confluence` — so it persists across runs. The keys are plain text:
+/// same caveat as `RagConfig`/`ConfluenceConfig` (local single-user app).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FabrixConfig {
-    /// Base endpoint, e.g. "https://fabrix.example.com". The model-list and chat
-    /// paths ("/openapi/chat/v1/...") are appended by `fabrix.rs`.
+    /// Issued endpoint, e.g. "https://nsds-api.fabrix-s.samsungsds.com/sds/trial/api-llm".
+    /// `fabrix.rs` appends the `/openapi/llm` base path (a pasted full base is
+    /// normalized back on save).
     #[serde(default)]
     pub endpoint_url: String,
-    /// `x-fabrix-client` request header value.
+    /// `x-fabrix-client` request header value (JWT).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
-    /// `x-openapi-token` request header value.
+    /// `x-openapi-token` request header value. `fabrix.rs` adds the `Bearer `
+    /// prefix at request time when it is missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openapi_token: Option<String>,
-    /// Opt-in escape hatch for corporate TLS-inspection proxies whose CA is not
-    /// in the Windows store. Default false; the UI labels it dangerous.
+    /// Legacy TLS escape hatch. Kept for serde compatibility only — the UI no
+    /// longer offers it and TLS verification is always on (D75/D84).
     #[serde(default)]
     pub allow_invalid_certs: bool,
-    /// Cached model list from the last successful fetch (save / refresh /
-    /// connection test). Shown at app start without a network call and used as a
-    /// fallback when the endpoint is unreachable (cache-first, D66).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<ModelOption>,
-}
-
-/// Connection config for the AI Pro remote HTTP agent (D71). AI Pro is an
-/// OpenAI-compatible HTTP service (chat `POST {endpoint}/chat/completions` + SSE,
-/// models `GET {endpoint}/models`), so unlike Fabrix's two custom headers it
-/// authenticates with a single `Authorization: Bearer <apiKey>`. Stored here —
-/// same root as `fabrix`/`rag` — so it persists across runs. The key is plain
-/// text: same caveat as `FabrixConfig` (local single-user app; prefer a scoped
-/// key).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct AiProConfig {
-    /// Base endpoint, e.g. "https://aipro.sdsdev.co.kr/open/api/v1". The
-    /// "/models" and "/chat/completions" paths are appended by `aipro.rs`.
-    #[serde(default)]
-    pub endpoint_url: String,
-    /// `Authorization: Bearer <apiKey>` value (the single OpenAI-style key).
+    /// Default model id (`x-llm-model-id`, e.g. "70"). Detection lists it first
+    /// so the chat model dropdown selects it, and `run_fabrix` falls back to it
+    /// when a turn names no/unknown model. `None` → "70" (Glm 5.2) — D84.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// Opt-in escape hatch for corporate TLS-inspection proxies whose CA is not
-    /// in the Windows store. Default false; the UI labels it dangerous.
-    #[serde(default)]
-    pub allow_invalid_certs: bool,
+    pub default_model_id: Option<String>,
     /// Cached model list from the last successful fetch (save / refresh /
     /// connection test). Shown at app start without a network call and used as a
-    /// fallback when the endpoint is unreachable (cache-first, D66).
+    /// fallback when the endpoint is unreachable (cache-first, D66). Entries
+    /// carry the FabriX `context`/`tools` metadata (D84).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelOption>,
 }
@@ -200,14 +181,12 @@ pub struct Settings {
     /// The user's RAG service endpoint. `None` → the rag workflow step skips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rag: Option<RagConfig>,
-    /// The Fabrix remote HTTP agent connection. `None` → not configured (the
-    /// Fabrix agent reports "not-configured" until saved) — D64.
+    /// The FabriX remote HTTP agent connection. `None` → not configured (the
+    /// FabriX agent reports "not-configured" until saved) — D64/D84. (The former
+    /// `aipro` section was removed in D83; serde ignores it in an old file and
+    /// the next save drops it.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fabrix: Option<FabrixConfig>,
-    /// The AI Pro remote HTTP agent connection (OpenAI-compatible). `None` → not
-    /// configured (the AI Pro agent reports "not-configured" until saved) — D71.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aipro: Option<AiProConfig>,
     /// Legacy v0.1 single-agent field. Folded into `agents` on load and never
     /// re-serialized (so the next `save` drops it — self-healing migration).
     #[serde(default, skip_serializing)]
@@ -258,14 +237,9 @@ impl Settings {
         self.rag = config;
     }
 
-    /// Set (`Some`) or clear (`None`) the Fabrix connection config.
+    /// Set (`Some`) or clear (`None`) the FabriX connection config.
     pub fn set_fabrix(&mut self, config: Option<FabrixConfig>) {
         self.fabrix = config;
-    }
-
-    /// Set (`Some`) or clear (`None`) the AI Pro connection config (D71).
-    pub fn set_aipro(&mut self, config: Option<AiProConfig>) {
-        self.aipro = config;
     }
 }
 
@@ -472,23 +446,22 @@ mod tests {
             pass_key: Some("pass".into()),
             top_k: Some(5),
             knowledge_asset_id: Some("asset-123".into()),
-            models: vec![ModelOption { id: "rag-m1".into(), label: "RAG 모델".into() }],
+            models: vec![ModelOption::new("rag-m1", "RAG 모델")],
         }));
         s.set_fabrix(Some(FabrixConfig {
             endpoint_url: "https://fabrix.example.com".into(),
             client: Some("client-key".into()),
             openapi_token: Some("token".into()),
             allow_invalid_certs: false,
+            default_model_id: Some("70".into()),
             models: vec![
-                ModelOption { id: "fx-m1".into(), label: "모델 하나".into() },
-                ModelOption { id: "fx-m2".into(), label: "모델 둘".into() },
+                ModelOption {
+                    context: Some("128K".into()),
+                    tools: Some(true),
+                    ..ModelOption::new("70", "Glm 5.2")
+                },
+                ModelOption::new("16", "gpt-oss-120b(Mid)"),
             ],
-        }));
-        s.set_aipro(Some(AiProConfig {
-            endpoint_url: "https://aipro.example.com/open/api/v1".into(),
-            api_key: Some("bearer-key".into()),
-            allow_invalid_certs: false,
-            models: vec![ModelOption { id: "glm-5.1".into(), label: "glm-5.1".into() }],
         }));
         save(&root, &s).unwrap();
 
@@ -519,7 +492,6 @@ mod tests {
         assert!(s.confluence.is_none());
         assert!(s.rag.is_none());
         assert!(s.fabrix.is_none());
-        assert!(s.aipro.is_none());
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -537,9 +509,7 @@ mod tests {
         let s: Settings = serde_json::from_str(raw).unwrap();
         assert_eq!(s.skills.as_ref().unwrap()[0].dir, None);
         assert_eq!(s.workflows["plan"][0].output, None);
-        assert!(
-            s.confluence.is_none() && s.rag.is_none() && s.fabrix.is_none() && s.aipro.is_none()
-        );
+        assert!(s.confluence.is_none() && s.rag.is_none() && s.fabrix.is_none());
 
         // A pre-D50 rag section (apiKey) still parses: the unknown field is
         // ignored, the new header fields default to None.
@@ -551,6 +521,43 @@ mod tests {
         assert_eq!(rag.top_k, Some(3));
         // No `models` in the old JSON → empty cache (cache-first, D66).
         assert!(rag.models.is_empty());
+    }
+
+    #[test]
+    fn removed_aipro_section_is_ignored_and_dropped_on_save() {
+        // D83: AI Pro was removed. An old file that still carries the `aipro`
+        // section (and an old-shape fabrix cache entry) must load without
+        // losing the rest of the settings, and the next save drops `aipro`.
+        let root = temp_root("aipro-removed");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("settings.json"),
+            r#"{
+                "agents": { "claude": { "customBin": "C:/c.cmd" } },
+                "fabrix": { "endpointUrl": "https://f", "allowInvalidCerts": false,
+                            "models": [{ "id": "m-uuid", "label": "old" }] },
+                "aipro": { "endpointUrl": "https://aipro.example.com/open/api/v1",
+                           "apiKey": "k", "allowInvalidCerts": false }
+            }"#,
+        )
+        .unwrap();
+
+        let s = load(&root);
+        assert_eq!(s.agent_custom_bin("claude").as_deref(), Some("C:/c.cmd"));
+        let fx = s.fabrix.clone().unwrap();
+        assert_eq!(fx.endpoint_url, "https://f");
+        assert!(fx.default_model_id.is_none());
+        // Old `{id,label}` cache entries still deserialize (metadata → None).
+        assert_eq!(fx.models[0].id, "m-uuid");
+        assert!(fx.models[0].context.is_none() && fx.models[0].tools.is_none());
+
+        save(&root, &s).unwrap();
+        let raw = fs::read_to_string(root.join("settings.json")).unwrap();
+        assert!(!raw.contains("\"aipro\""), "the removed section is dropped on save");
+        assert!(raw.contains("\"fabrix\""));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -614,7 +621,6 @@ mod tests {
         s.set_confluence(Some(ConfluenceConfig { url: "https://w".into(), ..Default::default() }));
         s.set_rag(Some(RagConfig { endpoint: "https://r".into(), ..Default::default() }));
         s.set_fabrix(Some(FabrixConfig { endpoint_url: "https://f".into(), ..Default::default() }));
-        s.set_aipro(Some(AiProConfig { endpoint_url: "https://a".into(), ..Default::default() }));
         save(&root, &s).unwrap();
 
         let mut loaded = load(&root);
@@ -623,7 +629,6 @@ mod tests {
         loaded.set_confluence(None);
         loaded.set_rag(None);
         loaded.set_fabrix(None);
-        loaded.set_aipro(None);
         save(&root, &loaded).unwrap();
 
         let reloaded = load(&root);
@@ -632,7 +637,6 @@ mod tests {
         assert!(reloaded.confluence.is_none());
         assert!(reloaded.rag.is_none());
         assert!(reloaded.fabrix.is_none());
-        assert!(reloaded.aipro.is_none());
         // The serialized file should not even contain the cleared fields.
         let raw = fs::read_to_string(root.join("settings.json")).unwrap();
         assert!(!raw.contains("\"skills\""));
@@ -640,7 +644,6 @@ mod tests {
         assert!(!raw.contains("\"confluence\""));
         assert!(!raw.contains("\"rag\""));
         assert!(!raw.contains("\"fabrix\""));
-        assert!(!raw.contains("\"aipro\""));
 
         let _ = fs::remove_dir_all(&root);
     }

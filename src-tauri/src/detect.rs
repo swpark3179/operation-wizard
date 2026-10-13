@@ -10,11 +10,27 @@ use crate::resolve::resolve_agent;
 
 // `Deserialize`/`Debug`/`PartialEq` let a model list be cached in settings.json
 // (`FabrixConfig.models`/`RagConfig.models`) and round-tripped in tests (D66).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOption {
     pub id: String,
     pub label: String,
+    /// Context window as advertised by the provider (e.g. "128K"). FabriX only
+    /// (parsed from the model description's `[Context]` line, D84); optional so
+    /// old cached `{id,label}` entries in settings.json still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// Whether the model supports function calling (FabriX `[Tools] Function
+    /// Calling`, D84). `None` = unknown (CLI agents never set it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<bool>,
+}
+
+impl ModelOption {
+    /// A plain `{id, label}` option (no FabriX metadata).
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self { id: id.into(), label: label.into(), ..Default::default() }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -35,11 +51,11 @@ pub struct DetectedAgent {
 }
 
 fn default_model() -> ModelOption {
-    ModelOption { id: "default".into(), label: "Default (CLI config)".into() }
+    ModelOption::new("default", "Default (CLI config)")
 }
 
 fn model(id: &str) -> ModelOption {
-    ModelOption { id: id.into(), label: id.into() }
+    ModelOption::new(id, id)
 }
 
 /// Build the static fallback catalog for an agent: the synthetic `default`
@@ -49,7 +65,7 @@ fn fallback_from(def: &AgentDef) -> Vec<ModelOption> {
     out.extend(
         def.fallback_models
             .iter()
-            .map(|(id, label)| ModelOption { id: (*id).into(), label: (*label).into() }),
+            .map(|(id, label)| ModelOption::new(*id, *label)),
     );
     out
 }
@@ -121,7 +137,7 @@ pub(crate) fn parse_codex_debug_models(stdout: &str) -> Option<Vec<ModelOption>>
             .filter(|s| !s.is_empty())
             .or_else(|| e.name.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             .unwrap_or(id);
-        out.push(ModelOption { id: id.into(), label: label.into() });
+        out.push(ModelOption::new(id, label));
     }
     if out.len() > 1 {
         Some(out)
@@ -259,15 +275,14 @@ mod tests {
     #[test]
     fn registry_ids_unique_and_have_fallbacks() {
         let defs = agents::all();
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 6);
         let mut seen = std::collections::HashSet::new();
         for d in defs {
             assert!(!d.id.is_empty());
             assert!(seen.insert(d.id), "duplicate id {}", d.id);
-            // Local agents ship an offline catalog. Remote agents fetch models
-            // live over HTTP: Fabrix carries none, but AI Pro keeps a fallback
-            // catalog (used when /models is unreachable — D71), so the invariant
-            // is only asserted for Local agents.
+            // Local agents ship an offline catalog. The remote FabriX agent
+            // fetches its models live over HTTP (cached in settings, D66/D84), so
+            // the invariant is only asserted for Local agents.
             if d.kind == agents::AgentKind::Local {
                 assert!(!d.fallback_models.is_empty(), "{} has no fallback models", d.id);
             }
@@ -277,18 +292,9 @@ mod tests {
             Some(agents::AgentKind::Remote),
             "fabrix must be a remote agent"
         );
-        // AI Pro is the second remote agent (D71) and — unlike Fabrix — keeps a
-        // static fallback catalog that `aipro::detect_aipro` relies on.
-        assert_eq!(
-            agents::find("aipro").map(|d| d.kind),
-            Some(agents::AgentKind::Remote),
-            "aipro must be a remote agent"
-        );
-        assert!(
-            !agents::find("aipro").unwrap().fallback_models.is_empty(),
-            "aipro keeps a static fallback catalog"
-        );
-        for id in ["opencode", "claude", "codex", "gemini", "antigravity", "aipro", "fabrix"] {
+        // AI Pro was removed (D83).
+        assert!(agents::find("aipro").is_none(), "aipro must no longer be registered");
+        for id in ["opencode", "claude", "codex", "gemini", "antigravity", "fabrix"] {
             assert!(agents::find(id).is_some(), "missing {id}");
         }
     }

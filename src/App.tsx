@@ -14,11 +14,10 @@ import {
   listAgents,
   openExternal,
   setAgentBin,
-  setAiProConfig,
   setFabrixConfig,
 } from "./lib/api";
 import { OW_OPEN_URL, isExternalUrl } from "./lib/linkGuard";
-import type { AgentInfo, AiProConfig, DetectedAgent, FabrixConfig, Settings } from "./lib/types";
+import type { AgentInfo, DetectedAgent, FabrixConfig, Settings } from "./lib/types";
 
 function App() {
   const [view, setView] = useState<View>("home");
@@ -36,7 +35,7 @@ function App() {
   const [bootNonce, setBootNonce] = useState(0);
 
   // Detect a single agent and merge its result/loading/error into the maps.
-  // `force` forces a live model fetch for the remote agent (Fabrix) — used by
+  // `force` forces a live model fetch for the remote agent (FabriX) — used by
   // manual Refresh and save; startup detection uses the cache (D66).
   const detectOne = useCallback(async (id: string, force = false) => {
     setLoading((m) => ({ ...m, [id]: true }));
@@ -106,7 +105,7 @@ function App() {
     [detectOne],
   );
 
-  // Save/clear the Fabrix connection config, then re-detect it (D64). Mirrors
+  // Save/clear the FabriX connection config, then re-detect it (D64/D84). Mirrors
   // `handleSave` — the returned settings replace state, then detection re-runs
   // (config presence + endpoint reachability + live model list).
   const handleSaveFabrix = useCallback(
@@ -115,19 +114,6 @@ function App() {
       setSettings(next);
       // Force a live model fetch on save so the cache is (re)filled (D66).
       await detectOne("fabrix", true);
-    },
-    [detectOne],
-  );
-
-  // Save/clear the AI Pro connection config, then re-detect it (D71). Mirrors
-  // `handleSaveFabrix` — the returned settings replace state, then detection
-  // re-runs (config presence + endpoint reachability + live model list).
-  const handleSaveAiPro = useCallback(
-    async (config: AiProConfig | null) => {
-      const next = await setAiProConfig(config);
-      setSettings(next);
-      // Force a live model fetch on save so the cache is (re)filled (D66).
-      await detectOne("aipro", true);
     },
     [detectOne],
   );
@@ -178,7 +164,6 @@ function App() {
               settings={settings}
               onSave={handleSave}
               onSaveFabrix={handleSaveFabrix}
-              onSaveAiPro={handleSaveAiPro}
             />
           </div>
         ) : view === "flows" ? (

@@ -90,15 +90,23 @@ pub struct RunArgs {
     pub resume: Option<bool>,
     /// Extra readable directories beyond `cwd` (codebase path + armed skill
     /// resource folders). Passed every turn — claude maps each to `--add-dir`,
-    /// gemini/aipro to `--include-directories` (see `RunCtx.extra_dirs`, D52).
+    /// gemini to `--include-directories` (see `RunCtx.extra_dirs`, D52); the
+    /// remote FabriX agent uses `cwd` + these as its read-only file-tool
+    /// sandbox roots (D84).
     #[serde(default)]
     pub extra_dirs: Vec<String>,
+    /// Whether a remote agent may use the app's read-only file tools this turn
+    /// (FabriX tool loop, D84). `None` = allowed; the frontend passes `false`
+    /// for text-only side turns (prefill / category classification / RAG
+    /// relevance) so they answer in one round. Ignored by CLI agents.
+    #[serde(default)]
+    pub tools: Option<bool>,
 }
 
 struct RunHandle {
     /// The child process for a local CLI agent; `None` for a remote (HTTP)
-    /// run (Fabrix — D64), which has no process, only a cancel flag its SSE
-    /// read loop observes.
+    /// run (FabriX — D64), which has no process, only a cancel flag its SSE
+    /// read loop / tool loop observes.
     child: Option<Arc<Mutex<Child>>>,
     canceled: Arc<AtomicBool>,
 }
@@ -119,7 +127,7 @@ impl RunRegistry {
 
     /// Register a child-less (remote/HTTP) run and return its cancel flag. The
     /// caller's read loop polls the flag and drops the connection on cancel.
-    /// Pair with `unregister` when the run ends. Used by `fabrix.rs` (D64).
+    /// Pair with `unregister` when the run ends. Used by `fabrix.rs` (D64/D84).
     pub(crate) fn register_remote(&self, id: &str) -> Arc<AtomicBool> {
         let canceled = Arc::new(AtomicBool::new(false));
         self.runs
@@ -351,7 +359,7 @@ pub fn parse_codex_event_line(line: &str) -> Vec<RunEvent> {
     }
 }
 
-/// Parse one line of Gemini/aipro's `--output-format stream-json` event stream
+/// Parse one line of Gemini's `--output-format stream-json` event stream
 /// (JSONL) into `RunEvent`s. Port of `handleGeminiEvent` (`json-event-stream.ts`).
 pub fn parse_gemini_event_line(line: &str) -> Vec<RunEvent> {
     let line = line.trim();
@@ -469,12 +477,11 @@ pub fn run_agent(
 
     // Remote (HTTP) agents bypass the process pipeline entirely: no resolve, no
     // spawn, no stdin — the prompt becomes a POST body and the SSE response
-    // streams `RunEvent`s (Fabrix D64, AI Pro D71). Two remote agents now, so
-    // dispatch on the id.
+    // (plus the app-side tool loop) streams `RunEvent`s (FabriX — D64/D84).
+    // Dispatch on the id so another remote agent can slot in later.
     if def.kind == agents::AgentKind::Remote {
         return match def.id {
             "fabrix" => crate::fabrix::run_fabrix(app, args, on_event),
-            "aipro" => crate::aipro::run_aipro(app, args, on_event),
             other => Err(format!("unknown remote agent: {other}")),
         };
     }

@@ -8,8 +8,9 @@
 
 Operation Wizard = Windows 데스크톱 앱(Tauri v2 + React/TS + Tailwind v4).
 코딩 에이전트를 탐지·관리하고(로컬 CLI: OpenCode·Claude Code·Codex·Gemini·Antigravity +
-원격 HTTP API: Fabrix(D64)·AI Pro(사내, OpenAI 호환, D71)),
-**대화 패널 + 캔버스 패널 워크스페이스에서 실제로 실행**한다(Claude Code 1급, 나머지 plain 폴백, Fabrix·AI Pro는 HTTP+SSE).
+원격 HTTP API: FabriX LLM Serving API(OpenAI 호환, D64/D84) — 사내 AI Pro는 D83에서 제거),
+**대화 패널 + 캔버스 패널 워크스페이스에서 실제로 실행**한다(Claude Code 1급, 나머지 plain 폴백, FabriX는 HTTP+SSE +
+앱 제공 읽기 전용 파일 도구 루프).
 
 ## 설계문서 (Single Source of Truth)
 

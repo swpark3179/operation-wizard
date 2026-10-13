@@ -58,8 +58,7 @@ Operation Wizard는 운영 담당자가 **AI 에이전트를 활용해 실제 �
 | **Gemini CLI** | 로컬 CLI | 구조화 스트림 |
 | **OpenCode** | 로컬 CLI | 기본 실행 |
 | **Antigravity** | 로컬 CLI | 기본 실행 |
-| **Fabrix** | 원격 HTTP API (SSE 스트리밍) | 스트리밍 채팅 + 문서 산출물 자동 저장 |
-| **AI Pro** | 원격 HTTP API (OpenAI 호환, SSE) | 스트리밍 채팅 + 문서 산출물 자동 저장 |
+| **FabriX** | 원격 HTTP API — FabriX LLM Serving API (OpenAI 호환, SSE) | 스트리밍 채팅(추론 표시) + **읽기 전용 파일 도구로 코드베이스 조회** + 문서 산출물 자동 저장 + 기본 모델 지정 |
 
 - 실행 파일 해석: `PATH` + npm 전역 · scoop · cargo 등 잘 알려진 툴체인 디렉터리 + `PATHEXT` 조합 스캔
 - 자동 탐지가 어려운 환경(비표준 설치)은 **사용자 지정 경로**로 보완
@@ -156,7 +155,7 @@ flowchart LR
         direction TB
         DETECT["에이전트 탐지<br/>agents · resolve · exec · detect"]
         RUN["실행 엔진<br/>run — RunEvent 스트리밍 · 취소"]
-        REMOTE["원격 커넥터<br/>fabrix · aipro (HTTP + SSE)"]
+        REMOTE["원격 커넥터<br/>fabrix (HTTP + SSE + 읽기 전용 도구 루프)"]
         KNOW["지식 인프라<br/>rag · mcp · confluence · knowledge"]
         STORE["영속화<br/>settings · projects · files"]
     end
@@ -164,7 +163,7 @@ flowchart LR
     subgraph EXT["에이전트 · 외부 서비스"]
         direction TB
         CLI["로컬 CLI 에이전트<br/>Claude Code · Codex · Gemini CLI<br/>OpenCode · Antigravity"]
-        API["원격 에이전트 API<br/>Fabrix · AI Pro"]
+        API["원격 에이전트 API<br/>FabriX LLM Serving API"]
         SVC["사내 RAG 서비스<br/>Confluence MCP 서버"]
     end
 
@@ -181,7 +180,7 @@ flowchart LR
 | `agents.rs` | 에이전트 정의(def) 레지스트리 — 새 에이전트는 정의 1개 추가로 확장 |
 | `resolve.rs` / `exec.rs` / `detect.rs` | 실행 파일 해석 → 버전 · 모델 프로브 → 탐지 결과 조립 |
 | `run.rs` | 실행 엔진: 프로세스 spawn + 스트림 파싱 → `RunEvent` Channel 스트리밍, 프로세스 트리 취소 |
-| `fabrix.rs` / `aipro.rs` | 원격 API 에이전트 커넥터 (HTTP + SSE, 모델 캐시, 연결 테스트) |
+| `fabrix.rs` / `fabrix_tools.rs` | FabriX 원격 에이전트 커넥터 (OpenAI 호환 HTTP + SSE, tool-calling 루프, 모델 캐시·기본 모델, 연결 테스트) · 읽기 전용 파일 도구 샌드박스 |
 | `rag.rs` / `mcp.rs` / `confluence.rs` | 사내 RAG 검색 · MCP 클라이언트 · Confluence 수집 |
 | `knowledge.rs` | 지식 베이스 CRUD + 산출물 파일 보관 |
 | `projects.rs` / `settings.rs` / `files.rs` | 프로젝트 · 세션 영속화, 설정 저장, 캔버스 파일 입출력 |

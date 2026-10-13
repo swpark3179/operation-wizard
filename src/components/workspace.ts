@@ -94,7 +94,11 @@ export function errorHint(msg: string | undefined): string | null {
     m.includes("enterprise-managed") ||
     (m.includes("sandbox") && m.includes("not in the allowed set"))
   ) {
-    return "사내 관리 정책이 codex 샌드박스를 제한하고 있습니다. 관리자(IT)에게 codex 정책의 allowed_sandbox_modes에 'read-only'가 포함되도록(예: [\"read-only\",\"workspace-write\"]) 정정을 요청하세요. 앱은 정책 상한을 우회할 수 없습니다. 우회가 필요하면 다른 에이전트(Claude Code·Gemini·Fabrix·AI Pro)로 진행할 수 있습니다.";
+    return "사내 관리 정책이 codex 샌드박스를 제한하고 있습니다. 관리자(IT)에게 codex 정책의 allowed_sandbox_modes에 'read-only'가 포함되도록(예: [\"read-only\",\"workspace-write\"]) 정정을 요청하세요. 앱은 정책 상한을 우회할 수 없습니다. 우회가 필요하면 다른 에이전트(Claude Code·Gemini·FabriX)로 진행할 수 있습니다.";
+  }
+  // A session saved with an agent that has since been removed (AI Pro — D83).
+  if (m.includes("unknown agent")) {
+    return "이 대화의 에이전트는 더 이상 지원되지 않습니다(AI Pro 지원 종료). 새 세션에서 다른 에이전트(예: FabriX)를 선택해 진행하세요.";
   }
   return null;
 }

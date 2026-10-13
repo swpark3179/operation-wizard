@@ -22,9 +22,10 @@
 //! mid-operation 404 triggers one automatic re-handshake).
 //!
 //! The HTTP client reuses the `reqwest` blocking + native-tls (schannel) recipe
-//! from `fabrix.rs`/`aipro.rs` — no new crate, OS cert store trusted, env proxy
+//! from `fabrix.rs`/`rag.rs` — no new crate, OS cert store trusted, env proxy
 //! bypassed (D66). A `User-Agent` is sent because the `sdsdev.co.kr` gateway
-//! gates on it (the same class of failure as AI Pro D74 / Confluence REST D75).
+//! gates on it (the same class of failure as the former AI Pro agent D74 /
+//! Confluence REST D75).
 
 use std::time::Duration;
 
@@ -39,7 +40,8 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// result when it replies with its own).
 const PROTOCOL_VERSION: &str = "2025-06-18";
 /// The `sdsdev.co.kr` gateway allowlists the opencode client by User-Agent
-/// (AI Pro needed the same, D74; `reqwest` sends none by default). If the MCP
+/// (the former AI Pro agent needed the same, D74; `reqwest` sends none by
+/// default). If the MCP
 /// gateway rejects it (406/403), adjust this constant.
 const MCP_UA: &str = "opencode/0.1.0";
 
@@ -65,7 +67,7 @@ pub struct McpSession {
     pub tools: Vec<ToolInfo>,
 }
 
-/// Build the blocking client (fabrix/aipro recipe: no env proxy, connect+total
+/// Build the blocking client (fabrix/rag recipe: no env proxy, connect+total
 /// timeout, mandatory UA, OS cert store via native-tls).
 fn build_client(allow_invalid_certs: bool) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()

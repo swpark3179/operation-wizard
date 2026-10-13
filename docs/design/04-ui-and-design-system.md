@@ -111,6 +111,10 @@
     - 해당 에이전트의 env override(`info.envVar`, 예 `OPENCODE_BIN`)와 동등함을 안내(있을 때만). 경로가
       설정돼 있으면 토글에 `set` 배지.
   - `AgentsView`는 `settings`(경로 맵) + `onSave`(→ `set_agent_bin` 후 재탐지)를 각 카드에 전달한다.
+- **`FabrixCard`**(`id=="fabrix"` — 원격 HTTP API, D64/D84): 상태·Refresh + 모델 목록(접이식, `live`/`cached`
+  배지, 모델별 context·"도구 지원"·"기본" 배지) + 연결 설정(ENDPOINT_URL — 발급 URL만, `/openapi/llm`·`Bearer`는
+  앱이 부착 / x-fabrix-client / x-openapi-token / **기본 모델 select**(목록 미로드 시 id 입력, 기본 70)) + 연결 테스트 +
+  저장. 인증서 검증 건너뛰기 옵션은 없다(TLS 상시 검증).
 
 ## 디자인 토큰 (`styles/tokens.css`)
 

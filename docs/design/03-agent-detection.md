@@ -10,9 +10,10 @@
 
 ## 에이전트 레지스트리 (`agents.rs`)
 
-`AGENT_DEFS`는 7개 에이전트 정의를 **표시 순서대로** 담은 정적 배열이다.
-`find(id)`로 조회하고, `all()`로 전체를 얻는다. 로컬 CLI 6종은 Open Design defs에서 1:1 포팅했고,
-`fabrix`(D64)와 `aipro`(D71)는 원격 HTTP API 에이전트다(`kind: Remote`, 아래 표 하단 ✧/✦).
+`AGENT_DEFS`는 6개 에이전트 정의를 **표시 순서대로** 담은 정적 배열이다.
+`find(id)`로 조회하고, `all()`로 전체를 얻는다. 로컬 CLI 5종은 Open Design defs에서 1:1 포팅했고,
+`fabrix`(D64/D84)는 원격 HTTP API 에이전트다(`kind: Remote`, 아래 표 하단 ✧). (사내 AI Pro(`aipro`)는
+D83에서 제거되었다.)
 
 | id | name | kind | bin 후보 | env override | 추가 검색 하위경로 | 모델 명령 / 파서 / 타임아웃 | fallback 모델 (default는 코드에서 prepend) |
 |----|------|------|----------|--------------|-------------------|------------------------------|---------------------------------------------|
@@ -21,37 +22,29 @@
 | `codex` | Codex CLI | Local | `codex` | `CODEX_BIN` | — | `debug models` / JSON / 5s | `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.1`, `gpt-5.1-codex-mini`, `gpt-5-codex`, `gpt-5`, `o3`, `o4-mini` |
 | `gemini` | Gemini CLI | Local | `gemini` | `GEMINI_BIN` | — | (없음 → fallback) | `gemini-3-pro-preview`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 | `antigravity` | Antigravity | Local | `agy` | `ANTIGRAVITY_BIN` ※ | — | (없음 → fallback) | `Gemini 3.1 Pro (High/Low)`, `Gemini 3.5 Flash (High/Medium/Low)`, `Claude Sonnet 4.6 (Thinking)`, `Claude Opus 4.6 (Thinking)`, `GPT-OSS 120B (Medium)` |
-| `aipro` | AI Pro | **Remote** ✦ | — | — | — | 정적 카탈로그 (연결 테스트=chat 최소 호출; `/models` 미조회; UA `opencode/*` 필수 — D73/D74) | `glm-5.1`(GLM-5.1), `qwen3.6-27b`(Qwen3.6-27b), `gpt-oss-120b`(Gpt-Oss-120b) — 항상 이 목록 |
-| `fabrix` | Fabrix | **Remote** ✧ | — | — | — | HTTP GET `all-models` / ko-name 매핑 / — | (없음 — 라이브 전용) |
+| `fabrix` | FabriX | **Remote** ✧ | — | — | — | HTTP GET `/openapi/llm/v1/models` / 숫자 modelId + ko 이름 + `[Context]`/`[Tools]` 메타 / 30s | (없음 — 라이브 + 캐시, 기본 모델 맨 앞) |
 
 > ※ `ANTIGRAVITY_BIN`은 Open Design에 없는 항목으로, 일관성을 위해 추가한 의도적
 > 편차다([05-decisions.md](05-decisions.md) D15). 모델 id와 label이 다른 경우(claude
-> alias, antigravity, aipro)는 `(id, label)` 튜플로 보존한다.
+> alias, antigravity)는 `(id, label)` 튜플로 보존한다.
 >
-> ✦ `aipro`는 사내 도구로, 두 번째 **원격 HTTP API 에이전트**(`kind: Remote` —
-> [05-decisions.md](05-decisions.md) D71)다. 과거엔 gemini 호환 로컬 CLI(`aipro` 바이너리)였으나,
-> 백엔드가 실제로는 **OpenAI 호환 API**라 `fabrix`처럼 CLI 필드를 쓰지 않고 **`aipro.rs`** 의 HTTP
-> 경로로 우회한다: 인증은 `Authorization: Bearer <apiKey>`, 실행(채팅)은
-> `POST {endpoint}/chat/completions` + SSE 스트리밍([07-workspace-and-runs.md](07-workspace-and-runs.md)).
-> **탐지는 네트워크 호출 없이** 설정(`settings.aipro`) 유무로만 판정한다(설정 있으면 `available`, 없으면
-> `diagnostic: not-configured`). **모델 목록은 항상 정적 카탈로그**(glm-5.1/qwen3.6-27b/gpt-oss-120b, 합성
-> `default` 없음 — 채팅은 실제 id 필요)다(모델을 이미 알고 있어 `/models` 미조회 — **D73**). 도달성은
-> **연결 테스트**(최소 `POST /chat/completions`)와 실제 대화로 검증한다. **중요(D74)**: 모든 AI Pro 요청은
-> `build_client`가 붙이는 **`User-Agent: opencode/<ver>`가 필수**다 — 사내 게이트웨이가 이 UA를 allowlist
-> 하고 백엔드가 `ua.split("/")`를 하므로, UA가 없으면 HTTP 500(`'NoneType'...split`), 다른 UA면 406이다.
->
-> ✧ `fabrix`는 **첫 원격 HTTP API 에이전트**(`kind: Remote` — [05-decisions.md](05-decisions.md) D64)다.
-> CLI 필드(bin/env/probe/run)를 쓰지 않고 **`fabrix.rs`** 의 HTTP 경로로 우회한다: 탐지는
-> 설정(`settings.fabrix`) 유무 + `GET {endpoint}/openapi/chat/v1/all-models` 도달성으로 판정하고,
-> 모델 목록은 응답 배열의 `modelId`(id) + `name`의 `languageCode=="ko"` content(label)로 매핑한다.
-> 실행(채팅)은 `POST .../messages` + SSE 스트리밍([07-workspace-and-runs.md](07-workspace-and-runs.md)).
-> fallback 카탈로그가 없어(라이브 전용) 미설정 시 모델 목록은 빈 배열 + `diagnostic: not-configured`.
+> ✧ `fabrix`는 **원격 HTTP API 에이전트**(`kind: Remote` — [05-decisions.md](05-decisions.md) D64)로,
+> **FabriX LLM Serving API**(OpenAI 호환, 바탕화면 `FabrixSample` 레퍼런스 포팅 — **D84**)를 쓴다. CLI 필드
+> (bin/env/probe/run)를 쓰지 않고 **`fabrix.rs`** 의 HTTP 경로로 우회한다: base = `{endpoint}/openapi/llm`
+> (붙여넣은 base·요청 URL은 정규화), 인증 헤더 `x-fabrix-client` + `x-openapi-token`(`Bearer ` 자동 부착).
+> 탐지는 설정(`settings.fabrix`) 유무 + `GET {base}/v1/models`(**`{base}/models`는 405**) 도달성으로 판정하고,
+> 모델 목록은 bare 배열의 숫자 `modelId`(id — `x-llm-model-id`에 넣는 값), `name[]` ko→en→첫 항목(label),
+> `description[]`의 `[Context]`/`[Tools] Function Calling`(→ `ModelOption.context`/`tools`)으로 매핑한다.
+> **기본 모델**(`FabrixConfig.defaultModelId`, 없으면 70 = Glm 5.2)을 목록 맨 앞에 둔다(ChatPanel이 `models[0]`로
+> 스냅). 실행(채팅)은 `POST {base}/chat/completions` + SSE + 앱 제공 읽기 전용 파일 도구 루프
+> ([07-workspace-and-runs.md](07-workspace-and-runs.md)). fallback 카탈로그는 없고(라이브 + 캐시 — D66),
+> 미설정 시 모델 목록은 빈 배열 + `diagnostic: not-configured`, 조회 실패 시 `unreachable`(유효 캐시는 계속 표시).
 
 `AgentDef` 필드: `id`, `name`, `kind: AgentKind {Local, Remote}`(D64), `bin_candidates`,
 `env_var: Option`, `extra_search_subdirs`, `version_timeout`, `models_probe: Option<ModelsProbe>`,
 `fallback_models: &[(id,label)]`, `run: Option<RunSpec>`(실행 스펙 — 탐지가 아닌 **실행**용, 자세히는
-[07-workspace-and-runs.md](07-workspace-and-runs.md)). `kind == Remote`(fabrix·aipro)면 CLI 필드는 빈
-값이고(단 aipro는 `fallback_models`를 유지) 탐지·실행이 `def.id`로 분기해 `fabrix.rs`/`aipro.rs`로 간다(D71).
+[07-workspace-and-runs.md](07-workspace-and-runs.md)). `kind == Remote`(fabrix)면 CLI 필드는 빈
+값이고 탐지·실행이 `def.id`로 분기해 `fabrix.rs`로 간다(D71/D84).
 `ModelsProbe`: `args`, `parse: fn(&str)->Option<Vec<ModelOption>>`, `timeout`.
 
 ## 파이프라인 (3단계, def 기반)
@@ -62,10 +55,10 @@ resolve  →  version probe  →  models probe(있으면)  →  DetectedAgent
 ```
 
 `detect_agent_blocking(def, custom)`가 **로컬(`kind: Local`)** 에이전트를 탐지한다(version args는
-`--version` 하드코딩, 타임아웃·모델 명령·파서·fallback은 def에서). **원격(`kind: Remote`, fabrix·aipro)**
+`--version` 하드코딩, 타임아웃·모델 명령·파서·fallback은 def에서). **원격(`kind: Remote`, fabrix)**
 에이전트는 이 파이프라인을 건너뛰고 `detect_agent` 커맨드가 `def.id`로 분기해
-`fabrix::detect_fabrix(cfg)`/`aipro::detect_aipro(cfg)`로 간다(resolve/spawn 없이 설정 유무 + HTTP
-도달성으로 판정 — D64/D71).
+`fabrix::detect_fabrix(cfg, force, persist)`로 간다(resolve/spawn 없이 설정 유무 + HTTP 도달성으로 판정,
+라이브 목록은 캐시에 저장 — D64/D66/D84).
 
 ### 1) Resolve — 실행 파일 경로 해석 (`resolve.rs`)
 
@@ -147,26 +140,26 @@ resolve  →  version probe  →  models probe(있으면)  →  DetectedAgent
 | `available` | 실행 파일을 spawn할 수 있었는지 |
 | `path` | 해석된 실행 파일 경로 (없으면 null) |
 | `version` | `--version` 첫 줄 (없으면 null) |
-| `source` | `custom-path` / `path` / `not-found` / **`remote`**(fabrix·aipro — D64/D71) |
-| `models` | `{ id, label }[]` (로컬은 맨 앞 `default`; **원격(fabrix·aipro)은 실제 model id만, `default` 없음**) |
+| `source` | `custom-path` / `path` / `not-found` / **`remote`**(fabrix — D64) |
+| `models` | `{ id, label, context?, tools? }[]` (로컬은 맨 앞 `default`; **원격(fabrix)은 실제 model id만, `default` 없음 — 기본 모델이 맨 앞, `context`/`tools`는 FabriX만 — D84**) |
 | `modelsSource` | `live` / `fallback` |
 | `diagnostic` | `not-on-path` / `not-executable` / `missing-target` / **`not-configured` / `unreachable`**(원격) / null |
 
 프론트의 `DIAGNOSTIC_HINT` 맵이 진단 코드를 사용자용 안내문으로 변환한다(원격의 `not-configured`/
-`unreachable` 포함 — 카드가 공유하므로 에이전트 중립 문구, D71).
+`unreachable` 포함 — 에이전트 중립 문구).
 
 ## 설정 영구화 (`settings.rs`)
 
-- `Settings { agents: { [agentId]: { customBin } }, skills?, workflows?, confluence?, rag?, fabrix?, aipro? }` —
+- `Settings { agents: { [agentId]: { customBin } }, skills?, workflows?, confluence?, rag?, fabrix? }` —
   에이전트별 경로 맵 + **워크플로우 단계/스킬 override**(탐지와 무관, [07](07-workspace-and-runs.md)·
-  [05](05-decisions.md) D39) + **`fabrix: FabrixConfig?`**(endpointUrl/client/openapiToken/allowInvalidCerts —
-  fabrix 원격 에이전트 연결, D64. `set_fabrix_config`로 저장/해제) + **`aipro: AiProConfig?`**
-  (endpointUrl/apiKey/allowInvalidCerts — aipro 원격 에이전트 연결, OpenAI 호환 Bearer 인증, D71.
-  `set_aipro_config`로 저장/해제).
-- **모델 목록 캐시(D66)**: `FabrixConfig`/`AiProConfig`/`RagConfig`에 `models: Vec<ModelOption>`
+  [05](05-decisions.md) D39) + **`fabrix: FabrixConfig?`**(endpointUrl/client/openapiToken/**defaultModelId**
+  (+레거시 allowInvalidCerts — 항상 false) — FabriX 원격 에이전트 연결, D64/D84. `set_fabrix_config`로 저장/해제 —
+  저장 시 endpoint 정규화). 구 settings.json의 `aipro` 섹션은 로드 시 무시되고 다음 저장에서 사라진다(D83).
+- **모델 목록 캐시(D66)**: `FabrixConfig`/`RagConfig`에 `models: Vec<ModelOption>`
   (`#[serde(default, skip_serializing_if=Vec::is_empty)]`)를 둔다. 저장/새로고침/연결 테스트에서 라이브로
-  조회한 목록을 여기에 저장하고, 이후 탐지는 **캐시 우선**(`detect_fabrix`/`detect_aipro`(cfg, force) —
-  `force=false`+캐시 있으면 네트워크 없이 반환, `models_source="fallback"`)으로 동작한다. 프록시
+  조회한 목록을 여기에 저장하고, 이후 탐지는 **캐시 우선**(`detect_fabrix(cfg, force, persist)` —
+  `force=false`+유효 캐시(숫자 id — 구 API의 UUID 캐시는 무효, D84)면 네트워크 없이 반환,
+  `models_source="fallback"`)으로 동작한다. 프록시
   우회(`.no_proxy()`)와 함께 적용되며 프론트는 `models`를 보내지 않고 백엔드가 소유(연결 동일 재저장 시
   이월, 변경 시 무효화).
 - `~/.operation-wizard/settings.json`에 pretty JSON으로 저장(홈 루트 — Tauri `app_config_dir`
@@ -180,21 +173,24 @@ resolve  →  version probe  →  models probe(있으면)  →  DetectedAgent
 - **line 파서 단위 테스트**: trim/주석/중복 제거 + `default` prepend 검증.
 - **codex JSON 파서 단위 테스트**: hidden 스킵 / slug·id / display_name·name / 중복 제거 /
   빈·비JSON → `None`.
-- **레지스트리 sanity**: 7개 id 유일·비어있지 않음, **로컬** 에이전트는 fallback 비어있지 않음(remote는
-  예외), 7개 id 조회됨, `fabrix`·`aipro`는 `kind: Remote`(단 `aipro`는 정적 fallback을 유지 — D71).
-- **fabrix 파서 단위 테스트**: `parse_models_json`(ko content 매핑·폴백·비배열/비JSON→Err),
-  `parse_fabrix_sse_data`(CHUNK→TextDelta·SUCCESS 마커→무이벤트·실패 status→Error).
-- **aipro 파서 단위 테스트(D71)**: `parse_openai_models_json`(`data[].id` 매핑·빈 id 스킵·`data` 없으면
-  Err), `parse_openai_sse_data`(delta.content→TextDelta·`[DONE]`/role-only→무이벤트·usage→Usage·
-  error→Error), `static_fallback_models`(3종 id·`default` 없음).
-- **캐시 우선 테스트(D66)**: `detect_fabrix`/`detect_aipro(cfg, false)`가 캐시 모델이 있으면 **네트워크
-  없이** 그 목록을 `models_source="fallback"`로 반환, 설정 없으면 `not-configured`.
+- **레지스트리 sanity**: 6개 id 유일·비어있지 않음, **로컬** 에이전트는 fallback 비어있지 않음(remote는
+  예외), 6개 id 조회됨, `fabrix`는 `kind: Remote`, `aipro`는 미등록(D83).
+- **fabrix 단위 테스트(D84)** — 샘플 `mock/fixtures`의 실제 응답 사용: `parse_models`(숫자 id·ko 이름·
+  `[Context]`/`[Tools]`·nbsp), endpoint 정규화·`Bearer` 자동 부착, `resolve_model`/기본 모델 정렬/구 UUID 캐시 무효,
+  `error_message`(WSO2/OIDC/litellm 오류 3종 + 429/405 힌트), `StreamAccumulator`(captured 도구 호출 스트림의
+  조각 병합·usage 청크·reasoning), `chat_body`(헤더 모델·`/mnt/models`·`max_tokens` 없음·`tool_choice`),
+  도구 예산. `fabrix_tools`: 와일드카드·샌드박스(`..`/외부 경로/`.env` 거부)·4종 도구·취소.
+  `#[ignore]` **E2E `fabrix_e2e_mock`**: 샘플 목업 서버 상대로 모델 목록·도구 루프·no-tools 스트림·404/401 힌트.
+- **rag 파서 단위 테스트**: rag-chat `/models`용 `parse_models_json`(ko content 매핑·폴백·비배열/비JSON→Err —
+  D84에서 fabrix.rs에서 rag.rs로 이동, 동작 불변).
+- **캐시 우선 테스트(D66)**: `detect_fabrix(cfg, false, None)`가 유효 캐시가 있으면 **네트워크
+  없이** 그 목록을(기본 모델 맨 앞) `models_source="fallback"`로 반환, 설정 없으면 `not-configured`.
 - **E2E(Windows)**: 임시 `opencode.cmd` 스텁을 만들고 `detect_agent_blocking(find("opencode"))`로
   탐지 → resolve + cmd.exe 래핑 + version/models 파싱까지 통과하는지 확인.
 - 잘못된 custom-path가 검색으로 fall-through 하는지 확인.
-- **settings 단위 테스트**: skills/workflows 라운드트립(+`FabrixConfig`/`AiProConfig`/`RagConfig`의
-  `models` 캐시 영속 — D66/D71), 구파일 하위호환(+레거시 마이그레이션 유지·`models` 없는 구 JSON→빈
-  벡터·`aipro` 없는 구 JSON→`None`), `validate_steps`/`validate_skills` 규칙, reset(`None`) 의미론.
+- **settings 단위 테스트**: skills/workflows 라운드트립(+`FabrixConfig`(defaultModelId·context/tools 메타)/
+  `RagConfig`의 `models` 캐시 영속 — D66/D84), 구파일 하위호환(+레거시 마이그레이션 유지·`models` 없는 구 JSON→빈
+  벡터·**구 `aipro` 섹션 무시 + 다음 저장에서 소멸** — D83), `validate_steps`/`validate_skills` 규칙, reset(`None`) 의미론.
 
 ## 확장 포인트 (새 에이전트 추가)
 
@@ -204,8 +200,9 @@ resolve  →  version probe  →  models probe(있으면)  →  DetectedAgent
    `detect.rs`에 `fn(&str)->Option<Vec<ModelOption>>` 파서를 추가해 연결.
 3. 프론트는 자동 반영(레지스트리를 `list_agents`로 받아 카드/설정 행을 렌더).
 
-**원격 HTTP API 에이전트**(fabrix D64·aipro D71 패턴): `AGENT_DEFS`에 `kind: Remote` def 추가(CLI 필드는
+**원격 HTTP API 에이전트**(fabrix D64/D84 패턴): `AGENT_DEFS`에 `kind: Remote` def 추가(CLI 필드는
 빈 값) → `detect_agent`/`run_agent`의 `kind == Remote` 분기에서 **`def.id`로 match**해 해당 HTTP 모듈로
-위임(원격이 2종 이상이므로 id 디스패치 — D71) → 연결 설정은 `Settings`에 필드 추가 + `set_*_config` 커맨드
-→ 프론트는 `AgentsView`가 id로 분기해 전용 설정 카드를 렌더. HTTP 로직은 `fabrix.rs`/`aipro.rs`를
-템플릿으로 복제(`reqwest` blocking+native-tls+`.no_proxy()`, SSE hand-roll, 순수 파서·캐시 우선).
+위임(D71의 id 디스패치 유지) → 연결 설정은 `Settings`에 필드 추가 + `set_*_config` 커맨드
+→ 프론트는 `AgentsView`가 id로 분기해 전용 설정 카드를 렌더. HTTP 로직은 `fabrix.rs`를
+템플릿으로 복제(`reqwest` blocking+native-tls+`.no_proxy()`+명시 timeout, SSE hand-roll, 순수 파서·캐시 우선;
+OpenAI 호환이면 `StreamAccumulator`·도구 루프·`fabrix_tools` 샌드박스 재사용 가능).

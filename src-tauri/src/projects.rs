@@ -61,7 +61,7 @@ pub struct SessionMeta {
     pub model: String,
     pub category: String,
     /// The agent CLI session id for resume (claude UUID / codex thread id), or
-    /// null for sessionless agents (gemini/aipro).
+    /// null for sessionless agents (gemini / FabriX).
     #[serde(default)]
     pub cli_session_id: Option<String>,
     #[serde(default)]

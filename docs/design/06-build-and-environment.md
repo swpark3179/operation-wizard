@@ -72,8 +72,8 @@ cargo test --manifest-path src-tauri\Cargo.toml
 [#61051](https://github.com/anthropics/claude-code/issues/61051) — 버전에 따라 수정·회귀 반복).
 
 - **조치**: Claude Code CLI를 최신 버전으로 업데이트한다(`npm i -g @anthropic-ai/claude-code` 또는
-  네이티브 인스톨러). gemini도 유사 증상이 있으면 CLI 업데이트(원격 HTTP 에이전트 fabrix·aipro는 프로세스를
-  spawn하지 않아 이 증상과 무관 — D71).
+  네이티브 인스톨러). gemini도 유사 증상이 있으면 CLI 업데이트(원격 HTTP 에이전트 FabriX는 프로세스를
+  spawn하지 않아 이 증상과 무관 — D84).
 - 앱 측 코드 변경은 없다([05](05-decisions.md) D54 — hidden desktop 재작성은 기각).
 
 ## 무반응 부팅(창이 안 뜸) 진단 (D56)

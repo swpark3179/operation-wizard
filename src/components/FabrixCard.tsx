@@ -18,13 +18,19 @@ const primaryBtn =
   "rounded-[6px] bg-accent px-3.5 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent-strong disabled:opacity-50";
 const ghostBtn =
   "inline-flex items-center gap-1.5 rounded-[6px] border border-line px-2.5 py-1.5 text-[12.5px] font-medium text-ink-muted transition-colors hover:bg-subtle disabled:opacity-40";
+const badgeCls = "rounded-full bg-subtle px-1.5 py-0.5 text-[10.5px] text-ink-soft";
 
-/** Card for the Fabrix remote HTTP agent (D64). Unlike {@link AgentCard} (a
- * single custom-binary path), Fabrix needs an endpoint + two request headers,
- * so this renders a credentials form + a connection test alongside the usual
- * detection status and model list. Detection ("Detected"/"Not detected") here
- * means "configured + endpoint reachable" — populated by `detect_agent`'s
- * remote branch, which fetches the live model list over HTTP. */
+/** Default model when none is configured — 70 = Glm 5.2 (analysis + tool
+ * calling; mirrors `fabrix::DEFAULT_MODEL_ID`). */
+const DEFAULT_MODEL_ID = "70";
+
+/** Card for the FabriX remote HTTP agent — the FabriX LLM Serving API
+ * (OpenAI-compatible, D64/D84). Unlike {@link AgentCard} (a single custom
+ * binary path), FabriX needs an endpoint + two auth headers and a default model
+ * (`x-llm-model-id`), so this renders a credentials form + a connection test
+ * alongside the detection status and model list. The model list comes from
+ * `DetectedAgent.models` (always fresh after a detect), with the FabriX
+ * `context`/`tools` metadata as badges; the backend lists the default first. */
 export function FabrixCard({
   info,
   agent,
@@ -40,14 +46,14 @@ export function FabrixCard({
   error: string | null;
   onRefresh: () => void;
   settings: Settings | null;
-  /** Save/clear the Fabrix connection config, then re-detect. */
+  /** Save/clear the FabriX connection config, then re-detect. */
   onSaveFabrix: (config: FabrixConfig | null) => Promise<void>;
 }) {
   const cfg = settings?.fabrix;
   const [endpoint, setEndpoint] = useState(cfg?.endpointUrl ?? "");
   const [client, setClient] = useState(cfg?.client ?? "");
   const [token, setToken] = useState(cfg?.openapiToken ?? "");
-  const [allowInvalid, setAllowInvalid] = useState(cfg?.allowInvalidCerts ?? false);
+  const [defaultModel, setDefaultModel] = useState(cfg?.defaultModelId ?? DEFAULT_MODEL_ID);
   const [showModels, setShowModels] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -60,7 +66,7 @@ export function FabrixCard({
     setEndpoint(cfg?.endpointUrl ?? "");
     setClient(cfg?.client ?? "");
     setToken(cfg?.openapiToken ?? "");
-    setAllowInvalid(cfg?.allowInvalidCerts ?? false);
+    setDefaultModel(cfg?.defaultModelId ?? DEFAULT_MODEL_ID);
     setSaved(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
@@ -68,6 +74,8 @@ export function FabrixCard({
   const available = agent?.available ?? false;
   const tone = loading ? "idle" : available ? "ok" : "bad";
   const statusLabel = loading ? "Detecting…" : available ? "Detected" : "Not detected";
+  const models = agent?.models ?? [];
+  const savedDefault = cfg?.defaultModelId ?? DEFAULT_MODEL_ID;
 
   const save = async () => {
     setSaving(true);
@@ -79,7 +87,9 @@ export function FabrixCard({
             endpointUrl: endpoint.trim(),
             client: client.trim() || null,
             openapiToken: token.trim() || null,
-            allowInvalidCerts: allowInvalid,
+            // TLS is always verified (D84) — the legacy opt-out stays off.
+            allowInvalidCerts: false,
+            defaultModelId: defaultModel.trim() || null,
           }
         : null;
       await onSaveFabrix(next);
@@ -110,7 +120,7 @@ export function FabrixCard({
           <div className="flex items-center gap-2">
             <h3 className="font-serif text-[16px] font-semibold text-ink-strong">{info.name}</h3>
             <span className="rounded-full bg-subtle px-2 py-0.5 text-[11px] font-medium text-ink-muted">
-              원격 HTTP API
+              LLM Serving API
             </span>
           </div>
 
@@ -148,8 +158,8 @@ export function FabrixCard({
         <p className="mt-3 rounded-[8px] bg-bad-bg px-3 py-2 text-[12.5px] text-bad">{error}</p>
       )}
 
-      {/* Models (fetched live over HTTP when configured) */}
-      {available && agent && agent.models.length > 0 && (
+      {/* Models (fetched over HTTP and cached; default listed first) */}
+      {models.length > 0 && (
         <div className="mt-3">
           <button
             type="button"
@@ -160,20 +170,25 @@ export function FabrixCard({
               size={15}
               className={`transition-transform duration-[120ms] ${showModels ? "rotate-0" : "-rotate-90"}`}
             />
-            {agent.models.length} model{agent.models.length === 1 ? "" : "s"}
-            <span className="rounded-full bg-subtle px-1.5 py-0.5 text-[11px] text-ink-soft">
-              {agent.modelsSource === "live" ? "live" : "fallback"}
-            </span>
+            {models.length} model{models.length === 1 ? "" : "s"}
+            <span className={badgeCls}>{agent?.modelsSource === "live" ? "live" : "cached"}</span>
           </button>
           {showModels && (
             <ul className="mt-2 flex flex-col gap-0.5">
-              {agent.models.map((m) => (
+              {models.map((m) => (
                 <li
                   key={m.id}
-                  className="rounded-[6px] px-2 py-1 text-[12px] text-ink-muted hover:bg-subtle"
+                  className="flex items-center gap-1.5 rounded-[6px] px-2 py-1 text-[12px] text-ink-muted hover:bg-subtle"
                 >
-                  {m.label}
-                  <span className="ml-2 font-mono text-[11px] text-ink-soft">{m.id}</span>
+                  <span className="text-ink">{m.label}</span>
+                  <span className="font-mono text-[11px] text-ink-soft">id {m.id}</span>
+                  {m.context && <span className={badgeCls}>{m.context}</span>}
+                  {m.tools && <span className={badgeCls}>도구 지원</span>}
+                  {m.id === savedDefault && (
+                    <span className="rounded-full bg-accent-tint px-1.5 py-0.5 text-[10.5px] font-medium text-accent">
+                      기본
+                    </span>
+                  )}
                 </li>
               ))}
             </ul>
@@ -184,9 +199,12 @@ export function FabrixCard({
       {/* Connection settings */}
       <div className="mt-4 border-t border-line pt-3.5">
         <p className="mb-3 text-[12px] leading-[1.5] text-ink-muted">
-          Fabrix 서버 연결 정보입니다. 토큰은 <span className="font-mono">x-fabrix-client</span>·
-          <span className="font-mono">x-openapi-token</span> 요청 헤더로 전달되며 settings.json에
-          평문으로 저장되니 읽기 전용 키를 권장합니다.
+          FabriX 포털에서 'LLM Serving APIs'로 발급받은 연결 정보입니다. 엔드포인트에는 발급받은 URL만
+          넣으면 앱이 <span className="font-mono">/openapi/llm</span>을 붙이고, 토큰의{" "}
+          <span className="font-mono">Bearer</span> 접두사도 자동으로 붙입니다. 값은{" "}
+          <span className="font-mono">x-fabrix-client</span>·<span className="font-mono">x-openapi-token</span>{" "}
+          헤더로 전달되며 settings.json에 평문으로 저장됩니다. 대화 중에는 작업 폴더·코드베이스를 읽기
+          전용 도구로 조회합니다(파일 수정 없음).
         </p>
         <div className="mb-2.5 flex flex-col gap-2.5">
           <div>
@@ -198,7 +216,7 @@ export function FabrixCard({
                 setSaved(false);
               }}
               disabled={saving}
-              placeholder="https://fabrix.example.com"
+              placeholder="https://nsds-api.fabrix-s.samsungsds.com/sds/trial/api-llm"
               className={inputCls + " font-mono text-[12px]"}
             />
           </div>
@@ -213,7 +231,7 @@ export function FabrixCard({
                   setSaved(false);
                 }}
                 disabled={saving}
-                placeholder="클라이언트 키"
+                placeholder="클라이언트 키 (JWT)"
                 className={inputCls + " font-mono text-[12px]"}
               />
             </div>
@@ -227,23 +245,51 @@ export function FabrixCard({
                   setSaved(false);
                 }}
                 disabled={saving}
-                placeholder="OpenAPI 토큰"
+                placeholder="OpenAPI 토큰 (Bearer 생략 가능)"
                 className={inputCls + " font-mono text-[12px]"}
               />
             </div>
           </div>
-          <label className="flex items-center gap-2 text-[12px] text-ink-muted">
-            <input
-              type="checkbox"
-              checked={allowInvalid}
-              onChange={(e) => {
-                setAllowInvalid(e.target.checked);
-                setSaved(false);
-              }}
-              disabled={saving}
-            />
-            인증서 검증 건너뛰기 (사내 TLS 검사 프록시용 — 위험, 가능하면 사용 안 함)
-          </label>
+          <div>
+            <label className={labelCls}>기본 모델 (x-llm-model-id)</label>
+            {models.length > 0 ? (
+              <select
+                value={defaultModel}
+                onChange={(e) => {
+                  setDefaultModel(e.target.value);
+                  setSaved(false);
+                }}
+                disabled={saving}
+                className={inputCls}
+              >
+                {!models.some((m) => m.id === defaultModel) && (
+                  <option value={defaultModel}>id {defaultModel} (목록에 없음)</option>
+                )}
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label} · id {m.id}
+                    {m.context ? ` · ${m.context}` : ""}
+                    {m.tools === false ? " · 도구 미지원" : ""}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={defaultModel}
+                onChange={(e) => {
+                  setDefaultModel(e.target.value);
+                  setSaved(false);
+                }}
+                disabled={saving}
+                placeholder={DEFAULT_MODEL_ID}
+                className={inputCls + " font-mono text-[12px]"}
+              />
+            )}
+            <p className="mt-1 text-[11.5px] text-ink-soft">
+              채팅의 기본 선택 모델입니다. 70(Glm 5.2)은 분석·도구 활용, 16(gpt-oss-120b)은 빠르고 저렴한
+              간단 질의에 권장됩니다. 도구 미지원 모델은 파일을 읽지 못합니다.
+            </p>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <button type="button" onClick={() => void test()} disabled={!settings?.fabrix} className={ghostBtn}>

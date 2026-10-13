@@ -40,7 +40,8 @@ Open Design의 `RuntimeAgentDef.buildArgs`/`streamFormat`/`promptViaStdin`에 �
   이전에는 무시되어 코드베이스를 아예 읽지 못했다) / **codex** = workspace-write 샌드박스라
   별도 부여 플래그 없음(읽기는 대체로 넓게 허용, 쓰기만 워크스페이스로 제한 — D80) /
   **plain** = 무시(프론트가 경로를 항상 프롬프트에도 언급하므로 best-effort로 degrade) /
-  **원격(fabrix·aipro)** = 파일시스템 무관이라 무시(코드베이스 실독 불가 — D67 한계, D71).
+  **원격(fabrix)** = CLI 인자가 아니라 **`cwd` + extraDirs가 앱 제공 읽기 전용 파일 도구의 샌드박스 루트**가
+  된다(코드베이스·스킬 폴더·지식 artifacts를 도구로 읽음 — D84).
 - **claude**(1급): `-p --output-format stream-json --verbose --input-format stream-json
   --permission-mode bypassPermissions --add-dir <cwd> [--add-dir <extraDir>...]` (+`--model`). 세션은 **클라이언트 mint**:
   첫 턴 `--session-id <uuid>`, 이후 `--resume <uuid>`. `ClaudeJson`/`ClaudeStreamJson`.
@@ -53,32 +54,29 @@ Open Design의 `RuntimeAgentDef.buildArgs`/`streamFormat`/`promptViaStdin`에 �
   세션은 **capture**(`thread.started.thread_id`).
 - **gemini**(1급): `--output-format stream-json --yolo [--model M]`, 프롬프트 stdin(`Text`),
   `GeminiJson`, env `GEMINI_CLI_TRUST_WORKSPACE=true`. CLI 세션 없음 → 맥락은 매 턴 재전송.
-  (aipro는 과거 gemini 호환 CLI였으나 D71에서 원격 HTTP로 이전 — 아래 참조.)
 - **opencode·antigravity**: `RunSpec::plain()` = `-p "<prompt>"`, `Plain`(원시 stdout). best-effort
   이며 `.cmd` shim + cmd 메타문자(`&|><`) 조합에선 취약할 수 있다([05](05-decisions.md) D19).
-- **fabrix**(원격 HTTP API, `kind: Remote` — D64): `RunSpec`을 쓰지 않는다(`run: None`). `run_agent`가
-  최상단에서 `def.id`로 분기해 `fabrix::run_fabrix`로 위임 — 프로세스 spawn/stdin 없이
-  `POST {endpoint}/openapi/chat/v1/messages`
-  (헤더 `x-fabrix-client`/`x-openapi-token`, body `{modelIds:[model], contents:[prompt], llmConfig(max_new_tokens
-  8192 — 긴 문서 잘림 방지, D67), isStream:true, systemPrompt}`)를 보내고 **SSE 응답**을 파싱해 `RunEvent`로
-  방출한다(`TextDelta`만 — 도구/파일 이벤트 없음). `extra_dirs`/`cwd`는 무시(파일시스템 무관). 세션리스
-  (매 턴 transcript 재전송). SSE 파서 `parse_fabrix_sse_data`
-  (`event_status=="CHUNK" && content`→`TextDelta`; SUCCESS/R20000 마커→무이벤트; 실패 status→`Error`).
-  파일을 못 쓰므로 **문서 단계 산출물은 클라이언트가 `write_file`로 저장**한다(`ChatPanel` end 분기 — D67).
-- **aipro**(원격 HTTP API, `kind: Remote` — D71): fabrix와 동일 패턴이나 **OpenAI 호환** 프로토콜.
-  `run: None` → `run_agent`가 `def.id`로 `aipro::run_aipro`에 위임 —
-  `POST {endpoint}/chat/completions`(헤더 `Authorization: Bearer <apiKey>`, body `{model,
-  messages:[{system},{user}], stream:true, stream_options:{include_usage:true}, temperature,
-  max_tokens:8192}`)를 보내고 **SSE 응답**(`chat.completion.chunk`)을 파싱한다. SSE 파서
-  `parse_openai_sse_data`(`choices[0].delta.content`→`TextDelta`, `usage`→`Usage`, `error`→`Error`,
-  `[DONE]` 종료). `extra_dirs`/`cwd` 무시(파일시스템 무관), 세션리스(매 턴 transcript 재전송). fabrix처럼
-  문서 산출물은 클라이언트 `write_file`로 저장(D67).
+- **fabrix**(원격 HTTP API, `kind: Remote` — D64/**D84**): **FabriX LLM Serving API**(OpenAI 호환 —
+  바탕화면 `FabrixSample` 포팅). `RunSpec`을 쓰지 않는다(`run: None`). `run_agent`가 최상단에서 `def.id`로
+  분기해 `fabrix::run_fabrix`로 위임 — 프로세스 spawn/stdin 없이 `POST {endpoint}/openapi/llm/chat/completions`
+  (헤더 `x-fabrix-client`·`x-openapi-token`(`Bearer ` 자동)·**`x-llm-model-id: <model>`**, body
+  `{model:"/mnt/models", messages:[{system},{user: prompt}], stream:true, stream_options:{include_usage:true},
+  temperature, tools?, tool_choice?}` — `max_tokens` 미전송(게이트웨이 기본 16384, 추론 토큰 포함))를 보내고
+  SSE를 파싱한다. 모델은 `resolve_model`이 결정(요청 id ∈ 캐시 ? 그대로 : `defaultModelId`/70). 한 턴은
+  **tool-calling 루프**다: 라운드마다 `StreamAccumulator`가 `delta.reasoning`→`thinkingDelta`,
+  `delta.content`→`textDelta`를 즉시 방출하고 `delta.tool_calls`를 index별로 병합 → tool_calls가 있으면
+  `toolUse` 방출 → `fabrix_tools::run_tool`(읽기 전용 `list_dir`/`find_files`/`search_text`/`read_file`,
+  샌드박스 = `cwd` + extraDirs) → `toolResult`(UI엔 2k자 미리보기) → assistant(tool_calls)+`role:"tool"`
+  메시지를 덧붙여 다음 라운드. 상한 12라운드·`[Context]` 기반 도구 출력 예산, 소진 시 `tool_choice:"none"`으로
+  답 강제. `RunArgs.tools=false`(텍스트 전용 격리 턴)나 도구 미지원 모델이면 도구 없이 1라운드. 세션리스
+  (매 턴 transcript 재전송). 파일을 **쓰지는** 못하므로 **문서 단계 산출물은 클라이언트가 `write_file`로 저장**
+  한다(`ChatPanel` end 분기 — D67; 본문 = 마지막 도구 호출 이후 텍스트).
 
 ## 파이프라인 — `run.rs`
 
 `run_agent`는 resolve → 자식 spawn을 **워커 스레드**에서 수행하고 `runId`를 즉시 반환한다.
 느린 I/O는 IPC 스레드를 건드리지 않는다. (**`kind==Remote`면 최상단에서 `def.id`로 분기해
-`fabrix::run_fabrix`/`aipro::run_aipro`로 위임** — 아래 5. 원격 경로 참조, D64/D71.)
+`fabrix::run_fabrix`로 위임** — 아래 5. 원격 경로 참조, D64/D84.)
 
 1. `agents::find(id)` → def + `run` 스펙. `resolve_agent`로 실행 파일 해석(설정 customBin 반영).
 2. `(run.build_args)(ctx)`로 인자 조립. `exec::command_for`로 `.cmd`/`.bat` shim 래핑 +
@@ -94,12 +92,15 @@ Open Design의 `RuntimeAgentDef.buildArgs`/`streamFormat`/`promptViaStdin`에 �
    node 손자를 띄우므로 직접 자식(cmd.exe)만 kill하면 에이전트가 살아남는다 → 자식 pid로
    `taskkill /PID <pid> /T /F`로 트리를 종료(실패 대비 `child.kill()` 병행). reader가 stdout EOF를
    만나 정상 종료 경로로 `end{status:"canceled"}`를 보낸다([05](05-decisions.md) D24). `RunHandle.child`는
-   `Option`이라 **원격(fabrix·aipro) 런은 플래그만 set**하고 taskkill을 건너뛴다(SSE 루프가 플래그를 관측해 연결 종료).
-5. **원격 경로(fabrix D64·aipro D71)**: `run_fabrix`/`run_aipro`가 config 로드 → `RunRegistry`에서 id
-   민팅(`next_id`) + 자식 없는 취소 플래그 등록(`register_remote`) → 워커 스레드에서 POST(fabrix
-   `.../messages` / aipro `.../chat/completions`) → 응답을 `BufReader`로 읽어 `data:` 라인을 lossy
-   디코드(`run::stream_lines`와 동일 방식) → `parse_fabrix_sse_data`/`parse_openai_sse_data`로 `RunEvent`
-   방출(루프 사이 취소 플래그 확인) → 스트림 종료 후 `unregister` + 단일 `end`(실패면 `Error` 선행).
+   `Option`이라 **원격(fabrix) 런은 플래그만 set**하고 taskkill을 건너뛴다(SSE 루프·도구 루프가 플래그를 관측해 종료).
+5. **원격 경로(fabrix — D64/D84)**: `run_fabrix`가 config 로드 + 모델 결정 → `RunRegistry`에서 id
+   민팅(`next_id`) + 자식 없는 취소 플래그 등록(`register_remote`) → 워커 스레드에서 라운드 루프:
+   `POST .../chat/completions`(429 + 짧은 `Retry-After`면 1회 대기, 1라운드 도구 관련 400이면 도구 없이 재시도)
+   → 응답을 `BufReader`로 읽어 `data:` 라인을 lossy 디코드(`run::stream_lines`와 동일 방식) →
+   `StreamAccumulator::feed`로 `RunEvent` 방출 → tool_calls가 있으면 도구 실행 후 다음 라운드
+   (라인·라운드·도구 실행·디렉터리 순회 사이 취소 플래그 확인) → 종료 후 합산 `usage` 1회 + `unregister` +
+   단일 `end`(실패면 `Error` 선행; `finish_reason=length`도 오류). HTTP 클라이언트는 `.no_proxy()` +
+   명시 `timeout(180s)`(reqwest blocking 기본 30초가 헤더 대기·매 read에 걸리던 것을 대체).
 
 > **취소 지연(원격)**: 취소 플래그는 SSE `data:` 라인 사이에서 확인되므로 서버가 조용하면 다음 바이트까지
 > 지연될 수 있다(confluence 취소와 동형). 토큰 스트림은 자주 방출되어 실사용상 문제 없다.
@@ -133,13 +134,11 @@ Open Design `DaemonAgentPayload`의 부분집합. 프론트 미러는 `lib/types
 - **`parse_gemini_event_line`**(`handleGeminiEvent` 포팅, JSONL): `init`→`status{model}`,
   `message`+`role:assistant`+`content`(string 또는 파트 배열 — 배열은 평탄화, D55)→`textDelta`,
   `tool_use`/`tool_result`→도구, `result.stats`→`usage`, `error`→`error`(severity `warning`은 `status`).
-- **`parse_fabrix_sse_data`**(`fabrix.rs`, SSE `data:` 페이로드 — D64): `event_status=="CHUNK" && content`
-  →`textDelta`, 실패 status(FAIL/ERROR)→`error`, `status=="SUCCESS"`/`R20000` 종료 마커→무이벤트(워커가
-  종료 후 단일 `end` 방출). 도구 이벤트는 없음(텍스트 스트림만).
-- **`parse_openai_sse_data`**(`aipro.rs`, SSE `data:` 페이로드 — D71): OpenAI `chat.completion.chunk`의
-  `choices[0].delta.content`→`textDelta`, **`delta.reasoning`/`reasoning_content`→`thinkingDelta`**
-  (glm-5.1 추론 토큰 — D74), `usage`→`usage`, 최상위 `error`→`error`, `[DONE]` 종료 마커→무이벤트(워커가
-  종료 후 단일 `end` 방출). 도구 이벤트는 없음. 모든 요청은 `User-Agent: opencode/<ver>` 부착(필수 — D74).
+- **`StreamAccumulator::feed`**(`fabrix.rs`, SSE `data:` 페이로드 — D84): OpenAI `chat.completion.chunk`의
+  `delta.reasoning`/`reasoning_content`→`thinkingDelta`, `delta.content`→`textDelta`, `delta.tool_calls`는
+  index별 병합(id·name 첫 값, arguments 이어붙임 — 도구 호출 여부는 `finish_reason`이 아니라 누적 결과로 판단),
+  `finish_reason` 기록, 항상 마지막에 오는 `choices: []` 청크의 `usage` 수집, 최상위 `error` 객체→`error`
+  (`error_message`로 정규화), `[DONE]` 종료(워커가 루프 종료 후 단일 `end` 방출).
 
 알 수 없는 타입/비JSON/빈 줄은 무시.
 
@@ -152,9 +151,9 @@ Open Design `DaemonAgentPayload`의 부분집합. 프론트 미러는 `lib/types
   다음 턴 `exec resume <id>`로 이어간다.
 - **gemini — 세션리스**: CLI 세션이 없어 프론트가 지금까지의 대화를 transcript로 만들어
   매 턴 프롬프트에 포함한다. `uuid` 크레이트는 불필요(프론트 `crypto.randomUUID`).
-- **fabrix·aipro — 세션리스**(fabrix D64/aipro D71): API에 세션 개념이 없어 gemini와 동일하게
-  transcript를 매 턴 재전송한다(fabrix `contents:[transcript]`, aipro `messages`의 user content).
-  둘 다 ChatPanel `SESSION_AGENTS`에 미포함 → 자동으로 세션리스 경로.
+- **fabrix — 세션리스**(D64/D84): API에 세션 개념이 없어 gemini와 동일하게 transcript를 매 턴
+  재전송한다(`messages`의 user content). ChatPanel `SESSION_AGENTS`에 미포함 → 자동으로 세션리스 경로.
+  (한 턴 안의 도구 라운드는 백엔드 루프가 messages 배열로 이어 붙인다.)
 
 ## 캔버스 파일 뷰어 — `files.rs`
 
@@ -162,9 +161,9 @@ Open Design `DaemonAgentPayload`의 부분집합. 프론트 미러는 `lib/types
 - `list_dir(path) -> FileEntry[]`(`{name, path, isDir}`; 디렉터리 우선 정렬, `.git`/`node_modules`/
   `target`/`.next` 스킵).
 - `read_file(path) -> String`(2 MiB 상한, UTF-8 lossy).
-- `write_file(path, contents) -> ()`(부모 dir 생성, 5 MiB 상한). 원격 에이전트(Fabrix)는 파일 접근이
-  없어 문서 산출물을 못 쓰므로, 클라이언트가 스트리밍 텍스트를 `<workdir>/<step.file>`로 저장할 때
-  쓴다([05](05-decisions.md) D67).
+- `write_file(path, contents) -> ()`(부모 dir 생성, 5 MiB 상한). 원격 에이전트(FabriX)는 파일을 **읽기만**
+  할 수 있어(도구 루프 — D84) 문서 산출물을 못 쓰므로, 클라이언트가 최종 답변을 `<workdir>/<step.file>`로
+  저장할 때 쓴다([05](05-decisions.md) D67). 노이즈 폴더 스킵 목록은 `SKIP_DIRS`로 FabriX 도구와 공유한다.
 
 프론트 `FileViewer`는 텍스트는 코드로, `.html`은 **샌드박스 iframe**
 (`sandbox="allow-scripts"`, same-origin 없음)로 미리보기(`buildSrcdoc`: 완결 문서는 그대로,
@@ -223,18 +222,18 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 해석한다. 열기/이어가기/저장 모두 무변경(외부-workdir 프로젝트처럼 보임). 마이그레이션 불필요.
 
 **이어가기(로드)**: `load_session`이 준 `messages`/`agentId`/`model`/`cliSessionId`로 `ChatPanel`을
-재수화한다. claude/codex는 `cliSessionId`로 CLI 세션 재개(있으면 `resume=true`), gemini/aipro는
+재수화한다. claude/codex는 `cliSessionId`로 CLI 세션 재개(있으면 `resume=true`), gemini/fabrix는
 로드된 메시지로 transcript를 재구성해 이어간다.
 
 ## IPC 커맨드 (추가분)
 
 | 커맨드 | 입력 | 출력 | 비고 |
 |--------|------|------|------|
-| `run_agent` | `args: RunArgs`, `onEvent: Channel<RunEvent>` | `runId: string` | 워커 스레드에서 스트리밍. `RunArgs {agentId, prompt, cwd, model?, sessionId?, resume?, extraDirs?}`. `kind==Remote`면 `def.id`로 분기해 `fabrix::run_fabrix`/`aipro::run_aipro`로 위임(POST+SSE — D64/D71) |
-| `cancel_run` | `runId: string` | — | 프로세스 트리 종료(`taskkill /T /F` + `child.kill()`) → `end{status:"canceled"}`. 원격(fabrix·aipro)은 자식 없이 취소 플래그만(SSE 루프가 연결 종료 — D64/D71) |
+| `run_agent` | `args: RunArgs`, `onEvent: Channel<RunEvent>` | `runId: string` | 워커 스레드에서 스트리밍. `RunArgs {agentId, prompt, cwd, model?, sessionId?, resume?, extraDirs?, tools?}`. `kind==Remote`면 `def.id`로 분기해 `fabrix::run_fabrix`로 위임(POST+SSE + 읽기 전용 도구 루프, `tools=false`면 도구 없이 — D64/D84) |
+| `cancel_run` | `runId: string` | — | 프로세스 트리 종료(`taskkill /T /F` + `child.kill()`) → `end{status:"canceled"}`. 원격(fabrix)은 자식 없이 취소 플래그만(SSE·도구 루프가 종료 — D64/D84) |
 | `list_dir` | `path: string` | `FileEntry[]` | 캔버스 파일 트리 |
 | `read_file` | `path: string` | `string` | 파일 내용(상한 2 MiB) |
-| `write_file` | `path: string`, `contents: string` | — | 파일 쓰기(부모 dir 생성, 상한 5 MiB). 원격 에이전트(Fabrix) 문서 산출물을 `<workdir>/<step.file>`로 저장 — D67 |
+| `write_file` | `path: string`, `contents: string` | — | 파일 쓰기(부모 dir 생성, 상한 5 MiB). 원격 에이전트(FabriX) 문서 산출물(최종 답변)을 `<workdir>/<step.file>`로 저장 — D67/D84 |
 | `ensure_project` | `projectId: string`, `workdir: string`(빈값 허용), `title: string`, `category: string`, `codebasePath?: string` | `Project` | 프로젝트 폴더+매니페스트 생성(idempotent). workdir 빈값→`workspace/` 하위폴더 resolve해 반환. 홈에서 지정한 폴더면 그 경로 |
 | `set_project_codebase` | `projectId: string`, `codebasePath: string \| null` | `Project` | 기존 매니페스트의 코드베이스 경로 갱신/해제(D45) |
 | `set_project_title` | `projectId: string`, `title: string` | `Project` | 프로젝트 제목 변경(홈 최근 목록 인라인 편집 — D60; 빈 제목 거부, trim + 100자 상한) |
@@ -247,8 +246,7 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 | `list_knowledge` / `save_knowledge` / `delete_knowledge` | — / `entry` / `id` | `KnowledgeEntry[]` / `KnowledgeEntry` / — | 지식 베이스 CRUD(`~/.operation-wizard/knowledge/<id>.json`; knowledge 단계 주입용. 삭제는 artifact 폴더 동반 제거 — D59) |
 | `save_knowledge_files` / `get_knowledge_root` | `entry`, `sources: string[]` / — | `KnowledgeEntry` / `string` | 산출물 지식 저장(D59): 산출물 파일을 `knowledge/artifacts/<id>/`로 staged-swap 복사 + artifact 엔트리 upsert / 지식 루트 절대경로(주입 인덱스·extraDirs용) |
 | `set_confluence_config` / `set_rag_config` | `config \| null` | `Settings` | 지식 뷰의 수집/검색 설정 저장·해제 |
-| `set_fabrix_config` / `probe_fabrix` | `config \| null` / — | `Settings` / `string` | Agents 뷰 Fabrix 카드: 연결 설정 저장·해제(빈 endpointUrl=해제; `models` 캐시 이월/무효화) / 연결 테스트(프록시 우회 조회 → `fabrix.models` 캐시 저장 + "연결됨 (N개 모델)") — D64/D66 |
-| `set_aipro_config` / `probe_aipro` | `config \| null` / — | `Settings` / `string` | Agents 뷰 AI Pro 카드: 연결 설정 저장·해제(빈 endpointUrl=해제) / 연결 테스트 = **최소 비스트림 `POST /chat/completions`**(model=glm-5.1, 프록시 우회, `User-Agent: opencode/*` 필수 — D74) → HTTP 2xx면 "연결됨 — AI Pro 응답 정상". 모델은 정적 카탈로그(`/models` 미조회) — D71/D73/**D74** |
+| `set_fabrix_config` / `probe_fabrix` | `config \| null` / — | `Settings` / `string` | Agents 뷰 FabriX 카드: 연결 설정 저장·해제(빈 endpointUrl=해제; endpoint 정규화·`defaultModelId`; `models` 캐시 이월/무효화) / 연결 테스트(`GET /openapi/llm/v1/models`, 프록시 우회 → `fabrix.models` 캐시 저장 + "연결됨 — N개 모델 (기본: …)", 실패는 한글 힌트) — D64/D66/D84 |
 | `start_confluence_ingest` | `target: ConfluenceTarget`, `onEvent: Channel<IngestEvent>` | `ingestId: string` | Confluence **MCP** BFS 크롤(워커 스레드) → 페이지들을 지식 베이스 artifact 1개로 저장(`IngestEvent` 스트리밍: `started`/`pageFetched`/`pageIngested`/`pageFailed`/`error`/`end`; D82) |
 | `cancel_ingest` / `probe_confluence` | `ingestId` / — | — / `string` | 수집 취소(`IngestRegistry` 플래그) / MCP 연결 테스트(initialize+tools/list → 도구 요약, D82) |
 
@@ -291,7 +289,7 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     thinking→thinking, tool/usage→`events[]` 타임라인, `end`→종료). **중지**=`cancelRun`.
     입력은 `textarea`: **Enter=전송, Shift+Enter/Ctrl+Enter=줄바꿈**, 내용에 따라 자동 확장 후
     상한(≈160px)에서 스크롤(`useAutoGrow`). 세션형(claude/codex)은
-    최신 턴만 + `sessionId`/`resume`으로 이어가고, 세션리스(gemini/aipro)는 transcript를 매 턴
+    최신 턴만 + `sessionId`/`resume`으로 이어가고, 세션리스(gemini/FabriX)는 transcript를 매 턴
     전송한다. 대화 시작 후 에이전트 select는 고정(**새 세션**에서만 변경). **요구사항 폼이 대기 중이면
     (`formPending`) 컴포저(textarea/전송)를 비활성**하고 `send()`도 가드한다 — 숨김 프리필/자동전진
     턴(system)은 예외, 정지 버튼은 차단하지 않음(D41). 헤더에 **홈·기록·새 세션**
@@ -381,7 +379,7 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   차단**되고(프리필/자동전진 턴만 실행), '요구사항' 탭은 이 대기 동안만 표시된다(D41).
 - **①.5 기반 3단계(foundation, D44)** — 워크플로우 맨 앞에 고정(pinned)되는 필수 단계:
   `codebase`(코드베이스 분석 — 매 턴 `extraDirs`로 접근 부여(claude `--add-dir`, gemini
-  `--include-directories` — D52; 원격 fabrix·aipro는 파일 접근이 없어 실독 불가, D67/D71) + 절대경로
+  `--include-directories` — D52; 원격 FabriX는 같은 폴더를 읽기 전용 파일 도구 샌드박스로 받음, D84) + 절대경로
   컨텍스트(`pathContext`)가 "이 폴더에서 탐색 시작"을 지시) →
   `rag`(preflight가 `rag_search`로 사내 문서 발췌를 조회한 뒤 **관련성 판단 턴**(D70)이 이번 작업과의
   관련성을 판정 — 관련 없으면 표시·주입 없이 건너뛰고, 관련 있으면 정리된 캔버스 '검색 결과' 탭 표시 +
@@ -441,15 +439,16 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 - **`end` 분기**:
   - 프리필 턴: `parsePrefill` → `onPrefill`로 폼 채움 → 프리필 메시지쌍 제거. 스텝/스킬/영속화 불변.
   - 생성형(`isGenerative` — search/document/기반 3종): `file`이 있으면 `onOpenFile(join(cwd,file))`로
-    캔버스에 연다(워크플로우 산출물은 '산출물' 탭에서 선택 — D58). **원격 에이전트(Fabrix)는 파일을 쓰지
-    못하므로, 이 지점에서 앱이 마지막 어시스턴트 텍스트를 `extractDocBody`로 정제해 `write_file`로
-    `step.file`에 저장한 뒤 열어야** 존재 프로브가 산출물을 찾는다(CLI는 자기 파일을 이미 씀 — 무변경;
-    `detected[agentId].source==="remote"` 게이트, D67). → 다음 단계가 생성형이면 **자동 진행**
+    캔버스에 연다(워크플로우 산출물은 '산출물' 탭에서 선택 — D58). **원격 에이전트(FabriX)는 파일을 읽기만
+    하므로, 이 지점에서 앱이 현재 턴의 마지막 도구 호출 이후 텍스트(`remoteTailRef` — ```prompt 블록 제거, 비면
+    전체 응답 폴백)를 `extractDocBody`로 정제해 `write_file`로 `step.file`에 저장한 뒤 열어야** 존재 프로브가
+    산출물을 찾는다(빈 본문은 저장 안 함; CLI는 자기 파일을 이미 씀 — 무변경; `detected[agentId].source==="remote"`
+    게이트, D67/D84). → 다음 단계가 생성형이면 **자동 진행**
     (`setAutoTurn` nonce+effect; stale 클로저 회피), 종단 `chat`이면 멈춤. 검색 근거는 스트리밍되는
     `toolUse`/`toolResult`(에이전트 Grep/Read)로 표시된다.
   - `chat`: 종단(전진 없음). 취소/실패 → 워크플로우 중단(일반 대화). 단, **생성형 단계 턴이 일시적
     오류(타임아웃/스트림/네트워크 시그니처)로 실패하면 중단 전에 같은 단계를 자동으로 최대 2회
-    재시도**한다(실패 쌍 제거 + 단계 re-arm + `setAutoTurn` 재발사; aipro 백엔드의 간헐적 45초 first-byte
+    재시도**한다(실패 쌍 제거 + 단계 re-arm + `setAutoTurn` 재발사; 원격 백엔드의 간헐적 first-byte
     타임아웃 흡수 — D68). 치명적 오류(Model not found·TLS·인증/가드레일)와 사용자 취소는 재시도하지 않고
     즉시 중단. 소진 시 halt 노트 + 수동 '다시 시도'(D57).
 - **리프트(WorkspaceView)**: `clarify`(옵션 질문)/`clarifyPrefill`(자동채움 답변)/`prefillNonce`/`canvasTab`/
@@ -468,8 +467,8 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 - **영속화**: 단계·스킬의 **정의**는 `settings.json`(D39), 옵션 카탈로그는 코드 정적. 실행 상태(단계 커서/
   주입 이력/대기 폼)는 **transient**(저장 안 함). 생성된 파일만 실제로 남는다. 저장 세션 재오픈 시 폼·커서
   없이 일반 대화로 이어간다.
-- **에이전트별**: claude/codex는 동일 세션 resume로 스킬·모든 단계 연속(프리필은 격리 세션). gemini/aipro
-  (세션리스)는 transcript 재전송이라 스킬/지시문 lossy·크기 증가. opencode/antigravity(plain)는 도구/파일쓰기
+- **에이전트별**: claude/codex는 동일 세션 resume로 스킬·모든 단계 연속(프리필은 격리 세션). gemini/FabriX
+  (세션리스)는 transcript 재전송이라 스킬/지시문 lossy·크기 증가(FabriX는 코드베이스를 읽기 전용 도구로 조회). opencode/antigravity(plain)는 도구/파일쓰기
   보장이 약해 degrade.
 
 ## 범위 밖 (후속 증분)
@@ -485,8 +484,9 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   (현재 `change`는 DC Manager 신청양식 산출까지 — D62).
 - 대화는 파일(JSON)로 영구화된다(위 "세션/프로젝트 영속화"). SQLite/전문 검색/여러 프로젝트 목록
   화면은 후속 증분.
-- opencode·antigravity의 1급 실행 파서(현재 plain 폴백). codex/gemini는 1급 지원됨. fabrix·aipro는
-  원격 HTTP+SSE(텍스트 스트림만).
-- gemini/aipro의 CLI 세션 재개(세션 미지원 → transcript 재전송으로 대체).
+- opencode·antigravity의 1급 실행 파서(현재 plain 폴백). codex/gemini는 1급 지원됨. FabriX는
+  원격 HTTP+SSE + 읽기 전용 도구 루프(쓰기 도구는 범위 밖 — 산출물은 앱이 저장).
+- gemini의 CLI 세션 재개(세션 미지원 → transcript 재전송으로 대체). FabriX의 OpenAI messages 배열 그대로 전달
+  (현재 transcript를 user 메시지 1개로 전달).
 - codex TLS 인증서 오류(BadSignature)의 앱 내 해결(환경변수/CA 주입) — 환경/OS 레벨 이슈로 제외
   ([05](05-decisions.md) D28).

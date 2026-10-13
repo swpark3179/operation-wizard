@@ -91,7 +91,7 @@ export function generateKnowledgeSummary(args: {
         model: args.model,
         sessionId: null,
         resume: false,
-        extraDirs: [], // the files are under cwd
+        extraDirs: [], // the files are under cwd (FabriX reads them with its tools — D84)
       },
       channel,
     )

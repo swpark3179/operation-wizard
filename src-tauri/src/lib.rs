@@ -1,9 +1,9 @@
 mod agents;
-mod aipro;
 mod confluence;
 mod detect;
 mod exec;
 mod fabrix;
+mod fabrix_tools;
 mod files;
 mod knowledge;
 mod mcp;
@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Serialize;
 
 use detect::DetectedAgent;
-use settings::{AiProConfig, ConfluenceConfig, FabrixConfig, RagConfig, Settings, SkillDef, StepDef};
+use settings::{ConfluenceConfig, FabrixConfig, RagConfig, Settings, SkillDef, StepDef};
 
 // ---------------------------------------------------------------------------
 // Boot diagnostics (D56). In release builds `windows_subsystem = "windows"`
@@ -190,47 +190,22 @@ async fn detect_agent(agent_id: String, force: bool) -> Result<DetectedAgent, St
     let config_dir = ow_home()?;
     let s = settings::load(&config_dir);
     // Remote (HTTP) agents detect via config presence + a (cache-first)
-    // model-list call, not resolve+probe (Fabrix D64, AI Pro D71). `force` forces
-    // a live fetch; otherwise a cached list is returned without a network call
-    // (D66). Two remote agents now, so dispatch on the id.
+    // model-list call, not resolve+probe (FabriX — D64/D84). `force` forces a
+    // live fetch; otherwise a cached list is returned without a network call
+    // (D66). A live list is persisted to the cache inside `detect_fabrix`
+    // (it carries the FabriX `context`/`tools` metadata, D84).
     if def.kind == agents::AgentKind::Remote {
-        let dir = config_dir.clone();
-        let agent = match def.id {
+        return match def.id {
             "fabrix" => {
                 let cfg = s.fabrix.clone();
-                tauri::async_runtime::spawn_blocking(move || fabrix::detect_fabrix(cfg, force))
-                    .await
-                    .map_err(|e| format!("{e:?}"))?
+                tauri::async_runtime::spawn_blocking(move || {
+                    fabrix::detect_fabrix(cfg, force, Some(config_dir.as_path()))
+                })
+                .await
+                .map_err(|e| format!("{e:?}"))
             }
-            "aipro" => {
-                let cfg = s.aipro.clone();
-                tauri::async_runtime::spawn_blocking(move || aipro::detect_aipro(cfg, force))
-                    .await
-                    .map_err(|e| format!("{e:?}"))?
-            }
-            other => return Err(format!("unknown remote agent: {other}")),
+            other => Err(format!("unknown remote agent: {other}")),
         };
-        // Persist a freshly fetched (live) list so it survives restarts and
-        // seeds the cache path next time (best-effort — D66).
-        if agent.models_source == "live" && !agent.models.is_empty() {
-            let mut s2 = settings::load(&dir);
-            match def.id {
-                "fabrix" => {
-                    if let Some(f) = s2.fabrix.as_mut() {
-                        f.models = agent.models.clone();
-                        let _ = settings::save(&dir, &s2);
-                    }
-                }
-                "aipro" => {
-                    if let Some(a) = s2.aipro.as_mut() {
-                        a.models = agent.models.clone();
-                        let _ = settings::save(&dir, &s2);
-                    }
-                }
-                _ => {}
-            }
-        }
-        return Ok(agent);
     }
     let custom = s.agent_custom_bin(&agent_id);
     tauri::async_runtime::spawn_blocking(move || detect::detect_agent_blocking(def, custom))
@@ -345,10 +320,14 @@ fn set_rag_config(config: Option<RagConfig>) -> Result<Settings, String> {
     Ok(s)
 }
 
-/// Set (or clear, with `None`/empty endpoint) the Fabrix connection config
-/// (D64). Trims the endpoint and header values; an empty endpoint clears it.
-/// The model cache (`models`) is backend-owned: preserved across an
-/// unchanged-connection re-save, cleared when endpoint/credentials change (D66).
+/// Set (or clear, with `None`/empty endpoint) the FabriX connection config
+/// (D64/D84). Normalizes the endpoint (a pasted `/openapi/llm` base or full
+/// request URL is cut back to the issued endpoint) and trims the header values
+/// and default model id; an empty endpoint clears it. TLS verification is
+/// always on (the legacy `allowInvalidCerts` is forced off). The model cache
+/// (`models`) is backend-owned: preserved across an unchanged-connection
+/// re-save (e.g. only the default model changed), cleared when the endpoint/
+/// credentials change (D66).
 #[tauri::command]
 fn set_fabrix_config(config: Option<FabrixConfig>) -> Result<Settings, String> {
     let config_dir = ow_home()?;
@@ -356,9 +335,12 @@ fn set_fabrix_config(config: Option<FabrixConfig>) -> Result<Settings, String> {
     let prev = s.fabrix.clone();
     let normalized = config
         .map(|mut c| {
-            c.endpoint_url = c.endpoint_url.trim().trim_end_matches('/').to_string();
+            c.endpoint_url = fabrix::normalize_endpoint(&c.endpoint_url);
             c.client = c.client.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
             c.openapi_token = c.openapi_token.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            c.default_model_id =
+                c.default_model_id.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            c.allow_invalid_certs = false;
             // Carry over the cached model list only when the connection is
             // unchanged; save is followed by detectOne(force=true) which refills.
             c.models = match &prev {
@@ -375,35 +357,6 @@ fn set_fabrix_config(config: Option<FabrixConfig>) -> Result<Settings, String> {
         })
         .filter(|c| !c.endpoint_url.is_empty());
     s.set_fabrix(normalized);
-    settings::save(&config_dir, &s)?;
-    Ok(s)
-}
-
-/// Set (or clear, with `None`/empty endpoint) the AI Pro connection config (D71).
-/// Trims the endpoint and Bearer key; an empty endpoint clears it. The model
-/// cache (`models`) is backend-owned: preserved across an unchanged-connection
-/// re-save, cleared when endpoint/key change (D66).
-#[tauri::command]
-fn set_aipro_config(config: Option<AiProConfig>) -> Result<Settings, String> {
-    let config_dir = ow_home()?;
-    let mut s = settings::load(&config_dir);
-    let prev = s.aipro.clone();
-    let normalized = config
-        .map(|mut c| {
-            c.endpoint_url = c.endpoint_url.trim().trim_end_matches('/').to_string();
-            c.api_key = c.api_key.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-            // Carry over the cached model list only when the connection is
-            // unchanged; save is followed by detectOne(force=true) which refills.
-            c.models = match &prev {
-                Some(p) if p.endpoint_url == c.endpoint_url && p.api_key == c.api_key => {
-                    p.models.clone()
-                }
-                _ => Vec::new(),
-            };
-            c
-        })
-        .filter(|c| !c.endpoint_url.is_empty());
-    s.set_aipro(normalized);
     settings::save(&config_dir, &s)?;
     Ok(s)
 }
@@ -437,7 +390,6 @@ pub fn run() {
             set_confluence_config,
             set_rag_config,
             set_fabrix_config,
-            set_aipro_config,
             run::run_agent,
             run::cancel_run,
             files::list_dir,
@@ -460,8 +412,7 @@ pub fn run() {
             confluence::probe_confluence,
             rag::rag_search,
             rag::probe_rag,
-            fabrix::probe_fabrix,
-            aipro::probe_aipro
+            fabrix::probe_fabrix
         ])
         // `build` + `run` split (instead of `.run(...).expect(...)`): webview /
         // window creation failures — above all a missing or broken WebView2
