@@ -4,6 +4,10 @@
 export interface ModelOption {
   id: string;
   label: string;
+  /** Advertised context window, e.g. "128K" (FabriX only — D84). */
+  context?: string | null;
+  /** Function-calling support (FabriX only; absent = unknown — D84). */
+  tools?: boolean | null;
 }
 
 export type AgentSource = "custom-path" | "path" | "not-found" | "remote";
@@ -96,36 +100,22 @@ export interface RagConfig {
   models?: ModelOption[];
 }
 
-/** Connection config for the Fabrix remote HTTP agent (mirrors settings.rs,
- * D64). The token is stored plain text in settings.json — same caveat as
- * `RagConfig`/`ConfluenceConfig`. */
+/** Connection config for the FabriX remote HTTP agent — FabriX LLM Serving API,
+ * OpenAI-compatible (mirrors settings.rs, D64/D84). The keys are stored plain
+ * text in settings.json — same caveat as `RagConfig`/`ConfluenceConfig`. */
 export interface FabrixConfig {
-  /** Base endpoint, e.g. "https://fabrix.example.com" (paths are appended). */
+  /** Issued endpoint, e.g. "https://nsds-api.fabrix-s.samsungsds.com/sds/trial/api-llm"
+   * (the backend appends `/openapi/llm`; a pasted full base is normalized). */
   endpointUrl: string;
-  /** `x-fabrix-client` request header value. */
+  /** `x-fabrix-client` request header value (JWT). */
   client?: string | null;
-  /** `x-openapi-token` request header value. */
+  /** `x-openapi-token` request header value ("Bearer " is added if missing). */
   openapiToken?: string | null;
-  /** Opt-in for corporate TLS-inspection proxies whose CA is not installed. */
+  /** Legacy TLS escape hatch — always false now (TLS is always verified). */
   allowInvalidCerts: boolean;
-  /** Backend-owned cache of the last fetched model list (read-only mirror —
-   * shown at app start without a network call; save/refresh/연결 테스트 refresh
-   * it, D66). The frontend never sends this field. */
-  models?: ModelOption[];
-}
-
-/** Connection config for the AI Pro remote HTTP agent (mirrors settings.rs,
- * D71). AI Pro is OpenAI-compatible, so it authenticates with a single Bearer
- * key (vs. Fabrix's two headers). The key is stored plain text in settings.json
- * — same caveat as `FabrixConfig`. */
-export interface AiProConfig {
-  /** Base endpoint, e.g. "https://aipro.sdsdev.co.kr/open/api/v1" (the /models
-   * and /chat/completions paths are appended). */
-  endpointUrl: string;
-  /** `Authorization: Bearer <apiKey>` value. */
-  apiKey?: string | null;
-  /** Opt-in for corporate TLS-inspection proxies whose CA is not installed. */
-  allowInvalidCerts: boolean;
+  /** Default `x-llm-model-id` (listed first; used when a turn names no model).
+   * Absent → "70" (Glm 5.2). */
+  defaultModelId?: string | null;
   /** Backend-owned cache of the last fetched model list (read-only mirror —
    * shown at app start without a network call; save/refresh/연결 테스트 refresh
    * it, D66). The frontend never sends this field. */
@@ -143,10 +133,8 @@ export interface Settings {
   confluence?: ConfluenceConfig | null;
   /** RAG service endpoint; absent/null → the rag workflow step skips. */
   rag?: RagConfig | null;
-  /** Fabrix remote HTTP agent connection; absent/null → not configured (D64). */
+  /** FabriX remote HTTP agent connection; absent/null → not configured (D64/D84). */
   fabrix?: FabrixConfig | null;
-  /** AI Pro remote HTTP agent connection; absent/null → not configured (D71). */
-  aipro?: AiProConfig | null;
 }
 
 // ── Agent runs (mirrors src-tauri/src/run.rs) ────────────────────────────────
@@ -175,9 +163,13 @@ export interface RunArgs {
   resume?: boolean;
   /** Extra readable directories beyond `cwd` (codebase path + armed skill
    * resource folders). Sent every turn — claude maps each to `--add-dir`,
-   * gemini/aipro to `--include-directories` (D52); codex is full-access and
-   * plain agents rely on the wire prompt mentions. */
+   * gemini to `--include-directories` (D52); codex reads broadly, plain agents
+   * rely on the wire prompt mentions; FabriX uses `cwd` + these as its
+   * read-only file-tool sandbox roots (D84). */
   extraDirs?: string[];
+  /** Remote agents only (FabriX tool loop, D84): `false` disables the app's
+   * read-only file tools for this turn (text-only side turns). Absent = on. */
+  tools?: boolean;
 }
 
 // ── RAG / Confluence ingestion / knowledge (mirrors rag.rs, confluence.rs,
@@ -267,7 +259,7 @@ export interface SessionMeta {
   agentId: string;
   model: string;
   category: string;
-  /** Agent CLI session id for resume (claude/codex), or null (gemini/aipro). */
+  /** Agent CLI session id for resume (claude/codex), or null (gemini/FabriX). */
   cliSessionId?: string | null;
   createdAt: number;
   updatedAt: number;
@@ -285,8 +277,8 @@ export const DIAGNOSTIC_HINT: Record<string, string> = {
     "Not found on PATH or known toolchain dirs. Set a custom path below.",
   "not-executable": "The resolved file is not executable.",
   "missing-target": "The shim points to a missing target (e.g. a removed runtime).",
-  // Remote (HTTP) agent diagnostics — Fabrix (D64) / AI Pro (D71). Agent-neutral
-  // wording since the map is keyed by diagnostic code, shared across both cards.
+  // Remote (HTTP) agent diagnostics — FabriX (D64/D84). Agent-neutral wording
+  // since the map is keyed by diagnostic code.
   "not-configured":
     "연결 정보가 없습니다. 아래에서 엔드포인트와 인증 정보를 저장하세요.",
   unreachable:

@@ -3,7 +3,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AgentInfo,
-  AiProConfig,
   ConfluenceConfig,
   DetectedAgent,
   FabrixConfig,
@@ -28,7 +27,7 @@ export function listAgents(): Promise<AgentInfo[]> {
 }
 
 /** Detect one agent. `force` forces a live model fetch for the remote agent
- * (Fabrix); without it a cached model list is used, no network call (D66). */
+ * (FabriX); without it a cached model list is used, no network call (D66). */
 export function detectAgent(agentId: string, force = false): Promise<DetectedAgent> {
   return invoke<DetectedAgent>("detect_agent", { agentId, force });
 }
@@ -61,26 +60,16 @@ export function setRagConfig(config: RagConfig | null): Promise<Settings> {
   return invoke<Settings>("set_rag_config", { config });
 }
 
-/** Set (or clear, with null/empty endpoint) the Fabrix connection config (D64). */
+/** Set (or clear, with null/empty endpoint) the FabriX connection config (D64/D84). */
 export function setFabrixConfig(config: FabrixConfig | null): Promise<Settings> {
   return invoke<Settings>("set_fabrix_config", { config });
 }
 
-/** Fabrix connection test: fetches the model list and returns a summary
- * ("연결됨 (N개 모델)"). Rejects with a Korean message if unconfigured/unreachable. */
+/** FabriX connection test: fetches the model list (`/openapi/llm/v1/models`),
+ * caches it and returns a summary ("연결됨 — N개 모델 (기본: …)"). Rejects with a
+ * Korean message (+ hint) if unconfigured/unreachable/unauthorized. */
 export function probeFabrix(): Promise<string> {
   return invoke<string>("probe_fabrix");
-}
-
-/** Set (or clear, with null/empty endpoint) the AI Pro connection config (D71). */
-export function setAiProConfig(config: AiProConfig | null): Promise<Settings> {
-  return invoke<Settings>("set_aipro_config", { config });
-}
-
-/** AI Pro connection test: fetches the OpenAI-compatible model list and returns a
- * summary ("연결됨 (N개 모델)"). Rejects with a Korean message if unconfigured. */
-export function probeAiPro(): Promise<string> {
-  return invoke<string>("probe_aipro");
 }
 
 // ── RAG / Confluence ingestion / knowledge ───────────────────────────────────
@@ -181,8 +170,8 @@ export function readFile(path: string): Promise<string> {
 }
 
 /** Write text to `path`, creating parent dirs (D67). Used to persist a remote
- * agent's (Fabrix) document-step output — it streams text but cannot write
- * files, so the app writes `<workdir>/<step.file>` itself. */
+ * agent's (FabriX) document-step output — it can only *read* files (read-only
+ * tool loop, D84), so the app writes `<workdir>/<step.file>` itself. */
 export function writeFile(path: string, contents: string): Promise<void> {
   return invoke("write_file", { path, contents });
 }

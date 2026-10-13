@@ -37,10 +37,12 @@ export function parsePromptBlock(content: string): string | null {
 }
 
 /** Replace the ```prompt fence(s) with PROMPT_NOTE in the visible chat text,
- * keeping every other code block intact. Mirrors stripClarifyBlock. */
-export function stripPromptBlock(content: string): string {
+ * keeping every other code block intact. Mirrors stripClarifyBlock. Pass
+ * `replacement = ""` to drop the block entirely (a remote agent's document
+ * body must not carry it — D84). */
+export function stripPromptBlock(content: string, replacement: string = PROMPT_NOTE): string {
   return content.replace(/```([^\n`]*)\n?[\s\S]*?```/g, (full, tag: string) => {
     const t = (tag ?? "").trim().toLowerCase();
-    return t === "prompt" ? PROMPT_NOTE : full; // keep unrelated code blocks
+    return t === "prompt" ? replacement : full; // keep unrelated code blocks
   });
 }

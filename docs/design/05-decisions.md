@@ -1022,6 +1022,9 @@
 ---
 
 ### D64. Fabrix = 첫 원격 HTTP API 에이전트 (레지스트리 kind 분기 + fabrix.rs + settings 저장)
+> ⚠️ **D84에서 전면 교체**: 구 FabriX chat API(`/openapi/chat/v1/all-models`·`/messages`, `CHUNK` SSE)를
+> **LLM Serving API**(OpenAI 호환, `/openapi/llm`, `x-llm-model-id` 헤더) + 앱 제공 읽기 전용 파일 도구 루프로
+> 바꿨다. 아래 kind 분기·settings 저장·자식 없는 취소 핸들 구조는 유지된다. (D71의 aipro는 D83에서 제거.)
 > ⚠️ "첫/유일한 원격 에이전트"는 **D71에서 aipro가 두 번째 원격 에이전트로 합류**하며 갱신되었다.
 > 그때 `detect_agent`/`run_agent`의 단일 `kind==Remote→fabrix` 분기가 **`def.id` match**로 일반화됐다.
 > 아래는 최초 결정의 기록이다.
@@ -1114,6 +1117,8 @@
 ---
 
 ### D66. Fabrix/RAG/Confluence 프록시 우회(`.no_proxy()`) + 모델 목록 캐시 우선 영속
+> ⚠️ **D84 갱신**: FabriX 캐시는 `GET /openapi/llm/v1/models` 결과(숫자 modelId + `context`/`tools` 메타)로
+> 바뀌었고, 숫자가 아닌 id(구 API UUID) 캐시는 무효로 보고 재조회한다. 캐시 우선 원칙·`.no_proxy()`는 유지.
 - **배경**: 사내망에서 Fabrix 원격 에이전트와 RAG 서비스(및 Confluence)는 **직접 도달 가능한 사내
   엔드포인트**인데, `reqwest`가 기본적으로 환경변수(`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`)의 프록시를
   자동 상속해 이들 연결이 프록시를 경유하며 실패/오작동할 수 있었다. 또 모델 목록은 매번 라이브로만
@@ -1150,6 +1155,9 @@
 ---
 
 ### D67. Fabrix(원격 에이전트) 산출물 = 앱이 스트리밍 텍스트를 파일로 저장 (files.rs write_file 신설, D21 개정)
+> ⚠️ **D84 갱신**: FabriX는 이제 앱 제공 **읽기 전용** 파일 도구로 코드베이스를 읽는다(아래 "코드베이스 실독 불가"
+> 한계 해소). 쓰기는 여전히 없으므로 앱이 저장하는 이 경로는 유지되며, 저장 본문은 **현재 턴의 마지막 도구 호출 이후
+> 텍스트**(```prompt 블록 제거, 빈 본문은 저장 안 함)로 바뀌었다.
 - **배경**: Fabrix는 **파일시스템 접근도 도구도 없이 텍스트만 SSE로 스트리밍**한다(`kind: Remote`, D64 —
   `run_fabrix`가 `RunEvent::TextDelta`만 방출). 로컬 CLI 에이전트는 워크플로우 `document` 단계에서 자기
   파일 쓰기 도구로 `docs/*.md`를 직접 생성하지만, Fabrix는 아무 파일도 쓰지 못한다. 결과: Fabrix로
@@ -1185,6 +1193,7 @@
 ---
 
 ### D68. 워크플로우 생성형 단계의 일시적 타임아웃 자동 재시도 (aipro 백엔드 간헐 지연 흡수)
+> ⚠️ **D83 참고**: aipro는 제거됐지만 이 재시도는 에이전트 무관한 일반 로직이라 유지된다(FabriX·CLI 공통).
 - **배경**: AI Pro(`aipro`) 실행 시 `Streaming request timeout after ~45s`로 워크플로우가 중단되는 문제를
   조사한 결과, 원인은 **aipro 백엔드(glm-5.1)의 간헐적 first-byte 지연(>45초)** 으로 확정됐다(진단 요지:
   ① 45초는 백엔드가 내려주는 요청 타임아웃 — `getRequestTimeoutMs`의 서버 실험 플래그
@@ -1278,6 +1287,7 @@
 ---
 
 ### D71. AI Pro = 두 번째 원격 에이전트 — 로컬 gemini CLI에서 OpenAI 호환 HTTP로 전환 (D17/D23/D52 갱신)
+> ⛔ **D83에서 AI Pro 에이전트 자체가 제거되었다.** 아래는 역사 기록이다(UA 게이트 교훈은 Confluence MCP — D82 — 에 유지).
 - **배경**: `aipro`(AI Pro, 사내)는 D17에서 **gemini 호환 로컬 CLI**(`aipro` 바이너리 spawn →
   `--output-format stream-json` 파싱)로 등록됐다. 하지만 이 방식은 (a) `aipro` CLI 설치에 의존하고,
   (b) 사내 백엔드의 간헐적 45초 first-byte 타임아웃 증폭(D68), (c) "Model not found"(D23), (d) 세션 시작
@@ -1363,6 +1373,7 @@
 ---
 
 ### D73. AI Pro 연결 테스트/탐지의 `/models` 의존 제거 — 최소 채팅 프로브 + 정적 카탈로그 (D71 개정)
+> ⛔ **D83에서 AI Pro 에이전트 자체가 제거되었다.** 아래는 역사 기록이다(UA 게이트 교훈은 Confluence MCP — D82 — 에 유지).
 > ⚠️ **원인 정정(D74)**: 이 결정은 500의 원인을 "`/models` 엔드포인트가 깨졌다"로 추정했으나, 이후
 > 라이브 진단으로 **진짜 원인은 누락된 `User-Agent`**임이 밝혀졌다(게이트웨이가 opencode UA를 요구하고
 > 백엔드가 `ua.split("/")`). `/models`도 UA만 있으면 동작한다. 단, **아래 설계 결정(연결 테스트=최소 채팅
@@ -1400,6 +1411,7 @@
 ---
 
 ### D74. AI Pro 500의 진짜 원인 = 누락된 `User-Agent` — 요청에 `opencode/<ver>` UA 부착 (D73 정정)
+> ⛔ **D83에서 AI Pro 에이전트 자체가 제거되었다.** 아래는 역사 기록이다(UA 게이트 교훈은 Confluence MCP — D82 — 에 유지).
 - **배경**: D73 이후에도 AI Pro 연결 테스트(이제 `POST /chat/completions`)가 정상 키로 **여전히 HTTP 500**
   `{"detail": "'NoneType' object has no attribute 'split'"}`을 냈다. 앱을 배제하고 라이브 엔드포인트에
   직접 curl로 요청을 변주하며 원인을 이분 탐색했다.
@@ -1716,3 +1728,75 @@
   `body.storage.value|body|content|value|text`, 목록: `results|children|pages|…`) 비-JSON 텍스트는 본문으로
   폴백하지만, 서버가 예상 밖 shape면 연결 테스트의 도구 목록·실제 수집 결과로 확인·조정이 필요하다.
   getChild는 페이지네이션 없이 전체 자식을 반환한다고 가정(REST식 start 무시).
+
+---
+
+### D83. AI Pro 에이전트 제거 (D17/D71/D73/D74 종료)
+- **배경**: 사내 AI Pro(`aipro`)는 D17(gemini 호환 로컬 CLI) → D71(OpenAI 호환 원격 HTTP) → D73/D74(정적 카탈로그·
+  `User-Agent: opencode/*` 필수)로 이어져 왔다. 사용자 요구 — 더 이상 쓰지 않으므로 앱에서 제거하고, 사내 원격 LLM은
+  FabriX(D84)로 일원화한다.
+- **결정**: 백엔드 `aipro.rs` 삭제, `AGENT_DEFS`에서 aipro def 삭제(7 → **6종**), `detect_agent`/`run_agent`의 `"aipro"`
+  분기와 `set_aipro_config`/`probe_aipro` 커맨드 제거, `Settings.aipro`/`AiProConfig` 삭제. 프론트 `AiProCard`·
+  `setAiProConfig`/`probeAiPro`·`AiProConfig` 타입 삭제. 원격 디스패치의 `match def.id`(D71)는 유지(원격 에이전트가
+  늘면 슬롯만 추가).
+- **하위호환**: `Settings`에 `deny_unknown_fields`가 없어 구 settings.json의 `"aipro"` 섹션은 로드 시 무시되고 다음
+  저장에서 사라진다(다른 설정 무손실 — 단위 테스트). 과거 AI Pro로 저장된 세션을 열면 ChatPanel이 레지스트리에 없는
+  agentId를 감지해 **FabriX(가용 시 — 같은 세션리스라 transcript로 이어짐) 또는 기본 에이전트로 전환**하고 모델을
+  리셋한다. 그래도 `unknown agent` 오류가 나면 `errorHint`가 "AI Pro 지원 종료 — 새 세션에서 다른 에이전트" 안내.
+- **유지**: D68(일시적 오류 자동 재시도)은 에이전트 무관 로직이라 유지(주석만 일반화). Confluence MCP 클라이언트의
+  `User-Agent: opencode/0.1.0`(D82 — `sdsdev.co.kr` 게이트웨이용)은 AI Pro와 무관하게 유지.
+- **대안 기각**: def 유지 + UI 숨김(죽은 코드·설정이 남아 혼란) / 구 AI Pro 설정을 FabriX로 자동 이전(엔드포인트·인증
+  체계가 달라 이전 불가).
+
+---
+
+### D84. FabriX = LLM Serving API(OpenAI 호환) 전면 재작성 + 앱 제공 읽기 전용 파일 도구 루프 + 기본 모델 (D64/D66/D67 개정)
+- **배경**: `fabrix.rs`는 구 FabriX chat API(`/openapi/chat/v1/all-models`·`/messages`, `event_status=="CHUNK"` SSE,
+  문자열 UUID modelId)를 썼다. 바탕화면 `FabrixSample`은 신규 **FabriX LLM Serving API**를 실호출로 검증한 레퍼런스
+  (파이썬 클라이언트·OpenAI 정규화·목업 서버·captured fixture)다. 사용자 요구 — FabriX 사용 경로를 이 샘플 기준으로
+  전면 수정, RAG(rag-chat)는 기존과 동일.
+- **결정(API 규약 — 샘플 포팅)**: base `{endpoint}/openapi/llm`(붙여넣은 `/openapi/llm`·`/v1`·`/chat/completions`·
+  `/v1/models`는 관대하게 제거 — 저장 시 `normalize_endpoint`). 모델 `GET {base}/v1/models`(bare 배열, 숫자 `modelId` =
+  id, `name[]` ko→en→첫 항목, `description[]`의 `[Context]`/`[Tools]` → `ModelOption.context`/`tools`). 채팅
+  `POST {base}/chat/completions` + 헤더 `x-fabrix-client`·`x-openapi-token`(**`Bearer ` 자동 부착**)·**`x-llm-model-id`**
+  (모델은 헤더로만 — body `model`은 `"/mnt/models"`), `stream:true`+`include_usage`, `max_tokens` 미전송(게이트웨이
+  기본 16384 — 추론 토큰 포함), `delta.reasoning|reasoning_content` → ThinkingDelta, 항상 오는 `choices: []` usage 청크,
+  `[DONE]`. 오류 본문 3종(WSO2/OIDC/litellm)을 `FabriX HTTP {status} — {msg} [안내: …]` 한 줄로 정규화(모델 헤더 누락 401·
+  없는 모델 404·토큰 9009xx·client OIDC 오류/만료 → 재발급·429·405 경로). 항상 `.no_proxy()`(샘플 §0), TLS 검증 상시
+  (카드의 "인증서 검증 건너뛰기" 제거 — D73/D75와 동일).
+- **결정(숨은 30초 타임아웃 수정)**: reqwest blocking은 `timeout` 미지정 시 기본 30초를 **헤더 대기와 매 read**에
+  적용함을 소스로 확인 — 기존 스트림 경로의 암묵적 30초 상한을 `.timeout(180s)`(샘플과 같은 무응답 상한)로 명시 교체.
+- **결정(도구 루프)**: 채팅 턴은 앱 측 **tool-calling 루프**다. 신규 `fabrix_tools.rs`가 읽기 전용 도구 4종
+  (`list_dir`/`find_files`/`search_text`/`read_file`)을 OpenAI `tools`로 노출하고, 스트림의 `delta.tool_calls`를 index별
+  병합(id·name은 첫 값, arguments만 이어붙임 — 도구 호출 여부는 `finish_reason`이 아니라 누적 tool_calls로 판단, Gotcha #8)
+  해 실행 → `role:"tool"` 결과를 덧붙여 다음 라운드를 보낸다. `RunEvent::ToolUse/ToolResult`로 채팅 타임라인에 표시
+  (UI·세션 저장은 2k자 미리보기, 모델엔 전체). **샌드박스** = `cwd` + `RunArgs.extra_dirs`(코드베이스·스킬 폴더·지식
+  artifacts — 기존 extraDirs 계약 재사용)를 런당 `canonicalize`해 `Path::starts_with`(컴포넌트 비교 — `\\?\`·대소문자·
+  8.3 단축명 안전)로 검사, 심볼릭/junction 순회 제외, `.env*`·앱 `settings.json` 읽기 거부, **쓰기/실행 도구 없음**(산출물
+  저장은 D67대로 앱이). 상한: 12라운드, 도구 출력 예산 = `[Context]` 토큰 × 0.8자(미상 64k), 결과당 15k자, 소진 시
+  `tool_choice:"none"`으로 답 강제; 429 + 짧은 `Retry-After`는 1회 대기 재시도, 1라운드 도구 관련 400이면 도구 없이 재시도,
+  `finish_reason=length`는 오류. 존재하지 않는 도구(지시문을 따라 부른 쓰기 도구 등)·arguments 파싱 실패는 오류 결과로
+  돌려줘 런을 끊지 않는다. 도구 미지원 모델(`tools:false` — 4·7)과 텍스트 전용 격리 턴(`RunArgs.tools=false` — 프리필·
+  카테고리 분류(D81)·RAG 관련성(D70))은 도구 없이 1라운드. 취소는 SSE 라인·라운드·도구 실행·디렉터리 순회 사이에서 확인.
+- **결정(모델)**: `FabrixConfig.default_model_id`(없으면 `"70"` Glm 5.2 — 분석·도구 활용 권장) — 카드에서 선택, 탐지
+  목록 맨 앞(ChatPanel의 `models[0]` 스냅). **모델 결정은 백엔드**(`resolve_model`): 요청 id가 캐시에 있으면 그대로,
+  없으면 기본 모델(홈 컴포저의 `default`·격리 턴의 null·구 세션 id 흡수). 숫자가 아닌 id 캐시(구 API)는 무효로 보고
+  재조회(D66 캐시 우선은 유지). `ModelOption`에 선택 필드 `context`/`tools` 추가(serde default — 구 캐시 호환,
+  CLI 에이전트는 미설정).
+- **결정(프론트)**: ChatPanel D67 경로 보강 — 문서 본문 = **현재 턴의 마지막 도구 호출 이후 텍스트**(`remoteTailRef`)에서
+  ```prompt 블록 제거(첫 작업 턴의 프롬프트 최적화 블록/`PROMPT_NOTE`가 원격 문서 파일 앞에 섞이던 기존 버그 수정 —
+  `stripPromptBlock(content, "")`), 비면 전체 응답 폴백, **빈 파일은 쓰지 않음**. `remoteDocCtx`는 "필요하면 도구로 근거를
+  읽은 뒤 최종 답변엔 문서 본문만". `FabrixCard`: LLM Serving API 안내·기본 모델 select·context/도구 배지(`DetectedAgent.models`
+  기준 — 항상 최신). 표시 이름 `FabriX`(id `fabrix` 유지).
+- **RAG 불변**: rag-chat `/models` 연결 테스트가 쓰던 구 형태 파서(`parse_models_json`/`pick_ko_name`)를 `rag.rs`로 그대로
+  이동 — RAG의 URL·헤더·바디·파서·캐시 무변경.
+- **검증**: 샘플 fixture의 실제 SSE/오류/모델 응답으로 단위 테스트 + `#[ignore]` E2E(`fabrix_e2e_mock`)가 샘플 목업
+  서버(`python -m mock.server --port 8765`)를 상대로 모델 목록·Bearer 자동 부착·도구 루프·no-tools 스트림·404/401 힌트를 확인.
+- **대안 기각**: 채팅만 전환(원격 코드베이스 실독 불가 한계 지속 — 사용자가 도구 루프 선택) / 쓰기 도구 제공(산출물 저장
+  경로 이원화·위험 — D67 유지) / 기본 모델 고정(사용자가 카드 설정 선택) / 별도 `FabrixModel` 캐시 타입(settings 파싱
+  실패 시 전체 초기화 위험(D56)·프론트 캐시 stale — `ModelOption` 선택 필드 확장이 안전) / OpenAI messages 배열 그대로
+  전달(RunArgs가 단일 prompt — transcript 재전송 유지, 후속).
+- **한계/재검토**: 라운드마다 앞선 도구 출력이 재전송되어 토큰 비용이 라운드 수에 따라 커진다(상한으로 제한). 비 UTF-8
+  (EUC-KR) 소스는 lossy 디코딩이라 한글 검색이 누락될 수 있고, `search_text`는 정규식이 아니다. trial `x-fabrix-client` 키는
+  만료일이 있다(OIDC 401 힌트로 재발급 안내). reqwest는 UA를 보내지 않는다 — 게이트웨이가 UA를 요구하면(D74 부류 406/500)
+  UA 상수를 추가한다.

@@ -114,6 +114,7 @@ export function classifyCategory(args: {
         sessionId: null,
         resume: false,
         extraDirs: [], // classification is text-only; no folder access needed
+        tools: false, // …and no FabriX tool rounds delaying the workspace start (D84)
       },
       channel,
     )

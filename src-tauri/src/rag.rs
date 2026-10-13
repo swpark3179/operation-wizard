@@ -142,9 +142,57 @@ impl RagClient {
         if !status.is_success() {
             return Err(format!("모델 목록 조회 실패: HTTP {status} — {}", text.trim()));
         }
-        // Response shape matches Fabrix's `/all-models` — reuse its parser.
-        crate::fabrix::parse_models_json(&text)
+        parse_models_json(&text)
     }
+}
+
+/// Find the Korean (`ko`) `content` in a `[{languageCode, content}]` array, and
+/// fall back to the first non-empty content. `None` if the field is missing or
+/// has no usable content (the caller then uses the modelId as the label).
+fn pick_ko_name(name: Option<&Value>) -> Option<String> {
+    let arr = name?.as_array()?;
+    // Prefer the Korean entry.
+    for entry in arr {
+        if entry.get("languageCode").and_then(|x| x.as_str()) == Some("ko") {
+            if let Some(c) = entry.get("content").and_then(|x| x.as_str()) {
+                if !c.trim().is_empty() {
+                    return Some(c.to_string());
+                }
+            }
+        }
+    }
+    // Fallback: the first non-empty content in any language.
+    for entry in arr {
+        if let Some(c) = entry.get("content").and_then(|x| x.as_str()) {
+            if !c.trim().is_empty() {
+                return Some(c.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Parse the rag-chat `/models` response: a top-level JSON array whose items
+/// carry a string `modelId` (→ `ModelOption.id`) and a `name` array from which
+/// the Korean display name is taken (→ `ModelOption.label`). Kept here (moved
+/// verbatim from the pre-D84 `fabrix.rs`, whose old chat API shared this shape)
+/// so the RAG connection test is unaffected by the FabriX LLM Serving API
+/// rewrite (D84).
+fn parse_models_json(body: &str) -> Result<Vec<ModelOption>, String> {
+    let v: Value = serde_json::from_str(body).map_err(|e| format!("모델 목록 JSON 파싱 실패: {e}"))?;
+    let arr = v
+        .as_array()
+        .ok_or("모델 목록 형식 오류: 최상위가 JSON 배열이 아닙니다")?;
+    let mut out = Vec::new();
+    for item in arr {
+        let model_id = match item.get("modelId").and_then(|x| x.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => continue,
+        };
+        let label = pick_ko_name(item.get("name")).unwrap_or_else(|| model_id.clone());
+        out.push(ModelOption::new(model_id, label));
+    }
+    Ok(out)
 }
 
 /// Attach the Fabrix auth headers (values from `RagConfig`; sent only when set).
@@ -418,6 +466,50 @@ mod tests {
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].title.as_deref(), Some("RAG 요약 답변"));
         assert_eq!(hits[2].title.as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn parses_models_with_korean_names() {
+        let body = r#"[
+            { "modelId": "m-1", "name": [
+                { "languageCode": "en", "content": "Model One" },
+                { "languageCode": "ko", "content": "모델 하나" }
+            ], "description": [], "types": ["chat"] },
+            { "modelId": "m-2", "name": [
+                { "languageCode": "ko", "content": "모델 둘" }
+            ] }
+        ]"#;
+        let models = parse_models_json(body).unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "m-1");
+        assert_eq!(models[0].label, "모델 하나");
+        assert_eq!(models[1].id, "m-2");
+        assert_eq!(models[1].label, "모델 둘");
+    }
+
+    #[test]
+    fn models_fall_back_when_no_korean_name() {
+        // No ko → first non-empty content.
+        let body = r#"[{ "modelId": "m-3", "name": [{ "languageCode": "en", "content": "Only English" }] }]"#;
+        let models = parse_models_json(body).unwrap();
+        assert_eq!(models[0].label, "Only English");
+
+        // No usable name at all → the modelId is the label.
+        let body2 = r#"[{ "modelId": "m-4", "name": [] }, { "modelId": "m-5" }]"#;
+        let models2 = parse_models_json(body2).unwrap();
+        assert_eq!(models2[0].label, "m-4");
+        assert_eq!(models2[1].label, "m-5");
+    }
+
+    #[test]
+    fn models_skip_items_without_model_id_and_reject_non_array() {
+        let body = r#"[{ "name": [{ "languageCode": "ko", "content": "no id" }] }, { "modelId": "ok" }]"#;
+        let models = parse_models_json(body).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "ok");
+
+        assert!(parse_models_json("not json").is_err());
+        assert!(parse_models_json(r#"{"models":[]}"#).is_err(), "top-level must be an array");
     }
 
     #[test]

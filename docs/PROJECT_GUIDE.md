@@ -26,7 +26,8 @@
 **Operation Wizard**는 Windows 데스크톱 앱(Tauri v2 + React/TS + Tailwind v4)으로,
 로컬에 설치된 **CLI 코딩 에이전트를 탐지·관리**하고, **대화 패널 + 캔버스 패널 워크스페이스에서 실제로
 실행**해 개발/운영 업무를 진행한다. 지원 에이전트는 6종 — **OpenCode, Claude Code, Codex, Gemini CLI,
-Antigravity, AI Pro(사내 Gemini 호환 도구)**.
+Antigravity**(로컬 CLI) + **FabriX**(원격 FabriX LLM Serving API, OpenAI 호환 — 읽기 전용 파일 도구 루프).
+(사내 AI Pro는 D83에서 제거.)
 
 - 제품명 `Operation Wizard` · 식별자 `com.shi.operationwizard` · 제작 Samsung SDS · 버전 `0.1.0`
 - 대상: Windows 11 (WebView2 내장 가정)
@@ -101,7 +102,7 @@ Antigravity, AI Pro(사내 Gemini 호환 도구)**.
 └──────────────────────────┬──────────────────────────────────┘
                            │  프로세스 실행 (cmd.exe /d /s /c …)
                            ▼
-       로컬 CLI 에이전트들 (opencode / claude / codex / gemini / agy / aipro)
+       로컬 CLI 에이전트들 (opencode / claude / codex / gemini / agy) + 원격 FabriX(HTTPS)
 ```
 
 프론트의 **타입(`src/lib/types.ts`)은 백엔드 serde 구조체의 수동 미러**다. 백엔드 직렬화는 `camelCase`이며,
@@ -158,7 +159,8 @@ resolve(경로 찾기) → version probe(--version) → models probe(있으면) 
   조합해 스캔. (GUI 앱은 축소된 PATH로 뜨는 경우가 많아 명시적 보강이 필요하다.)
 - **version probe**: `--version` 실행. spawn 성공 = "있음(available)". `.cmd`/`.bat`는 `cmd.exe /d /s /c`로 감싼다.
 - **models probe**: opencode(`models`, 줄 단위)·codex(`debug models`, JSON)만 라이브 목록. 나머지(claude/gemini/
-  antigravity/aipro)는 **정적 fallback 카탈로그**(`live`/`fallback` 배지로 출처 표시).
+  antigravity)는 **정적 fallback 카탈로그**(`live`/`fallback` 배지로 출처 표시). FabriX는 `GET /openapi/llm/v1/models`
+  라이브 목록 + 캐시(기본 모델이 맨 앞).
 
 결과 `DetectedAgent`: `available` / `path` / `version` / `source`(custom-path·path·not-found) / `models` /
 `modelsSource` / `diagnostic`(not-on-path·not-executable·missing-target).
@@ -177,7 +179,8 @@ resolve(경로 찾기) → version probe(--version) → models probe(있으면) 
 |----------|------|-----------|
 | claude | 1급 (`stream-json`) | **mint**: 프론트가 UUID를 만들어 첫 턴 `--session-id`, 이후 `--resume` |
 | codex | 1급 (`exec --json`) | **capture**: 스트림의 `thread_id`를 잡아 `exec resume` |
-| gemini / aipro | 1급 (`stream-json`) | **세션리스**: CLI 세션 없음 → 매 턴 transcript 재전송 |
+| gemini | 1급 (`stream-json`) | **세션리스**: CLI 세션 없음 → 매 턴 transcript 재전송 |
+| fabrix | 원격 HTTP (OpenAI 호환 SSE + 읽기 전용 도구 루프) | **세션리스**: 매 턴 transcript 재전송 |
 | opencode / antigravity | plain 폴백 (`-p`) | best-effort, 원시 stdout |
 
 **정지(취소)**는 Windows에서 프로세스 트리를 종료한다(`.cmd → cmd.exe → node` 손자 구조라 직접 kill만으론
@@ -330,7 +333,7 @@ open-design의 세 기법(①시작 시 구조화된 선택지 + 자동채움, �
 
 - **가이드 상태는 transient**: 옵션 카탈로그·단계 커서·스킬 arm·대기 폼은 저장하지 않는다. 저장 세션을 다시
   열면 일반 대화로 이어간다. 생성된 파일(`docs/plan.md` 등)만 실제로 남는다.
-- **에이전트별 degrade**: claude/codex(세션형)는 스킬·단계가 세션에 유지돼 가장 풍부. gemini/aipro(세션리스)는
+- **에이전트별 degrade**: claude/codex(세션형)는 스킬·단계가 세션에 유지돼 가장 풍부. gemini/FabriX(세션리스)는
   매 턴 transcript 재전송이라 스킬/지시가 첫 턴 이후 lossy(크기 증가). opencode/antigravity(plain)는 도구
   스트림/파일 쓰기 보장이 약해 `plan`의 조사/문서 단계가 degrade.
 - **codex 사내 TLS 오류**(`invalid peer certificate: BadSignature`): codex CLI 자체의 rustls 검증 실패
@@ -346,7 +349,7 @@ open-design의 세 기법(①시작 시 구조화된 선택지 + 자동채움, �
 
 | 용어 | 의미 |
 |------|------|
-| Agent | 로컬 CLI 코딩 에이전트 (opencode/claude/codex/gemini/antigravity/aipro) |
+| Agent | 코딩 에이전트 — 로컬 CLI(opencode/claude/codex/gemini/antigravity) + 원격 FabriX |
 | Def / 레지스트리 | 에이전트별 정의(`AgentDef`)와 그 정적 배열(`AGENT_DEFS`) |
 | Resolve / Probe | 실행 파일 경로 찾기 / 짧게 실행해 버전·모델 캡처 |
 | Source | 실행 파일 출처: `custom-path` / `path` / `not-found` |

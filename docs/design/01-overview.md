@@ -24,25 +24,24 @@
 
 - **핵심 기능: 코딩 에이전트 탐지·관리(다중).**
   - 대상 에이전트: **OpenCode, Claude Code, Codex, Gemini CLI, Antigravity**(로컬 CLI 5종) +
-    **Fabrix**(D64)·**AI Pro**(D71) (원격 HTTP API 2종). 총 7종.
-    AI Pro는 사내 도구로 **OpenAI 호환 HTTP API**다(과거엔 gemini 호환 로컬 CLI였으나 D71에서 원격으로 전환).
-  - **로컬 CLI**: 실행 파일 해석(resolve) → `--version` 프로브 → 모델 목록화. **Fabrix**: 설정
-    (endpoint+토큰) 유무 + HTTP 도달성으로 탐지, 모델 목록은 `all-models` API를 호출해 한글 모델명으로 매핑.
-    **AI Pro**: 설정(endpoint+API 키) 유무로 탐지(네트워크 없음), 모델 목록은 **정적 카탈로그**
-    (glm-5.1/gpt-oss-120b/qwen3.6-27b) — 모델을 이미 알고 있어 `/models` 미조회(D73). 도달성은
-    **연결 테스트**(최소 `POST /chat/completions`)로 검증. 모든 AI Pro 요청은 `User-Agent: opencode/<ver>`가
-    **필수**다(사내 게이트웨이 allowlist + 백엔드가 UA를 split — 누락 시 HTTP 500/406, D74).
-  - 결과를 에이전트별 카드 UI로 표시(로컬=상태/경로/버전/모델; Fabrix=상태/모델 + endpoint·client·token
-    입력 폼; AI Pro=상태/모델 + endpoint·API 키 입력 폼 + 연결 테스트). 로컬은 사용자 지정 경로,
-    Fabrix·AI Pro는 연결 정보를 영구 저장(settings.json).
+    **FabriX**(원격 HTTP API — D64/D84). 총 6종. (사내 AI Pro는 D83에서 제거됨.)
+  - **로컬 CLI**: 실행 파일 해석(resolve) → `--version` 프로브 → 모델 목록화. **FabriX**: **FabriX LLM Serving
+    API**(OpenAI 호환 — 바탕화면 `FabrixSample` 레퍼런스 기반, D84). 설정(endpoint + `x-fabrix-client`·
+    `x-openapi-token`) 유무 + `GET {endpoint}/openapi/llm/v1/models` 도달성으로 탐지하고, 모델 목록은 숫자
+    modelId + 한글 이름 + context/도구 지원 메타로 매핑·캐시(D66). 모델은 요청마다 **`x-llm-model-id` 헤더**로
+    고르며, 카드에서 정한 **기본 모델**(기본 70 = Glm 5.2)이 목록 맨 앞에 온다.
+  - 결과를 에이전트별 카드 UI로 표시(로컬=상태/경로/버전/모델; FabriX=상태/모델(context·도구 배지) + endpoint·
+    client·token·기본 모델 입력 폼 + 연결 테스트). 로컬은 사용자 지정 경로, FabriX는 연결 정보를 영구 저장
+    (settings.json).
 - 탐지 로직은 **"런타임 정의(def) + 공통 probe"** 구조다(`AgentDef.kind: Local | Remote`). 새 로컬 에이전트 =
   레지스트리에 정의 1개 추가; 원격 에이전트 = def(`kind: Remote`) + 탐지·실행 분기(자세히는
   [03-agent-detection.md](03-agent-detection.md)).
 - **에이전트 실행(run) 워크스페이스 (증분 1):** HOME 런처(프롬프트 + 업무 카테고리) →
   좌 대화 패널 + 우 캔버스 패널. 대화는 실제 에이전트를 실행해 응답을 스트리밍한다
   (**Claude Code·Codex·Gemini** 1급 구조화 스트림, opencode/antigravity는 plain 폴백,
-  **Fabrix·AI Pro는 HTTP POST + SSE 스트림** — Fabrix D64/AI Pro D71. 두 원격 에이전트는 파일을 못 쓰므로
-  문서 단계 산출물은 앱이 스트리밍 텍스트를 워크스페이스 파일로 저장해 다른 에이전트처럼 산출물 탭에 표시한다 — D67).
+  **FabriX는 OpenAI 호환 HTTP POST + SSE 스트림에 앱 제공 읽기 전용 파일 도구(tool calling) 루프** — D84.
+  FabriX는 작업 폴더·코드베이스를 도구로 읽을 수 있지만 쓰지는 못하므로, 문서 단계 산출물은 앱이 최종 답변을
+  워크스페이스 파일로 저장해 다른 에이전트처럼 산출물 탭에 표시한다 — D67).
   정지(프로세스 트리 종료)와 세션 이어가기를 지원한다. 캔버스는 작업 폴더 파일 뷰어
   (트리 + 코드/HTML 미리보기). 실행 엔진은 Open Design 데몬의 run/stream을 Tauri `Channel`로
   포팅한 것(자세히는 [07-workspace-and-runs.md](07-workspace-and-runs.md)).
@@ -72,8 +71,8 @@
   자동 진행하고 산출물은 캔버스 **마크다운+mermaid 미리보기**로 표시된다(D39~D42).
 - **기반 3단계 + 지식 인프라(증분 7):** 워크플로우 앞에 **반드시 거치는 기반 3단계**를 도입했다 —
   ① **코드베이스 분석**(첫 질문에서 코드베이스 폴더 필수 선택; workdir와 별개, claude `--add-dir` +
-  gemini `--include-directories`로 접근 부여(D52), 사용자 탐색 스킬 연결 가능. 원격 에이전트(Fabrix·AI Pro)는
-  파일 접근이 없어 코드베이스 실독 불가 — D67 한계) → ② **사내 문서 RAG 검색**(실행 시점에는
+  gemini `--include-directories`로 접근 부여(D52), 사용자 탐색 스킬 연결 가능. 원격 FabriX는 같은 폴더들을
+  앱의 읽기 전용 파일 도구 샌드박스로 받아 코드베이스를 직접 읽는다 — D84) → ② **사내 문서 RAG 검색**(실행 시점에는
   `rag_search`가 **Fabrix rag-chat API**를 호출해(D65) 요약 답변+출처 청크를 캔버스 '검색 결과' 탭(HTML)으로
   보여주고 에이전트에 주입; 지식 화면에서 **공식 Confluence MCP 서버**(url+x-auth)에 연결해 페이지 트리를
   수집하면 로컬 지식 베이스 artifact로 저장돼 knowledge 단계가 참고한다 — D82) → ③ **지식 베이스
@@ -98,7 +97,7 @@
   산출은 `guide`(D63)에 한해 카테고리 워크플로우로 구현됨. guide에 따른 실제 운영 작업 자동화는 후속.)
 - 대화는 파일(JSON)로 영속화된다([07](07-workspace-and-runs.md)). SQLite/전문 검색/여러 프로젝트
   목록 화면은 후속 증분. opencode/antigravity의 1급 실행 파서(현재 plain; claude·codex·gemini은
-  1급 지원, Fabrix·AI Pro는 원격 HTTP+SSE).
+  1급 지원, FabriX는 원격 HTTP+SSE + 읽기 전용 도구 루프).
 - RAG 검색(`search`)은 **Fabrix rag-chat API 실연동됨**(D65). **Confluence 수집은 공식 MCP 서버로 전환됨**
   (D82) — 페이지 트리를 가져와 로컬 지식 베이스 artifact로 저장하고 knowledge 단계가 참고한다(구 REST 크롤·
   WebView 스파이크·RAG `ingest_page` sink는 폐기; `ingest_page`는 호출부 없는 스텁으로만 남음).

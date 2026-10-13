@@ -17,7 +17,7 @@ pub enum StreamFormat {
     ClaudeStreamJson,
     /// Codex `exec --json` event stream (JSONL). Parsed by `run::parse_codex_event_line`.
     CodexJson,
-    /// Gemini/aipro `--output-format stream-json` event stream (JSONL).
+    /// Gemini `--output-format stream-json` event stream (JSONL).
     /// Parsed by `run::parse_gemini_event_line`.
     GeminiJson,
     /// Unstructured stdout, forwarded line-by-line as raw text.
@@ -29,7 +29,7 @@ pub enum StreamFormat {
 pub enum PromptFormat {
     /// One Claude `stream-json` user message line (`{"type":"user",...}`).
     ClaudeJson,
-    /// The raw prompt text (codex/gemini/aipro read stdin as plain text).
+    /// The raw prompt text (codex/gemini read stdin as plain text).
     Text,
 }
 
@@ -50,9 +50,11 @@ pub struct RunCtx<'a> {
     pub prompt: &'a str,
     /// Extra directories the agent should be able to read beyond `cwd` (the
     /// project's codebase path + armed skill resource folders). claude maps
-    /// each to `--add-dir`, gemini/aipro to `--include-directories` (D52);
-    /// codex already runs full-access, plain agents degrade to the prompt-only
-    /// mention the frontend always adds — D45.
+    /// each to `--add-dir`, gemini to `--include-directories` (D52); codex's
+    /// workspace-write sandbox reads broadly without a grant flag (D80); plain
+    /// agents degrade to the prompt-only mention the frontend always adds —
+    /// D45. (The remote FabriX agent uses them as its file-tool sandbox roots
+    /// instead — D84; it never builds CLI args.)
     pub extra_dirs: &'a [String],
 }
 
@@ -85,7 +87,7 @@ impl RunSpec {
     }
 }
 
-/// Env shared by gemini and the gemini-compatible aipro (`defs/gemini.ts`).
+/// Gemini run env (`defs/gemini.ts`).
 const GEMINI_ENV: &[(&str, &str)] = &[("GEMINI_CLI_TRUST_WORKSPACE", "true")];
 
 /// Claude run env (D53): lift the Bash tool's default/max command timeouts so a
@@ -108,7 +110,7 @@ fn push_model(a: &mut Vec<String>, model: Option<&str>) {
 }
 
 /// Append `--include-directories <dir>` per extra dir (gemini CLI's official
-/// multi-directory workspace flag; aipro is gemini-compatible). This is the
+/// multi-directory workspace flag). This is the
 /// gemini counterpart of claude's `--add-dir` (D52): without it the CLI's
 /// workspace trust is limited to the cwd and the selected codebase folder is
 /// unreadable, so the codebase-analysis step used to fall back to analyzing the
@@ -227,7 +229,7 @@ pub struct ModelsProbe {
 
 /// Transport of an agent (D64). `Local` agents are CLI binaries resolved on the
 /// filesystem and run as child processes (all fields below apply). `Remote`
-/// agents are HTTP APIs (Fabrix): detection and run bypass resolve/spawn and go
+/// agents are HTTP APIs (FabriX): detection and run bypass resolve/spawn and go
 /// through `fabrix.rs`, so `bin_candidates`/`models_probe`/`run` are left empty.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentKind {
@@ -265,7 +267,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The agents this app knows how to detect, in display order. Values are ported
 /// 1:1 from Open Design's `apps/daemon/src/runtimes/defs/*.ts`.
-pub static AGENT_DEFS: [AgentDef; 7] = [
+pub static AGENT_DEFS: [AgentDef; 6] = [
     AgentDef {
         id: "opencode",
         name: "OpenCode",
@@ -397,38 +399,15 @@ pub static AGENT_DEFS: [AgentDef; 7] = [
         run: Some(RunSpec::plain()),
     },
     AgentDef {
-        // In-house AI Pro — a remote OpenAI-compatible HTTP service (D71). It was
-        // once wired as a local gemini-compatible CLI (`aipro` binary), but the
-        // backend is actually an OpenAI-compatible API (chat
-        // `POST {endpoint}/chat/completions` + SSE, models `GET {endpoint}/models`),
-        // so detection and run go through `aipro.rs` — like Fabrix (D64), the
-        // CLI-oriented fields are empty and `run` is `None`. Connection config
-        // (endpoint + Bearer key) lives in `settings.aipro`, not a `*_BIN` path.
-        // Unlike Fabrix it keeps a `fallback_models` catalog: `detect_aipro` uses
-        // it when `/models` is unreachable and no cache exists (no synthetic
-        // `default` is added — the chat API needs a real model id).
-        id: "aipro",
-        name: "AI Pro",
-        kind: AgentKind::Remote,
-        bin_candidates: &[],
-        env_var: None,
-        extra_search_subdirs: &[],
-        version_timeout: VERSION_TIMEOUT,
-        models_probe: None,
-        fallback_models: &[
-            ("glm-5.1", "GLM-5.1"),
-            ("qwen3.6-27b", "Qwen3.6-27b"),
-            ("gpt-oss-120b", "Gpt-Oss-120b"),
-        ],
-        run: None,
-    },
-    AgentDef {
-        // Remote HTTP API agent (D64) — the first non-CLI agent. Detection and
-        // run go through `fabrix.rs` (GET model list, POST + SSE chat), so the
-        // CLI-oriented fields are empty and `run` is `None`. Connection config
-        // (endpoint + headers) lives in `settings.fabrix`, not a `*_BIN` path.
+        // Remote HTTP API agent — FabriX LLM Serving API (OpenAI-compatible,
+        // D64 → D84). Detection and run go through `fabrix.rs` (GET
+        // `/openapi/llm/v1/models`, POST `/openapi/llm/chat/completions` + SSE
+        // with an app-side read-only file-tool loop), so the CLI-oriented fields
+        // are empty and `run` is `None`. Connection config (endpoint + headers +
+        // default model) lives in `settings.fabrix`, not a `*_BIN` path. No
+        // static catalog: models are fetched live and cached (D66).
         id: "fabrix",
-        name: "Fabrix",
+        name: "FabriX",
         kind: AgentKind::Remote,
         bin_candidates: &[],
         env_var: None,
@@ -494,8 +473,6 @@ mod tests {
 
     #[test]
     fn gemini_include_directories_for_extra_dirs() {
-        // (aipro was gemini-compatible here until D71 moved it to a remote HTTP
-        // agent — the `--include-directories` mapping now applies to gemini only.)
         // No extra dirs → no flag at all.
         assert!(!gemini_build_args(&ctx(&[])).iter().any(|s| s == "--include-directories"));
 

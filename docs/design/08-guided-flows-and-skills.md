@@ -121,11 +121,11 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
 - **기본값(샘플) 변경**: `src/lib/skills.ts`의 `DEFAULT_SKILLS`를 수정(빌드 필요). 단, 사용자가 이미
   레지스트리를 저장했다면 그 사용자에게는 반영되지 않는다(전체 교체형 — D39).
 - 스킬은 단계의 `skillIds`로 연결되고, **그 단계가 armed된 턴**에 주입된다(D40). 세션형(claude/codex)은
-  같은 스킬을 대화당 1회만(이미 세션에 있음), 세션리스(gemini/aipro)는 transcript로 재노출.
+  같은 스킬을 대화당 1회만(이미 세션에 있음), 세션리스(gemini/FabriX)는 transcript로 재노출.
 - **스킬 리소스 폴더(D45)**: 스킬 카드의 "리소스 폴더"로 참고 파일/스크립트 폴더(`SkillDef.dir`)를
   지정하면(claude skill 스타일), 주입 턴에 본문 뒤 "[스킬 리소스 폴더] <dir> …" 안내가 붙고 그 폴더가
-  `RunArgs.extraDirs`(claude `--add-dir`, gemini `--include-directories` — D52; 원격 fabrix·aipro는
-  파일 접근이 없어 무시 — D71)로 매 턴 접근 허용된다. 폴더 존재 검사는 없다(없으면 에이전트가 읽기 실패로
+  `RunArgs.extraDirs`(claude `--add-dir`, gemini `--include-directories` — D52; 원격 FabriX는 읽기 전용
+  파일 도구의 샌드박스 루트로 사용 — D84)로 매 턴 접근 허용된다. 폴더 존재 검사는 없다(없으면 에이전트가 읽기 실패로
   표면화 — graceful degrade).
 
 ### C. 초반 대화 단계를 강제하거나 새 단계를 추가
@@ -207,7 +207,8 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
   preflight 컨텍스트(기반 단계) → prompt]`. 프리필은 `prefillInstruction`. 단계/스킬은
   `runtimeWorkflowFor(category, settings)`/`resolveSkills(settings)`로 해석해 **마운트 시 고정**.
   매 턴 `RunArgs.extraDirs = [codebasePath, ...주입된 스킬 dir들, ...지식 artifacts 루트(D59)]`
-  (claude `--add-dir`, gemini `--include-directories`; 원격 fabrix·aipro는 무시 — D71). `send()`는
+  (claude `--add-dir`, gemini `--include-directories`; 원격 FabriX는 `cwd`와 함께 읽기 전용 도구 샌드박스 —
+  D84). 텍스트 전용 격리 턴(프리필·카테고리 분류·RAG 관련성)은 `RunArgs.tools=false`로 FabriX 도구를 끈다. `send()`는
   처리 여부를 boolean으로 반환하고 폼 제출/자동전진 nonce는 성공 시에만 소비된다(D55).
 - **preflight**: `stepPreflight(step, cwd)` — wire 조립 전 비동기 훅. `rag`=`rag_search` 후
   **관련성 판단 턴**(D70, `judgeRagRelevance` — 격리 실행): 검색 결과가 이번 작업과 관련 없다고 판단되면
@@ -236,9 +237,11 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
 - **gemini(세션리스)**: 매 턴 transcript 재전송이라 과거 주입이 원문 그대로는 아니고 요약된 형태로만
   남는다(lossy). 단계별 주입이 반복되며 크기 증가. 코드베이스/스킬 폴더 접근은 `--include-directories`로
   부여된다(D52).
-- **fabrix/aipro(원격 HTTP, 세션리스 — D64/D71)**: gemini처럼 매 턴 transcript 재전송(lossy)이나,
-  **파일시스템·도구 접근이 없어** 코드베이스 실독·스킬 리소스 폴더 읽기가 불가하다(extraDirs 무시). 문서
-  단계 산출물은 앱이 스트리밍 텍스트를 `write_file`로 저장한다(D67). 텍스트 스트림만(도구 이벤트 없음).
+- **FabriX(원격 HTTP, 세션리스 — D64/D84)**: gemini처럼 매 턴 transcript 재전송(lossy). 파일시스템은 없지만
+  앱이 제공하는 **읽기 전용 파일 도구**(`list_dir`/`find_files`/`search_text`/`read_file` — 샌드박스 = 작업 폴더 +
+  extraDirs)로 코드베이스·스킬 리소스 폴더·지식 산출물을 직접 읽는다(도구 행이 채팅 타임라인에 표시). 쓰기는 못 하므로
+  문서 단계 산출물은 앱이 최종 답변(마지막 도구 호출 이후 텍스트)을 `write_file`로 저장한다(D67). 도구 미지원 모델
+  (예: 4·7)을 고르면 텍스트 스트림만.
 - **opencode/antigravity(plain)**: 도구 스트림/파일쓰기 보장이 약해 `search`/`document` 단계가 degrade.
 
 ## 안전장치 (무한 진행/깨짐 방지)

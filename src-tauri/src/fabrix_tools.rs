@@ -1,0 +1,750 @@
+//! Read-only file tools for the FabriX tool-calling loop (D84).
+//!
+//! FabriX is an HTTP API with no filesystem of its own. The app exposes four
+//! read-only tools over the OpenAI `tools` protocol so the model can actually
+//! read the codebase (lifting the pre-D84 "remote agents can't read the
+//! codebase" limitation, D67): `list_dir`, `find_files`, `search_text`,
+//! `read_file`. There is deliberately no write/exec tool — document artifacts
+//! are still persisted by the app (ChatPanel → `write_file`, D67).
+//!
+//! Every path is confined to a sandbox: the run's `cwd` + `RunArgs.extra_dirs`
+//! (codebase / skill folders / knowledge artifacts root). Roots and targets are
+//! both `fs::canonicalize`d (Windows `\\?\` form, real casing, 8.3 short names
+//! expanded) and compared with `Path::starts_with` (whole components), so `..`,
+//! junctions and short-name aliases cannot escape. Walks skip symlinks/junctions
+//! and the shared noise dirs (`files::SKIP_DIRS`). Text is decoded as lossy
+//! UTF-8 (legacy EUC-KR sources may garble Korean — a documented limitation).
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use serde_json::{json, Value};
+
+use crate::files::SKIP_DIRS;
+
+/// Max characters of one tool result handed back to the model.
+pub const RESULT_CHARS: usize = 15_000;
+const LIST_MAX: usize = 500;
+const FIND_MAX: usize = 200;
+const SEARCH_MAX: usize = 200;
+/// `search_text` skips files larger than this.
+const SEARCH_FILE_MAX: u64 = 1024 * 1024;
+/// `read_file` refuses files larger than this.
+const READ_MAX_BYTES: u64 = 10 * 1024 * 1024;
+/// Default (and maximum) number of lines one `read_file` call returns.
+const READ_LINES: usize = 2000;
+/// Upper bound on directory entries visited by one recursive walk.
+const WALK_MAX: usize = 50_000;
+/// Max characters of one matched line shown by `search_text`.
+const LINE_PREVIEW: usize = 300;
+
+/// The OpenAI `tools` array advertised to the model (JSON Schema parameters).
+pub fn tool_specs() -> Value {
+    json!([
+        { "type": "function", "function": {
+            "name": "list_dir",
+            "description": "폴더의 하위 항목(폴더/파일)을 나열합니다. List the entries of a directory.",
+            "parameters": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "폴더 경로(절대경로 또는 작업 폴더 기준 상대경로). 생략하면 작업 폴더." }
+            }, "required": [] }
+        }},
+        { "type": "function", "function": {
+            "name": "find_files",
+            "description": "파일 이름 패턴으로 파일을 재귀 검색합니다(대소문자 무시). Find files by name recursively.",
+            "parameters": { "type": "object", "properties": {
+                "pattern": { "type": "string", "description": "파일명 와일드카드(* ?), 예: *Mapper.xml, *.java, Order*. 와일드카드가 없으면 이름에 그 문자열이 포함된 파일을 찾습니다." },
+                "path": { "type": "string", "description": "검색할 폴더. 생략하면 작업 폴더." }
+            }, "required": ["pattern"] }
+        }},
+        { "type": "function", "function": {
+            "name": "search_text",
+            "description": "파일 내용에서 문자열을 재귀 검색합니다(대소문자 무시, 정규식 아님). 결과 형식: '경로:줄번호: 내용'. Search file contents.",
+            "parameters": { "type": "object", "properties": {
+                "query": { "type": "string", "description": "찾을 문자열" },
+                "path": { "type": "string", "description": "검색할 폴더 또는 파일. 생략하면 작업 폴더." },
+                "file_pattern": { "type": "string", "description": "파일명 와일드카드 필터, 예: *.xml" }
+            }, "required": ["query"] }
+        }},
+        { "type": "function", "function": {
+            "name": "read_file",
+            "description": "텍스트 파일을 줄번호와 함께 읽습니다. 큰 파일은 start_line/max_lines로 나눠 읽으세요. Read a text file.",
+            "parameters": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "파일 경로(절대경로 또는 작업 폴더 기준 상대경로)" },
+                "start_line": { "type": "integer", "description": "시작 줄(1부터). 기본 1." },
+                "max_lines": { "type": "integer", "description": "읽을 최대 줄 수. 기본·최대 2000." }
+            }, "required": ["path"] }
+        }}
+    ])
+}
+
+/// Result of one tool call: the text handed back to the model + an error flag
+/// (shown as an error row in the chat timeline).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolOutcome {
+    pub content: String,
+    pub is_error: bool,
+}
+
+impl ToolOutcome {
+    fn ok(content: String) -> Self {
+        Self { content, is_error: false }
+    }
+    fn err(content: String) -> Self {
+        Self { content, is_error: true }
+    }
+}
+
+/// Strip the Windows verbatim prefix (`\\?\C:\…` → `C:\…`, `\\?\UNC\srv\share`
+/// → `\\srv\share`) so paths shown to the model are ones it can pass back.
+pub fn display_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.into_owned()
+    }
+}
+
+/// Truncate to `max` characters (not bytes), appending a Korean note with the
+/// original length when cut.
+pub fn clip_chars(s: &str, max: usize) -> String {
+    let total = s.chars().count();
+    if total <= max {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(max).collect();
+    format!("{kept}\n…(잘림: 전체 {total}자 중 {max}자)")
+}
+
+/// Case-insensitive wildcard match (`*` = any run, `?` = one char). A pattern
+/// without wildcards matches when the name *contains* it.
+pub fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.trim().to_lowercase().chars().collect();
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    if p.is_empty() {
+        return true;
+    }
+    if !p.iter().any(|c| *c == '*' || *c == '?') {
+        let needle: String = p.iter().collect();
+        let hay: String = t.iter().collect();
+        return hay.contains(&needle);
+    }
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut mark = 0usize;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// The set of folders one run may read. Built once per run from `cwd` +
+/// `extra_dirs`; folders that don't exist are dropped.
+pub struct Sandbox {
+    /// Canonical roots, de-duplicated; the cwd (if it exists) comes first.
+    roots: Vec<PathBuf>,
+    /// Canonical cwd — the base for relative paths (never the process cwd).
+    base: Option<PathBuf>,
+    /// Canonical app home (`~/.operation-wizard`) whose `settings.json*` holds
+    /// the API keys — never readable even when a root is very broad.
+    deny_dir: Option<PathBuf>,
+}
+
+impl Sandbox {
+    pub fn new(cwd: &str, extra_dirs: &[String]) -> Self {
+        let canon = |s: &str| {
+            let s = s.trim();
+            if s.is_empty() {
+                return None;
+            }
+            fs::canonicalize(s).ok().filter(|p| p.is_dir())
+        };
+        let base = canon(cwd);
+        let mut roots: Vec<PathBuf> = Vec::new();
+        for p in base.iter().cloned().chain(extra_dirs.iter().filter_map(|d| canon(d))) {
+            if !roots.contains(&p) {
+                roots.push(p);
+            }
+        }
+        let deny_dir = crate::ow_home().ok().and_then(|h| fs::canonicalize(h).ok());
+        Self { roots, base, deny_dir }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
+
+    /// Display form of the roots (for the system prompt and error messages).
+    pub fn root_labels(&self) -> Vec<String> {
+        self.roots.iter().map(|r| display_path(r)).collect()
+    }
+
+    /// Files the model must never read: `.env*` secrets and the app's own
+    /// `settings.json*` (it stores the FabriX/RAG keys in plain text).
+    fn denied(&self, p: &Path) -> bool {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if name == ".env" || name.starts_with(".env.") {
+            return true;
+        }
+        if let Some(home) = &self.deny_dir {
+            if p.parent() == Some(home.as_path()) && name.starts_with("settings.json") {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Resolve a model-supplied path (absolute, or relative to the cwd root;
+    /// `None`/blank → the cwd root) to a canonical path inside a root.
+    fn resolve(&self, raw: Option<&str>) -> Result<PathBuf, String> {
+        let base = self.base.as_ref().or(self.roots.first());
+        let target = match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            None => base.cloned().ok_or("작업 폴더가 없습니다 — 경로를 지정하세요.")?,
+            Some(p) => {
+                let p = Path::new(p);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    base.ok_or("작업 폴더가 없어 상대경로를 해석할 수 없습니다 — 절대경로를 쓰세요.")?
+                        .join(p)
+                }
+            }
+        };
+        let canon = fs::canonicalize(&target)
+            .map_err(|_| format!("경로를 찾을 수 없습니다: {}", display_path(&target)))?;
+        if !self.roots.iter().any(|r| canon.starts_with(r)) {
+            return Err(format!(
+                "허용된 폴더 밖의 경로입니다: {}\n허용 폴더: {}",
+                display_path(&canon),
+                self.root_labels().join(", ")
+            ));
+        }
+        if self.denied(&canon) {
+            return Err(format!("보안상 읽을 수 없는 파일입니다: {}", display_path(&canon)));
+        }
+        Ok(canon)
+    }
+}
+
+fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// An integer argument; accepts a JSON number or a numeric string (models
+/// sometimes quote numbers).
+fn int_arg(args: &Value, key: &str) -> Option<usize> {
+    let v = args.get(key)?;
+    v.as_u64()
+        .map(|n| n as usize)
+        .or_else(|| v.as_f64().filter(|f| *f >= 0.0).map(|f| f as usize))
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<usize>().ok()))
+}
+
+/// Run one tool call. Never panics; every failure becomes an error outcome the
+/// model can read and react to (the run itself keeps going).
+pub fn run_tool(name: &str, args: &Value, sb: &Sandbox, cancel: &AtomicBool) -> ToolOutcome {
+    let res = match name {
+        "list_dir" => list_dir(sb, args),
+        "find_files" => find_files(sb, args, cancel),
+        "search_text" => search_text(sb, args, cancel),
+        "read_file" => read_file(sb, args),
+        other => Err(format!(
+            "'{other}' 도구는 없습니다. 사용할 수 있는 도구는 list_dir, find_files, search_text, read_file(모두 읽기 전용)뿐입니다. \
+             파일 저장은 앱이 처리하므로, 문서를 작성하는 단계라면 최종 답변에 문서 본문만 출력하세요."
+        )),
+    };
+    match res {
+        Ok(text) => ToolOutcome::ok(clip_chars(&text, RESULT_CHARS)),
+        Err(e) => ToolOutcome::err(e),
+    }
+}
+
+fn list_dir(sb: &Sandbox, args: &Value) -> Result<String, String> {
+    let dir = sb.resolve(str_arg(args, "path"))?;
+    if !dir.is_dir() {
+        return Err(format!("폴더가 아닙니다: {} — 파일은 read_file로 읽으세요.", display_path(&dir)));
+    }
+    let mut dirs: Vec<String> = Vec::new();
+    let mut files: Vec<(String, u64)> = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if ft.is_dir() {
+            if !SKIP_DIRS.contains(&name.as_str()) {
+                dirs.push(name);
+            }
+        } else {
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            files.push((name, size));
+        }
+    }
+    dirs.sort_by_key(|n| n.to_lowercase());
+    files.sort_by_key(|(n, _)| n.to_lowercase());
+
+    let mut out = format!("{} — 폴더 {}개, 파일 {}개\n", display_path(&dir), dirs.len(), files.len());
+    let total = dirs.len() + files.len();
+    let mut shown = 0usize;
+    for d in &dirs {
+        if shown >= LIST_MAX {
+            break;
+        }
+        out.push_str(&format!("{d}/\n"));
+        shown += 1;
+    }
+    for (f, size) in &files {
+        if shown >= LIST_MAX {
+            break;
+        }
+        out.push_str(&format!("{f}  ({size} bytes)\n"));
+        shown += 1;
+    }
+    if total > shown {
+        out.push_str(&format!("…(이하 {}개 생략)\n", total - shown));
+    }
+    Ok(out)
+}
+
+/// Why a recursive walk stopped.
+#[derive(Debug, PartialEq)]
+enum WalkStop {
+    Done,
+    /// Visited `WALK_MAX` entries.
+    Limit,
+    Canceled,
+    /// The visitor asked to stop (result cap reached).
+    Visitor,
+}
+
+/// Depth-first walk of `root` (alphabetical), calling `visit(file, size)` for
+/// every file. Skips symlinks/junctions and the shared noise dirs; polls the
+/// cancel flag per directory.
+fn walk_files(root: &Path, cancel: &AtomicBool, visit: &mut dyn FnMut(&Path, u64) -> bool) -> WalkStop {
+    let mut stack = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            return WalkStop::Canceled;
+        }
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        let mut entries: Vec<fs::DirEntry> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase());
+        let mut subdirs = Vec::new();
+        for e in entries {
+            seen += 1;
+            if seen > WALK_MAX {
+                return WalkStop::Limit;
+            }
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !SKIP_DIRS.contains(&name.as_str()) {
+                    subdirs.push(e.path());
+                }
+                continue;
+            }
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            if !visit(&e.path(), size) {
+                return WalkStop::Visitor;
+            }
+        }
+        // Reverse so the alphabetically-first subdirectory is walked next.
+        stack.extend(subdirs.into_iter().rev());
+    }
+    WalkStop::Done
+}
+
+/// Trailing note for a walk that did not finish normally.
+fn walk_note(stop: &WalkStop, cap: usize) -> Result<&'static str, String> {
+    match stop {
+        WalkStop::Done => Ok(""),
+        WalkStop::Visitor => Ok(if cap == FIND_MAX {
+            "…(최대 200건까지만 표시 — 패턴이나 경로를 좁혀 다시 검색하세요)\n"
+        } else {
+            "…(최대 200건까지만 표시 — 검색어·file_pattern·경로를 좁혀 다시 검색하세요)\n"
+        }),
+        WalkStop::Limit => Ok("…(탐색 항목 상한 도달 — 하위 폴더를 지정해 다시 검색하세요)\n"),
+        WalkStop::Canceled => Err("취소되었습니다.".to_string()),
+    }
+}
+
+fn find_files(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String, String> {
+    let pattern = str_arg(args, "pattern").ok_or("pattern 인자가 필요합니다 (예: *Mapper.xml).")?;
+    let root = sb.resolve(str_arg(args, "path"))?;
+    if !root.is_dir() {
+        return Err(format!("폴더가 아닙니다: {}", display_path(&root)));
+    }
+    let mut hits: Vec<String> = Vec::new();
+    let stop = walk_files(&root, cancel, &mut |p, _| {
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if wildcard_match(pattern, &name) {
+            hits.push(display_path(p));
+        }
+        hits.len() < FIND_MAX
+    });
+    let note = walk_note(&stop, FIND_MAX)?;
+    if hits.is_empty() {
+        return Ok(format!("'{pattern}'와 일치하는 파일이 없습니다 ({}).\n{note}", display_path(&root)));
+    }
+    let mut out = format!("'{pattern}' 파일명 검색 — {}건 ({})\n", hits.len(), display_path(&root));
+    for h in &hits {
+        out.push_str(h);
+        out.push('\n');
+    }
+    out.push_str(note);
+    Ok(out)
+}
+
+/// A NUL byte in the first 8 KiB marks a file as binary (skipped / refused).
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes[..bytes.len().min(8192)].contains(&0)
+}
+
+fn search_text(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String, String> {
+    let query = str_arg(args, "query").ok_or("query 인자가 필요합니다.")?;
+    let needle = query.to_lowercase();
+    let target = sb.resolve(str_arg(args, "path"))?;
+    let file_pattern = str_arg(args, "file_pattern");
+
+    let mut hits: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    let mut scan = |p: &Path, size: u64| -> bool {
+        if size > SEARCH_FILE_MAX || sb.denied(p) {
+            return true;
+        }
+        if let Some(fp) = file_pattern {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if !wildcard_match(fp, &name) {
+                return true;
+            }
+        }
+        let Ok(bytes) = fs::read(p) else { return true };
+        if is_binary(&bytes) {
+            return true;
+        }
+        scanned += 1;
+        let text = String::from_utf8_lossy(&bytes);
+        for (i, line) in text.lines().enumerate() {
+            if line.to_lowercase().contains(&needle) {
+                let shown: String = line.trim().chars().take(LINE_PREVIEW).collect();
+                hits.push(format!("{}:{}: {}", display_path(p), i + 1, shown));
+                if hits.len() >= SEARCH_MAX {
+                    return false;
+                }
+            }
+        }
+        true
+    };
+
+    let stop = if target.is_file() {
+        let size = fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+        if scan(&target, size) {
+            WalkStop::Done
+        } else {
+            WalkStop::Visitor
+        }
+    } else {
+        walk_files(&target, cancel, &mut scan)
+    };
+    let note = walk_note(&stop, SEARCH_MAX)?;
+    if hits.is_empty() {
+        return Ok(format!(
+            "'{query}' 검색 결과가 없습니다 (파일 {scanned}개 확인, {}).\n{note}",
+            display_path(&target)
+        ));
+    }
+    let mut out = format!(
+        "'{query}' 내용 검색 — {}건 (파일 {scanned}개 확인, {})\n",
+        hits.len(),
+        display_path(&target)
+    );
+    for h in &hits {
+        out.push_str(h);
+        out.push('\n');
+    }
+    out.push_str(note);
+    Ok(out)
+}
+
+fn read_file(sb: &Sandbox, args: &Value) -> Result<String, String> {
+    let path = sb.resolve(Some(str_arg(args, "path").ok_or("path 인자가 필요합니다.")?))?;
+    if !path.is_file() {
+        return Err(format!("파일이 아닙니다: {} — 폴더는 list_dir로 보세요.", display_path(&path)));
+    }
+    let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if len > READ_MAX_BYTES {
+        return Err(format!("파일이 너무 큽니다({len} bytes): {} — search_text로 필요한 부분을 찾으세요.", display_path(&path)));
+    }
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    if is_binary(&bytes) {
+        return Err(format!("바이너리 파일은 읽을 수 없습니다: {}", display_path(&path)));
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let start = int_arg(args, "start_line").unwrap_or(1).max(1);
+    let max = int_arg(args, "max_lines").unwrap_or(READ_LINES).clamp(1, READ_LINES);
+    if total == 0 {
+        return Ok(format!("{} — 빈 파일입니다.", display_path(&path)));
+    }
+    if start > total {
+        return Err(format!("start_line {start}이(가) 파일 줄 수({total})보다 큽니다: {}", display_path(&path)));
+    }
+
+    // Leave room for the header/footer inside the per-result cap.
+    let budget = RESULT_CHARS.saturating_sub(400);
+    let mut body = String::new();
+    let mut used = 0usize;
+    let mut last = start - 1; // last 1-based line included
+    for (i, line) in lines.iter().enumerate().skip(start - 1).take(max) {
+        let row = format!("{:>5}\t{}\n", i + 1, line);
+        let n = row.chars().count();
+        if used + n > budget && last >= start {
+            break;
+        }
+        body.push_str(&row);
+        used += n;
+        last = i + 1;
+    }
+    let mut out = format!("{} — 전체 {total}줄, {start}–{last}줄\n", display_path(&path));
+    out.push_str(&body);
+    if last < total {
+        out.push_str(&format!(
+            "…(계속 읽으려면 read_file(path, start_line={}))\n",
+            last + 1
+        ));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh temp tree:
+    /// root/
+    ///   README.md, Order.java, data.bin (binary), .env
+    ///   src/OrderMapper.xml, src/util/Helper.java
+    ///   node_modules/pkg/index.js (skipped)
+    fn tree(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("ow-fx-tools-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src").join("util")).unwrap();
+        fs::create_dir_all(root.join("node_modules").join("pkg")).unwrap();
+        fs::write(root.join("README.md"), "# 주문 시스템\nORDER_TABLE 설명\n").unwrap();
+        fs::write(root.join("Order.java"), "class Order {\n  // order_table\n}\n").unwrap();
+        fs::write(root.join("data.bin"), [0u8, 1, 2, 3, b'o', b'r', b'd', b'e', b'r']).unwrap();
+        fs::write(root.join(".env"), "SECRET=1\nORDER_TABLE=x\n").unwrap();
+        fs::write(
+            root.join("src").join("OrderMapper.xml"),
+            "<select id=\"find\">SELECT * FROM ORDER_TABLE</select>\n",
+        )
+        .unwrap();
+        fs::write(root.join("src").join("util").join("Helper.java"), "class Helper {}\n").unwrap();
+        fs::write(root.join("node_modules").join("pkg").join("index.js"), "ORDER_TABLE\n").unwrap();
+        root
+    }
+
+    fn sb(root: &Path) -> Sandbox {
+        Sandbox::new(&root.to_string_lossy(), &[])
+    }
+
+    fn no_cancel() -> AtomicBool {
+        AtomicBool::new(false)
+    }
+
+    #[test]
+    fn wildcard_matching() {
+        assert!(wildcard_match("*Mapper.xml", "OrderMapper.xml"));
+        assert!(wildcard_match("*mapper.XML", "OrderMapper.xml"), "case-insensitive");
+        assert!(wildcard_match("Order*", "Order.java"));
+        assert!(wildcard_match("?rder.java", "Order.java"));
+        assert!(!wildcard_match("*.xml", "Order.java"));
+        assert!(wildcard_match("mapper", "OrderMapper.xml"), "no wildcard → contains");
+        assert!(wildcard_match("*", "anything"));
+        assert!(!wildcard_match("a*b*c", "aXbY"));
+        assert!(wildcard_match("a*b*c", "aXbYc"));
+    }
+
+    #[test]
+    fn display_path_strips_verbatim_prefix() {
+        assert_eq!(display_path(Path::new(r"\\?\C:\work\a.txt")), r"C:\work\a.txt");
+        assert_eq!(display_path(Path::new(r"\\?\UNC\srv\share\a")), r"\\srv\share\a");
+        assert_eq!(display_path(Path::new(r"C:\plain")), r"C:\plain");
+    }
+
+    #[test]
+    fn clip_chars_counts_characters() {
+        assert_eq!(clip_chars("가나다", 3), "가나다");
+        let c = clip_chars("가나다라", 2);
+        assert!(c.starts_with("가나\n"));
+        assert!(c.contains("전체 4자 중 2자"));
+    }
+
+    #[test]
+    fn sandbox_resolves_inside_and_rejects_escapes() {
+        let root = tree("sandbox");
+        let s = sb(&root);
+        assert!(!s.is_empty());
+        // Relative to the cwd root, and blank → the root itself.
+        assert!(s.resolve(Some("src/OrderMapper.xml")).is_ok());
+        assert_eq!(s.resolve(None).unwrap(), fs::canonicalize(&root).unwrap());
+        // `..` escape is caught after canonicalization.
+        let parent_escape = s.resolve(Some("..")).unwrap_err();
+        assert!(parent_escape.contains("허용된 폴더 밖"), "{parent_escape}");
+        // An absolute path outside every root is refused.
+        let outside = std::env::temp_dir();
+        assert!(s.resolve(Some(&outside.to_string_lossy())).unwrap_err().contains("허용된 폴더 밖"));
+        // Missing path → a clear error, not a panic.
+        assert!(s.resolve(Some("nope/missing.txt")).unwrap_err().contains("찾을 수 없습니다"));
+        // Secrets are never readable.
+        assert!(s.resolve(Some(".env")).unwrap_err().contains("보안상"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sandbox_extra_dirs_become_roots() {
+        let a = tree("extra-a");
+        let b = tree("extra-b");
+        let s = Sandbox::new(&a.to_string_lossy(), &[b.to_string_lossy().into_owned(), "  ".into(), "Z:\\definitely\\missing".into()]);
+        assert_eq!(s.root_labels().len(), 2, "blank / missing extra dirs are dropped");
+        let in_b = b.join("README.md");
+        assert!(s.resolve(Some(&in_b.to_string_lossy())).is_ok());
+        let _ = fs::remove_dir_all(&a);
+        let _ = fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn list_dir_skips_noise_dirs() {
+        let root = tree("list");
+        let out = run_tool("list_dir", &json!({}), &sb(&root), &no_cancel());
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("src/"));
+        assert!(out.content.contains("README.md"));
+        assert!(!out.content.contains("node_modules"), "noise dir hidden");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_files_matches_names_recursively() {
+        let root = tree("find");
+        let out = run_tool("find_files", &json!({ "pattern": "*.java" }), &sb(&root), &no_cancel());
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("Order.java"));
+        assert!(out.content.contains("Helper.java"));
+        assert!(!out.content.contains("index.js"));
+        let none = run_tool("find_files", &json!({ "pattern": "*.cs" }), &sb(&root), &no_cancel());
+        assert!(!none.is_error && none.content.contains("없습니다"));
+        let missing = run_tool("find_files", &json!({}), &sb(&root), &no_cancel());
+        assert!(missing.is_error);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_text_skips_binary_env_and_noise() {
+        let root = tree("search");
+        let out = run_tool("search_text", &json!({ "query": "order_table" }), &sb(&root), &no_cancel());
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("README.md:2:"), "{}", out.content);
+        assert!(out.content.contains("Order.java:2:"));
+        assert!(out.content.contains("OrderMapper.xml:1:"));
+        assert!(!out.content.contains(".env"), "secret file never searched");
+        assert!(!out.content.contains("index.js"), "noise dir skipped");
+        assert!(!out.content.contains("data.bin"), "binary skipped");
+        // file_pattern filter.
+        let xml = run_tool(
+            "search_text",
+            &json!({ "query": "ORDER_TABLE", "file_pattern": "*.xml" }),
+            &sb(&root),
+            &no_cancel(),
+        );
+        assert!(xml.content.contains("OrderMapper.xml") && !xml.content.contains("README.md"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_file_numbers_lines_and_pages() {
+        let root = tree("read");
+        let long: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        fs::write(root.join("long.txt"), long).unwrap();
+        let s = sb(&root);
+
+        let out = run_tool("read_file", &json!({ "path": "long.txt", "start_line": 10, "max_lines": 5 }), &s, &no_cancel());
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("전체 30줄, 10–14줄"));
+        assert!(out.content.contains("   10\tline 10"));
+        assert!(!out.content.contains("line 15"));
+        assert!(out.content.contains("start_line=15"));
+
+        // Numeric strings are accepted for integer args.
+        let s2 = run_tool("read_file", &json!({ "path": "long.txt", "start_line": "29" }), &s, &no_cancel());
+        assert!(s2.content.contains("29–30줄") && !s2.content.contains("start_line="));
+
+        assert!(run_tool("read_file", &json!({ "path": "long.txt", "start_line": 99 }), &s, &no_cancel()).is_error);
+        assert!(run_tool("read_file", &json!({ "path": "data.bin" }), &s, &no_cancel()).is_error);
+        assert!(run_tool("read_file", &json!({ "path": "src" }), &s, &no_cancel()).is_error);
+        assert!(run_tool("read_file", &json!({ "path": ".env" }), &s, &no_cancel()).is_error);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unknown_tool_explains_the_app_saves_files() {
+        let root = tree("unknown");
+        let out = run_tool("write_file", &json!({ "path": "docs/plan.md" }), &sb(&root), &no_cancel());
+        assert!(out.is_error);
+        assert!(out.content.contains("읽기 전용") && out.content.contains("앱이 처리"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn canceled_walk_reports_cancel() {
+        let root = tree("cancel");
+        let canceled = AtomicBool::new(true);
+        let out = run_tool("find_files", &json!({ "pattern": "*" }), &sb(&root), &canceled);
+        assert!(out.is_error && out.content.contains("취소"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tool_specs_are_well_formed() {
+        let specs = tool_specs();
+        let names: Vec<&str> = specs
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["list_dir", "find_files", "search_text", "read_file"]);
+        for t in specs.as_array().unwrap() {
+            assert_eq!(t["type"], "function");
+            assert!(t["function"]["parameters"].is_object(), "parameters must be a JSON Schema object");
+        }
+    }
+}

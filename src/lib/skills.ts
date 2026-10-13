@@ -3,7 +3,7 @@
 // system injects into the wire prompt on the turn that runs a workflow step
 // carrying it (see `StepDef.skillIds` + the wire assembly in ChatPanel.send).
 // Session agents (claude/codex) get each skill once (deduped across steps);
-// sessionless agents (gemini/aipro) re-see it via the transcript.
+// sessionless agents (gemini/FabriX) re-see it via the transcript.
 //
 // The catalog below is the BUILT-IN DEFAULT + editable sample content: the
 // Flows settings view shows it as the initial skill registry, and a user-saved

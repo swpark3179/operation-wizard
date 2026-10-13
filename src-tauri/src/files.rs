@@ -2,9 +2,10 @@
 //! file's text, and write a file. Implemented as plain Tauri commands (using
 //! `std::fs`) instead of pulling in the `fs` plugin + its capability surface.
 //! `list_dir`/`read_file` are read-only; `write_file` (D67) persists a remote
-//! agent's streamed document output — remote agents (Fabrix) have no filesystem
-//! access, so the app writes their generative-step text to `step.file` itself,
-//! matching the artifacts local CLI agents write with their own tools.
+//! agent's streamed document output — the remote FabriX agent can only *read*
+//! files (through the app's read-only tool loop, D84), so the app writes its
+//! generative-step text to `step.file` itself, matching the artifacts local CLI
+//! agents write with their own tools.
 
 use std::fs;
 use std::path::Path;
@@ -19,18 +20,20 @@ pub struct FileEntry {
     pub is_dir: bool,
 }
 
+/// Heavy/noise directories hidden from the canvas tree and skipped by the
+/// FabriX read-only file tools (D84) — shared so both stay in sync.
+pub(crate) const SKIP_DIRS: [&str; 4] = [".git", "node_modules", "target", ".next"];
+
 /// List a directory's immediate children, directories first then files, each
 /// alphabetical (case-insensitive). Common heavy/noise dirs are skipped.
 #[tauri::command]
 pub fn list_dir(path: String) -> Result<Vec<FileEntry>, String> {
-    const SKIP: [&str; 4] = [".git", "node_modules", "target", ".next"];
-
     let mut entries = Vec::new();
     for entry in fs::read_dir(&path).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir && SKIP.contains(&name.as_str()) {
+        if is_dir && SKIP_DIRS.contains(&name.as_str()) {
             continue;
         }
         entries.push(FileEntry {
@@ -67,7 +70,7 @@ const MAX_WRITE: usize = 5 * 1024 * 1024;
 
 /// Write `contents` (UTF-8) to `path`, creating parent directories as needed
 /// (D67). Used by the client to persist a remote agent's document-step output
-/// (Fabrix streams text but cannot touch the filesystem). The path is supplied
+/// (FabriX can only read files via the app's read-only tool loop — D84). The path is supplied
 /// by the frontend as `<workdir>/<step.file>` — the same location a local CLI
 /// agent would write with its own tools.
 #[tauri::command]

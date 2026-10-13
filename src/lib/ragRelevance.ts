@@ -166,6 +166,7 @@ export function judgeRagRelevance(args: {
         sessionId: null,
         resume: false,
         extraDirs: [], // judgment is text-only; no folder access needed
+        tools: false, // …and no FabriX tool rounds (D84)
       },
       channel,
     )
