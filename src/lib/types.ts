@@ -70,7 +70,7 @@ export interface StepDef {
   /** Skills injected on this step's turn (unknown ids are skipped at runtime). */
   skillIds: string[];
   /** Result form: "chat" | "file" | "html". Absent → derived from `kind`
-   * (document→"file", else "chat"). "html" expands into an extra render
+   * (document→"file"; codebase with a `file`→"file" (D85); else "chat"). "html" expands into an extra render
    * sub-step at runtime (see `expandOutputSteps` in lib/workflow.ts). */
   output?: string | null;
 }

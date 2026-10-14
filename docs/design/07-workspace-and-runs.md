@@ -416,7 +416,8 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   output:html) → 마무리 대화(chat)]` — **코드베이스 단계를 제외한 부분 foundation(rag+knowledge)**으로
   Confluence/지식 시각화(rag '검색 결과' 탭 D46)를 강점으로 삼고, `output:"html"`이 보기 좋은
   operation-guide.html을 자동 생성한다. `kind`: `search`·`document`·기반 3종(생성형,
-  `isGenerative`) / `chat`(종단). **`output`("chat"/"file"/"html", D47)**: 미지정 시 kind에서 파생;
+  `isGenerative`) / `chat`(종단). **`output`("chat"/"file"/"html", D47)**: 미지정 시 kind에서 파생(document→file, file이 있는 codebase→file —
+  D85, 그 외→chat);
   오케스트레이터는 `runtimeWorkflowFor` = `expandOutputSteps(workflowFor(...))`를 실행해 `"html"` 단계
   뒤에 `html-render` 스킬을 단 합성 렌더 서브스텝(`<file>.html`)을 삽입한다(편집기는 미확장 뷰만 봄).
   진행 노트는 `progressLabel(i, steps)` = "N/M단계 · <name> 중…"으로 **파생**(고정 문자열 없음).

@@ -80,8 +80,8 @@ wire = [ (첫 실제 작업 턴 1회) 내장 프롬프트 최적화 스킬(PROMP
 **`query`(데이터 조회) 기본값(D61)**도 동일한 뼈대를 쓴다 — 기반 3단계(codebase=참조 SQL 탐색 /
 rag=조회 기준 문서 / knowledge=용어→테이블 매핑)에 이어 `테이블 정보·ERD 정리(document,
 docs/table-info.md — mermaid erDiagram)` → `참고 SQL 작성(document, docs/query-sql.md)` → chat.
-codebase 단계는 `output:"file"`을 명시해 참조 목록(`docs/query-references.md`)을 산출물로 남긴다
-(codebase 기본 output은 "chat"이라 file이 스트립되므로 — D61). 스킬은 `reference-sql-explore`/
+codebase 단계는 참조 목록(`docs/query-references.md`)을 산출물로 남긴다(`output:"file"` 명시 — D61; D85부터는
+file이 있는 codebase 단계의 기본 output 자체가 "file"). 스킬은 `reference-sql-explore`/
 `table-erd`/`sql-draft`(+`query-safe`).
 
 **`change`(데이터 변경·권한) 기본값(D62)**도 같은 뼈대다 — 초반 폼에서 **변경 종류**(데이터 수정 /
@@ -150,7 +150,8 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
   - **결과 형태 `output`(D47)**: search/document/codebase 단계의 "결과 형태" 셀렉트 — `대화만`(산출물
     없음)/`파일`(기존 동작)/`HTML 캔버스`(런타임에 `html-render` 스킬을 단 합성 렌더 서브스텝이 붙어
     `.html` 재생성 → 캔버스 sandbox 미리보기). 설정에는 `output`만 저장되고 합성 단계는
-    `runtimeWorkflowFor`에서만 존재한다. **대안**: document 단계의 `file`을 직접 `.html`로 두면(output은
+    `runtimeWorkflowFor`에서만 존재한다. 미지정 시 document는 "파일", **file이 있는 codebase 단계도 "파일"**(D85),
+    그 외는 "대화만"으로 파생된다. **대안**: document 단계의 `file`을 직접 `.html`로 두면(output은
     "file"로 파생) 합성 서브스텝 없이 **에이전트가 HTML을 직접 저술**한다 — 폼처럼 특정 마크업/인라인
     스타일이 필요할 때 쓴다(change의 DC Manager 신청양식, D62). 이 경우 전용 스킬이 마크업을 지시한다.
 - 커서 로직은 `ChatPanel`의 `stepIndexRef`/`stepArmedRef`/`injectedSkillIdsRef`/`inflightStepRef` + `end`
