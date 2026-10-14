@@ -3033,6 +3033,94 @@ fn word_hits(hay: &[u8], needle: &[u8], ignore_case: bool) -> Vec<usize> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Symbol lookup (D91): `read_file(symbol)` reads one declaration's body in the
+// same call that names it, instead of outline → read-by-range (two rounds).
+// ---------------------------------------------------------------------------
+
+/// Words after which a name is being declared (`class X`, `TABLE T`, `bean b`…).
+const DECL_KEYWORDS: &[&str] = &[
+    "class", "interface", "enum", "record", "@interface", "table", "view", "procedure", "function", "package",
+    "body", "trigger", "sequence", "synonym", "index", "bean", "servlet", "filter", "action",
+];
+
+/// How strongly `sig` declares `name`: 4/3 = declared (the name right before
+/// `(`, after `id=` or after a declaring keyword — exact case / any case),
+/// 2/1 = merely mentioned, 0 = absent. Non-identifier names (Korean headings)
+/// match as a case-insensitive substring (1).
+fn decl_score(sig: &str, name: &str) -> u8 {
+    if !name.bytes().all(is_word_byte) {
+        return u8::from(sig.to_lowercase().contains(&name.to_lowercase()));
+    }
+    let mut best = 0;
+    for at in word_hits(sig.as_bytes(), name.as_bytes(), true) {
+        let before = sig[..at].trim_end();
+        let rest = sig[at + name.len()..].trim_start();
+        let prev = before.rsplit(char::is_whitespace).next().unwrap_or("").to_ascii_lowercase();
+        let declared = rest.starts_with('(') || before.ends_with("id=") || DECL_KEYWORDS.contains(&prev.as_str());
+        let exact = &sig[at..at + name.len()] == name;
+        best = best.max(match (declared, exact) {
+            (true, true) => 4,
+            (true, false) => 3,
+            (false, true) => 2,
+            (false, false) => 1,
+        });
+    }
+    best
+}
+
+/// Indexes of the outline items that best match `name`, in file order (≤ `max`).
+/// A qualifier (`Class.method`, `namespace.id`) and a trailing `()` are
+/// dropped; declarations win over mere mentions.
+pub fn symbol_items(o: &Outline, name: &str, max: usize) -> Vec<usize> {
+    let name = name.trim().trim_end_matches("()");
+    let bare = name.rsplit('.').next().unwrap_or("").trim();
+    if bare.is_empty() {
+        return Vec::new();
+    }
+    let scored: Vec<(u8, usize)> = o
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| it.kind != "more")
+        .map(|(i, it)| (decl_score(&it.signature, bare), i))
+        .filter(|(s, _)| *s > 0)
+        .collect();
+    let best = scored.iter().map(|(s, _)| *s).max().unwrap_or(0);
+    scored.into_iter().filter(|(s, _)| *s == best).map(|(_, i)| i).take(max).collect()
+}
+
+/// The 1-based line span to show for item `idx` of a file with `lines`: from
+/// its start — widened over the annotation/comment lines right above it — to
+/// its end. A Markdown heading runs to the next heading of the same or a higher
+/// level; an item without a known end is just its line.
+pub fn item_span(o: &Outline, idx: usize, lines: &[&str]) -> (usize, usize) {
+    let it = &o.items[idx];
+    let total = lines.len().max(1);
+    let mut start = it.line.clamp(1, total);
+    for _ in 0..20 {
+        if start <= 1 {
+            break;
+        }
+        let t = lines.get(start - 2).map(|l| l.trim()).unwrap_or("");
+        let lead = ["@", "/*", "*", "//", "--", "<!--"].iter().any(|p| t.starts_with(p));
+        if !lead {
+            break;
+        }
+        start -= 1;
+    }
+    let end = match it.end_line {
+        Some(e) => e,
+        None if it.kind == "heading" => o.items[idx + 1..]
+            .iter()
+            .find(|n| n.kind == "heading" && n.depth <= it.depth)
+            .map(|n| n.line.saturating_sub(1))
+            .unwrap_or(total),
+        None => it.line,
+    };
+    (start, end.clamp(start, total))
+}
+
 /// The innermost outline item whose range covers `line`.
 fn enclosing_item(o: &Outline, line: usize) -> Option<&OutlineItem> {
     o.items
@@ -3759,5 +3847,46 @@ public class OrderAction extends DispatchAction {
         assert_eq!(lang_for(Path::new("pkg.pkb")), Lang::Sql);
         assert_eq!(lang_for(Path::new("README.md")), Lang::Markdown);
         assert_eq!(lang_for(Path::new("x.ts")), Lang::Other);
+    }
+
+    #[test]
+    fn symbol_items_prefer_declarations_and_spans_cover_bodies() {
+        let src = "@Service\npublic class OrderService {\n  private OrderMapper orderMapper;\n\n  /**\n   * 주문 조회\n   */\n  @Transactional(readOnly = true)\n  public Order findOrder(Long id) {\n    return orderMapper.selectOrder(id);\n  }\n\n  public List<Order> findOrders(String cust) {\n    return orderMapper.selectOrders(cust);\n  }\n}\n";
+        let o = java(src);
+        let lines: Vec<&str> = src.lines().collect();
+        // `Class.method` and a trailing `()` are tolerated; the declaration wins.
+        let hits = symbol_items(&o, "OrderService.findOrder()", 3);
+        assert_eq!(hits.len(), 1, "{:#?}", sigs(&o));
+        assert!(o.items[hits[0]].signature.contains("findOrder(Long id)"));
+        // The span is widened over the Javadoc above the annotation.
+        assert_eq!(item_span(&o, hits[0], &lines), (5, 11));
+        // A type name: the class declaration beats the mentions in signatures.
+        let cls = symbol_items(&o, "OrderService", 3);
+        assert_eq!(cls.len(), 1);
+        assert_eq!(o.items[cls[0]].kind, "class");
+        assert!(symbol_items(&o, "nothingHere", 3).is_empty());
+        assert!(symbol_items(&o, " . ", 3).is_empty());
+
+        // Mapper statements by id (namespace qualifier dropped).
+        let xml = "<mapper namespace=\"com.x.OrderMapper\">\n  <!-- 주문 목록 -->\n  <select id=\"selectOrders\" resultType=\"Order\">\n    SELECT * FROM TB_ORDER\n    WHERE CUST_ID = #{cust}\n  </select>\n</mapper>\n";
+        let xo = outline(Lang::Xml, xml.as_bytes());
+        let xl: Vec<&str> = xml.lines().collect();
+        let st = symbol_items(&xo, "com.x.OrderMapper.selectOrders", 3);
+        assert_eq!(st.len(), 1, "{:#?}", sigs(&xo));
+        assert_eq!(item_span(&xo, st[0], &xl), (2, 6));
+
+        // SQL routines/tables are declared after their keyword (any case).
+        let sql = "CREATE TABLE TB_ORDER (\n  ORDER_ID NUMBER(10)\n);\nCREATE OR REPLACE PROCEDURE P_CLEAN(p IN NUMBER) AS\nBEGIN\n  NULL;\nEND;\n/\n";
+        let so = outline(Lang::Sql, sql.as_bytes());
+        let t = symbol_items(&so, "tb_order", 3);
+        assert_eq!(so.items[t[0]].kind, "table", "{:#?}", sigs(&so));
+        assert!(so.items[symbol_items(&so, "P_CLEAN", 3)[0]].signature.starts_with("PROCEDURE"));
+
+        // Markdown headings run to the next heading of the same level.
+        let md = "# 계획\n## 범위\n내용 A\n### 세부\n내용 B\n## 일정\n내용 C\n";
+        let mo = outline(Lang::Markdown, md.as_bytes());
+        let ml: Vec<&str> = md.lines().collect();
+        let h = symbol_items(&mo, "범위", 3);
+        assert_eq!(item_span(&mo, h[0], &ml), (2, 5));
     }
 }

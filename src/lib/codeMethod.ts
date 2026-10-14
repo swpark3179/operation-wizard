@@ -69,13 +69,17 @@ function tacticsFor(agentId: string): string {
 - Read는 offset/limit로 필요한 줄 범위만 읽으세요. 파일 전체 읽기는 짧은 설정 파일에만 씁니다.
 - 호출자(Callers)는 Grep \`\\bmethodName\\(\`(+ 매퍼 문장 id는 문자열 \`"namespace.id"\`)로 실제 호출 지점을 찾으세요.`;
     case "fabrix":
-      return `- 읽기 전용 도구를 쓰세요. 소스 파일은 본문 대신 **\`outline_file\`(선언부·어노테이션·줄 범위, 매퍼 XML은 문장 id와
-  참조 테이블 CRUD)** 을 먼저 보고, 필요한 범위만 \`read_file\`의 start_line/max_lines로 읽습니다.
+      return `- **호출 횟수가 제한됩니다**(도구를 부르는 응답 1회 = API 호출 1회, 분당 한도 있음). 한 응답에서 필요한 조회를 모두
+  묶어 요청하세요 — \`outline_file\`의 paths, \`read_file\`의 files, \`search_text\`의 queries, \`find_references\`의 symbols
+  배열을 쓰거나 여러 도구를 동시에 호출합니다. 파일을 하나씩 순차로 열지 마세요.
+- 소스 파일은 본문 대신 **\`outline_file\`(선언부·어노테이션·줄 범위, 매퍼 XML은 문장 id와 참조 테이블 CRUD)** 을 먼저
+  보고, 메서드·매퍼 문장 본문은 \`read_file\`의 **symbol**(이름)로 바로 읽습니다(범위가 필요하면 start_line/max_lines).
 - \`search_text\`는 정규식이 아닌 **리터럴(부분 문자열) 검색**입니다 — \`@RestController\`, \`@RequestMapping\`,
-  \`<mapper namespace=\`, \`CREATE OR REPLACE\` 같은 리터럴 앵커로 위치를 찾고, \`find_files\`로 *Controller.java·
-  *Mapper.xml 등의 분포를 봅니다.
-- 호출자·영향 범위는 \`find_references\`(\`Class.method\`·문장 id·테이블명)로 찾고, 결과의 [감싸는 메서드]로 다시 호출해
-  다음 단계 호출자를 추적합니다.`;
+  \`<mapper namespace=\`, \`CREATE OR REPLACE\` 같은 리터럴 앵커를 queries로 한 번에 찾고, \`find_files\`로
+  *Controller.java·*Mapper.xml 등의 분포를 봅니다.
+- 호출자·영향 범위는 \`find_references\`(\`Class.method\`·문장 id·테이블명, 여러 개는 symbols)로 찾고, 결과의
+  [감싸는 메서드]로 다시 호출해 다음 단계 호출자를 추적합니다.
+- 첨부된 저장소 지도에 이미 있는 구조·아웃라인·SQL 본문은 다시 조회하지 마세요.`;
     case "codex":
       return `- 검색 명령(rg -n / grep -n / Select-String)으로 선언부 패턴(어노테이션·public 메서드·mapper id·CREATE 문)만 먼저 모으고,
   파일은 필요한 줄 범위만 출력해 읽으세요(전체 cat 금지).`;

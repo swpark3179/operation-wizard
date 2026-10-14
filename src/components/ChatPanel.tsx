@@ -1188,9 +1188,16 @@ export function ChatPanel({
     // what they need with the tools, then emit only the clean document body
     // (no tool talk / greetings) so the saved file is the document itself.
     // Only for remote document steps; CLI wire unchanged.
+    // Tool calls are billed per round against a per-minute quota (D91): ask for
+    // batched lookups, and — once earlier steps produced documents, whose
+    // bodies the sessionless transcript already carries — not to re-read them.
+    const priorDocs = [...producedDocsRef.current.keys()].some((i) => i < stepIndexRef.current);
     const remoteDocCtx =
       !isPrefill && isRemote && stepInject && step && isGenerative(step.kind) && step.file
-        ? "이 단계의 최종 답변 전체가 그대로 문서 파일로 저장됩니다(저장은 앱이 처리). 필요하면 먼저 읽기 전용 파일 도구(list_dir·find_files·search_text·outline_file·find_references·read_file)로 근거 파일을 읽은 뒤, 최종 답변에는 파일 저장 도구 사용·저장 여부 언급·인사말·메타설명 없이 문서 본문(마크다운/HTML)만 출력하세요."
+        ? "이 단계의 최종 답변 전체가 그대로 문서 파일로 저장됩니다(저장은 앱이 처리). 필요하면 먼저 읽기 전용 파일 도구(list_dir·find_files·search_text·outline_file·find_references·read_file)로 근거 파일을 읽은 뒤, 최종 답변에는 파일 저장 도구 사용·저장 여부 언급·인사말·메타설명 없이 문서 본문(마크다운/HTML)만 출력하세요. 도구 호출은 분당 한도가 있으니 필요한 조회는 한 응답에 묶어(files·paths·queries·symbols 배열) 요청하세요." +
+          (priorDocs
+            ? " 앞 단계 산출 문서의 본문은 위 대화에 이미 포함되어 있으므로 read_file로 다시 읽지 말고, 필요한 소스코드만 확인하세요."
+            : "")
         : "";
 
     const wire = isPrefill

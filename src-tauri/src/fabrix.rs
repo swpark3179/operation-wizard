@@ -580,7 +580,7 @@ fn system_prompt(tools: bool, roots: &[String], limit: u32) -> String {
             "\n원칙:\n\
              - 코드·문서의 내용은 추측하지 말고, 필요한 파일을 도구로 찾아 읽은 뒤 근거를 들어 답하세요.\n\
              - 상대경로는 첫 번째 폴더(작업 폴더) 기준이며, 없으면 다른 허용 폴더에서 찾습니다. 도구 결과에 나온 경로를 그대로 쓰면 됩니다.\n\
-             - 소스 파일은 본문을 읽기 전에 outline_file로 선언부(시그니처·줄 범위)를 먼저 보고, 필요한 범위만 read_file로 읽으세요.\n\
+             - 소스 파일은 본문을 읽기 전에 outline_file로 선언부(시그니처·줄 범위)를 먼저 보고, 메서드·매퍼 문장·프로시저 본문은 read_file의 symbol(이름)로 바로 읽으세요.\n\
              - 누가 호출하는지·변경 영향 범위는 find_references로 확인하세요(Class.method 형식 권장).\n\
              - 큰 파일은 search_text로 위치를 찾고 read_file의 start_line/max_lines로 필요한 부분만 읽으세요.\n\
              - 도구로는 파일을 만들거나 수정할 수 없습니다. 문서 산출물 저장은 앱이 처리하므로, 문서를 작성하는 단계에서는 최종 답변에 문서 본문만 출력하세요.\n\
@@ -597,8 +597,9 @@ fn system_prompt(tools: bool, roots: &[String], limit: u32) -> String {
 fn call_budget_rule(limit: u32) -> String {
     let quota = if limit == 0 { "호출 수는 비용과 대기 시간으로 이어집니다".to_string() } else { format!("라이선스상 분당 {limit}회까지만 호출할 수 있습니다") };
     format!(
-        "\n- 도구를 호출하는 응답 1회가 API 호출 1회로 계산되고 {quota}. 서로 독립적인 조회(여러 파일 읽기·여러 검색어·여러 아웃라인)는 \
-         한 응답에서 여러 도구를 동시에 호출해 한 번에 요청하고, 파일을 하나씩 순차로 열지 마세요."
+        "\n- 도구를 호출하는 응답 1회가 API 호출 1회로 계산되고 {quota}. 서로 독립적인 조회는 한 응답에 모아 요청하세요: \
+         배열 인자(read_file의 files, outline_file의 paths, search_text의 queries, find_references의 symbols)로 묶거나 \
+         한 응답에서 여러 도구를 동시에 호출하고, 파일을 하나씩 순차로 열지 마세요. 다음에 읽을 것을 미리 예상해 함께 요청하면 호출이 줄어듭니다."
     )
 }
 
@@ -765,6 +766,20 @@ fn post_round(
             continue;
         }
         return Err(PostError::Failed(error_message(status.as_u16(), &text)));
+    }
+}
+
+/// The footer appended (model-only) to a tool round's last result: rounds used
+/// and left, so the model batches the rest of its lookups (D91).
+fn round_footer(round: usize, budget_spent: bool) -> String {
+    let used = round + 1;
+    let left = MAX_ROUNDS.saturating_sub(used);
+    if left == 0 || budget_spent {
+        "[도구 사용 한도에 도달했습니다 — 더 조회하지 말고 지금까지 읽은 내용으로 답하세요]".to_string()
+    } else {
+        format!(
+            "[도구 라운드 {used}/{MAX_ROUNDS} 사용 · 남은 라운드 {left}회 — 남은 조회는 한 응답에 묶어 요청하고, 충분하면 바로 답하세요]"
+        )
     }
 }
 
@@ -939,6 +954,13 @@ fn drive(
                 is_error: outcome.is_error,
             });
             messages.push(json!({ "role": "tool", "tool_call_id": call.id, "content": content }));
+        }
+        // Model-only footer on the round's last result (D91): how many tool
+        // rounds remain, nudging the model to batch what it still needs.
+        if let Some(c) = messages.last_mut().and_then(|m| m.get_mut("content")) {
+            if let Some(text) = c.as_str() {
+                *c = json!(format!("{text}\n\n{}", round_footer(round, budget == 0)));
+            }
         }
     }
 
@@ -1345,5 +1367,18 @@ mod tests {
         assert!(with.contains(r"- C:\work") && with.contains("read_file") && with.contains("outline_file") && with.contains("find_references") && with.contains("앱이 처리"));
         let without = system_prompt(false, &roots, 10);
         assert!(!without.contains("read_file"));
+    }
+
+    #[test]
+    fn prompt_and_footer_push_for_batched_calls() {
+        let roots = vec![r"C:\work".to_string()];
+        let p = system_prompt(true, &roots, 10);
+        assert!(p.contains("분당 10회") && p.contains("files") && p.contains("queries") && p.contains("symbol"), "{p}");
+        assert!(system_prompt(true, &roots, 0).contains("호출 수는 비용"));
+        assert!(!system_prompt(false, &roots, 10).contains("분당"), "no tools → no tool rules");
+        assert!(round_footer(0, false).contains("1/12") && round_footer(0, false).contains("남은 라운드 11회"));
+        assert!(round_footer(MAX_ROUNDS - 1, false).contains("한도에 도달"));
+        assert!(round_footer(2, true).contains("한도에 도달"), "spent tool budget ends the lookups too");
+        assert!(pace_notice(10, 23).contains("분당 호출 한도(10회)") && pace_notice(10, 23).contains("23초"));
     }
 }
