@@ -571,14 +571,15 @@ fn system_prompt(tools: bool, roots: &[String]) -> String {
         "당신은 Samsung SDS Operation Wizard의 업무 보조 AI입니다. 사용자 요청에 정확하고 도움이 되게 답합니다.",
     );
     if tools && !roots.is_empty() {
-        s.push_str("\n\n## 파일 도구\n다음 폴더의 파일을 읽기 전용 도구(list_dir, find_files, search_text, read_file)로 조회할 수 있습니다:\n");
+        s.push_str("\n\n## 파일 도구\n다음 폴더의 파일을 읽기 전용 도구(list_dir, find_files, search_text, outline_file, read_file)로 조회할 수 있습니다:\n");
         for r in roots {
             s.push_str(&format!("- {r}\n"));
         }
         s.push_str(
             "\n원칙:\n\
              - 코드·문서의 내용은 추측하지 말고, 필요한 파일을 도구로 찾아 읽은 뒤 근거를 들어 답하세요.\n\
-             - 상대경로는 첫 번째 폴더(작업 폴더) 기준입니다. 도구 결과에 나온 경로를 그대로 쓰면 됩니다.\n\
+             - 상대경로는 첫 번째 폴더(작업 폴더) 기준이며, 없으면 다른 허용 폴더에서 찾습니다. 도구 결과에 나온 경로를 그대로 쓰면 됩니다.\n\
+             - 소스 파일은 본문을 읽기 전에 outline_file로 선언부(시그니처·줄 범위)를 먼저 보고, 필요한 범위만 read_file로 읽으세요.\n\
              - 큰 파일은 search_text로 위치를 찾고 read_file의 start_line/max_lines로 필요한 부분만 읽으세요.\n\
              - 도구로는 파일을 만들거나 수정할 수 없습니다. 문서 산출물 저장은 앱이 처리하므로, 문서를 작성하는 단계에서는 최종 답변에 문서 본문만 출력하세요.\n\
              - 충분히 파악했으면 더 읽지 말고 바로 답하세요.",
@@ -1206,7 +1207,7 @@ mod tests {
 
         let t = chat_body(&msgs, true, false);
         assert_eq!(t["tool_choice"], "auto");
-        assert_eq!(t["tools"].as_array().unwrap().len(), 4);
+        assert_eq!(t["tools"].as_array().unwrap().len(), 5);
         assert_eq!(chat_body(&msgs, true, true)["tool_choice"], "none", "final round forbids calls");
     }
 
@@ -1308,7 +1309,7 @@ mod tests {
     fn system_prompt_lists_roots_only_with_tools() {
         let roots = vec![r"C:\work".to_string(), r"D:\code".to_string()];
         let with = system_prompt(true, &roots);
-        assert!(with.contains(r"- C:\work") && with.contains("read_file") && with.contains("앱이 처리"));
+        assert!(with.contains(r"- C:\work") && with.contains("read_file") && with.contains("outline_file") && with.contains("앱이 처리"));
         let without = system_prompt(false, &roots);
         assert!(!without.contains("read_file"));
     }

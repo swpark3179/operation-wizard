@@ -1,9 +1,10 @@
 //! Read-only file tools for the FabriX tool-calling loop (D84).
 //!
-//! FabriX is an HTTP API with no filesystem of its own. The app exposes four
+//! FabriX is an HTTP API with no filesystem of its own. The app exposes five
 //! read-only tools over the OpenAI `tools` protocol so the model can actually
 //! read the codebase (lifting the pre-D84 "remote agents can't read the
 //! codebase" limitation, D67): `list_dir`, `find_files`, `search_text`,
+//! `outline_file` (the skeleton-first view from `codemap.rs` — D87) and
 //! `read_file`. There is deliberately no write/exec tool — document artifacts
 //! are still persisted by the app (ChatPanel → `write_file`, D67).
 //!
@@ -21,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{json, Value};
 
+use crate::codemap;
 use crate::files::SKIP_DIRS;
 
 /// Max characters of one tool result handed back to the model.
@@ -65,6 +67,13 @@ pub fn tool_specs() -> Value {
                 "path": { "type": "string", "description": "검색할 폴더 또는 파일. 생략하면 작업 폴더." },
                 "file_pattern": { "type": "string", "description": "파일명 와일드카드 필터, 예: *.xml" }
             }, "required": ["query"] }
+        }},
+        { "type": "function", "function": {
+            "name": "outline_file",
+            "description": "소스 파일의 스켈레톤(클래스·메서드·필드 선언부, 핵심 어노테이션, Javadoc 첫 문장, 줄 범위 — 본문 제외)을 보여줍니다. Java·MyBatis/iBATIS 매퍼 XML(문장 id·참조 테이블 CRUD)·web.xml·struts-config·Spring XML·SQL/PL-SQL(테이블 컬럼·패키지 멤버)·Markdown 지원, 그 외는 근사. 파일 본문을 읽기 전에 먼저 쓰고, 필요한 범위만 read_file(start_line, max_lines)로 읽으세요. Outline a source file (signatures without bodies).",
+            "parameters": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "파일 경로(절대경로 또는 허용 폴더 기준 상대경로)" }
+            }, "required": ["path"] }
         }},
         { "type": "function", "function": {
             "name": "read_file",
@@ -216,8 +225,10 @@ impl Sandbox {
         false
     }
 
-    /// Resolve a model-supplied path (absolute, or relative to the cwd root;
-    /// `None`/blank → the cwd root) to a canonical path inside a root.
+    /// Resolve a model-supplied path (absolute, or relative to the cwd root —
+    /// falling back to the other roots in order when it doesn't exist there, so
+    /// a codebase-relative path from an outline resolves too; `None`/blank →
+    /// the cwd root) to a canonical path inside a root.
     fn resolve(&self, raw: Option<&str>) -> Result<PathBuf, String> {
         let base = self.base.as_ref().or(self.roots.first());
         let target = match raw.map(str::trim).filter(|s| !s.is_empty()) {
@@ -227,8 +238,14 @@ impl Sandbox {
                 if p.is_absolute() {
                     p.to_path_buf()
                 } else {
-                    base.ok_or("작업 폴더가 없어 상대경로를 해석할 수 없습니다 — 절대경로를 쓰세요.")?
-                        .join(p)
+                    let first = base
+                        .ok_or("작업 폴더가 없어 상대경로를 해석할 수 없습니다 — 절대경로를 쓰세요.")?
+                        .join(p);
+                    if first.exists() {
+                        first
+                    } else {
+                        self.roots.iter().map(|r| r.join(p)).find(|c| c.exists()).unwrap_or(first)
+                    }
                 }
             }
         };
@@ -269,9 +286,10 @@ pub fn run_tool(name: &str, args: &Value, sb: &Sandbox, cancel: &AtomicBool) -> 
         "list_dir" => list_dir(sb, args),
         "find_files" => find_files(sb, args, cancel),
         "search_text" => search_text(sb, args, cancel),
+        "outline_file" => outline_file(sb, args),
         "read_file" => read_file(sb, args),
         other => Err(format!(
-            "'{other}' 도구는 없습니다. 사용할 수 있는 도구는 list_dir, find_files, search_text, read_file(모두 읽기 전용)뿐입니다. \
+            "'{other}' 도구는 없습니다. 사용할 수 있는 도구는 list_dir, find_files, search_text, outline_file, read_file(모두 읽기 전용)뿐입니다. \
              파일 저장은 앱이 처리하므로, 문서를 작성하는 단계라면 최종 답변에 문서 본문만 출력하세요."
         )),
     };
@@ -491,6 +509,29 @@ fn search_text(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String
     }
     out.push_str(note);
     Ok(out)
+}
+
+fn outline_file(sb: &Sandbox, args: &Value) -> Result<String, String> {
+    let path = sb.resolve(Some(str_arg(args, "path").ok_or("path 인자가 필요합니다.")?))?;
+    if !path.is_file() {
+        return Err(format!(
+            "파일이 아닙니다: {} — 폴더 구조는 list_dir·find_files로 보세요.",
+            display_path(&path)
+        ));
+    }
+    let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if len > codemap::OUTLINE_FILE_MAX {
+        return Err(format!(
+            "파일이 너무 커서 아웃라인을 만들지 않습니다({len} bytes): {} — search_text로 위치를 찾고 read_file로 범위만 읽으세요.",
+            display_path(&path)
+        ));
+    }
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    if is_binary(&bytes) {
+        return Err(format!("바이너리 파일은 아웃라인을 만들 수 없습니다: {}", display_path(&path)));
+    }
+    let o = codemap::outline(codemap::lang_for(&path), &bytes);
+    Ok(codemap::render_outline(&o, &display_path(&path), RESULT_CHARS.saturating_sub(200)))
 }
 
 fn read_file(sb: &Sandbox, args: &Value) -> Result<String, String> {
@@ -733,6 +774,50 @@ mod tests {
     }
 
     #[test]
+    fn outline_file_shows_the_skeleton() {
+        let root = tree("outline");
+        fs::write(
+            root.join("src").join("OrderController.java"),
+            "@RestController\npublic class OrderController {\n  @GetMapping(\"/o\")\n  public String list() {\n    return \"x\";\n  }\n}\n",
+        )
+        .unwrap();
+        let out = run_tool("outline_file", &json!({ "path": "src/OrderController.java" }), &sb(&root), &no_cancel());
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("Java 아웃라인"), "{}", out.content);
+        assert!(out.content.contains("▶ L1-7 @RestController public class OrderController"), "{}", out.content);
+        assert!(out.content.contains("L3-6 @GetMapping(\"/o\") public String list()"), "{}", out.content);
+        assert!(!out.content.contains("return"), "bodies are not shown");
+        // Mapper XML → statements + tables.
+        let xml = run_tool("outline_file", &json!({ "path": "src/OrderMapper.xml" }), &sb(&root), &no_cancel());
+        assert!(xml.content.contains("select id=find") && xml.content.contains("ORDER_TABLE(R)"), "{}", xml.content);
+        // Folders, binaries and secrets are refused.
+        assert!(run_tool("outline_file", &json!({ "path": "src" }), &sb(&root), &no_cancel()).is_error);
+        assert!(run_tool("outline_file", &json!({ "path": "data.bin" }), &sb(&root), &no_cancel()).is_error);
+        assert!(run_tool("outline_file", &json!({ "path": ".env" }), &sb(&root), &no_cancel()).content.contains("보안상"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn relative_paths_fall_back_to_the_other_roots() {
+        let work = tree("rel-work");
+        let code = tree("rel-code");
+        fs::create_dir_all(code.join("only").join("here")).unwrap();
+        fs::write(code.join("only").join("here").join("Svc.java"), "class Svc {}\n").unwrap();
+        let s = Sandbox::new(&work.to_string_lossy(), &[code.to_string_lossy().into_owned()]);
+        // Exists only under the codebase root → resolved there.
+        let p = s.resolve(Some("only/here/Svc.java")).unwrap();
+        assert!(p.starts_with(fs::canonicalize(&code).unwrap()), "{}", p.display());
+        // Exists in both → the cwd (first root) wins.
+        let readme = s.resolve(Some("README.md")).unwrap();
+        assert!(readme.starts_with(fs::canonicalize(&work).unwrap()));
+        // Missing everywhere → the usual not-found error; `..` still can't escape.
+        assert!(s.resolve(Some("nope.txt")).unwrap_err().contains("찾을 수 없습니다"));
+        assert!(s.resolve(Some("..")).unwrap_err().contains("허용된 폴더 밖"));
+        let _ = fs::remove_dir_all(&work);
+        let _ = fs::remove_dir_all(&code);
+    }
+
+    #[test]
     fn tool_specs_are_well_formed() {
         let specs = tool_specs();
         let names: Vec<&str> = specs
@@ -741,7 +826,7 @@ mod tests {
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["list_dir", "find_files", "search_text", "read_file"]);
+        assert_eq!(names, vec!["list_dir", "find_files", "search_text", "outline_file", "read_file"]);
         for t in specs.as_array().unwrap() {
             assert_eq!(t["type"], "function");
             assert!(t["function"]["parameters"].is_object(), "parameters must be a JSON Schema object");

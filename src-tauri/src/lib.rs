@@ -1,4 +1,5 @@
 mod agents;
+mod codemap;
 mod confluence;
 mod detect;
 mod exec;
