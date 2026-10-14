@@ -1961,3 +1961,27 @@
   대비 비용이 낮음) / `search_text` 확장(결과 형식·의미가 달라 모델이 혼동).
 - **한계**: 이름 기반이라 같은 이름의 다른 메서드(오버로드·다른 클래스)는 `Class.method` 축소로만 거른다. 리플렉션·XML 빈 주입·
   동적 SQL id는 잡히지 않는다.
+
+---
+
+### D90. 코드베이스별 Learnings 캐시 — 프로젝트 간 분석 재활용 + 변경 파일 신선도 (D86 확장)
+- **배경**: D86의 Learnings 인계는 한 워크플로우 안에서만 동작한다. 같은 코드베이스로 새 프로젝트(새 요청)를 시작하면 오리엔테이션
+  분석을 처음부터 다시 했다. Trail-Code는 `.trail/learnings/`를 저장소에 커밋해 재사용하지만, 이 앱의 코드베이스 폴더는 **읽기 전용
+  불변식**(D45/D52)이라 그 안에 쓸 수 없다. 사용자 확정 — 프로젝트 내 인계 + 코드베이스별 캐시.
+- **결정(저장소)**: 새 모듈 `codebase_cache.rs` — `~/.operation-wizard/codebases/<fnv1a64(정규화 경로)>/`에 `learnings-<category>.md` +
+  `meta.json`(원 경로, 카테고리별 `updatedAt`·`sourceProjectId`). 경로 정규화는 구분자 통일·끝 구분자 제거·소문자(Windows 경로는
+  대소문자 무시). **로드 시 원 경로를 대조**해 해시 충돌이면 쓰지도 읽지도 않는다. 카테고리는 `settings::CATEGORIES`로 검증(경로 주입 차단),
+  본문 6000자 상한. 커맨드 `get_codebase_learnings(codebasePath, category)`(async + spawn_blocking)·`save_codebase_learnings(…, text,
+  projectId)`. 카테고리별로 분리하는 이유: plan의 오리엔테이션과 query/change의 참조 SQL 탐색 Learnings는 관점이 달라 서로 덮으면 손실.
+- **결정(신선도)**: 로드할 때 코드베이스를 walk해(공유 walker, build 산출물 제외, **3초 상한** — 넘으면 "이상"으로 표시) 저장 이후
+  수정된 파일 수와 최대 8개 샘플을 함께 돌려준다. Trail-Code의 `check_freshness`에 해당하며, 에이전트는 이 목록을 "다시 확인할 곳"으로 쓴다.
+- **결정(주입·저장)**: codebase 단계 preflight가 저장소 지도(D88)와 **병렬로** 캐시를 조회하고, 있으면 `[이전 분석 Learnings — 같은
+  코드베이스를 YYYY-MM-DD에 분석한 결과, 이후 변경 파일 N개: …]` + "처음부터 다시 탐색하지 말고 변경 파일과 이번 요청 관련 영역만 확인·
+  갱신, 이번 분석서의 Learnings에는 갱신된 전체 내용을 다시 쓸 것"을 지도보다 앞에 붙인다. 채팅에는 재활용 안내 노트를 남긴다(preflight
+  결과의 `note` — fetch 노트 제거 후 추가). 저장: **orient 단계**(`codeAnalysisMode==="orient"`)의 Learnings를 추출 즉시
+  `save_codebase_learnings`로 갱신(원격은 메모리 본문, CLI는 end에서 바로 `readFile` — 다음 단계가 rag/knowledge라 인계 경로가 읽지 않을
+  수 있으므로). 저장 실패는 무시(부수효과).
+- **대안 기각**: 코드베이스 안 `.learnings/` 파일(읽기 전용 불변식 위반) / 지식 베이스 artifact(D59)로 저장(사용자 노트와 섞이고 코드베이스
+  키·신선도 개념이 없음) / git HEAD로만 신선도 판단(SVN·비-VCS 레거시가 많음 — mtime walk가 보편적) / 카테고리 무관 단일 캐시(관점 손실).
+- **한계**: mtime 기반이라 체크아웃·복사로 mtime이 바뀌면 "변경"으로 과대 집계된다(보수적 방향). 같은 경로에 다른 저장소를 다시
+  체크아웃하면 이전 Learnings가 붙을 수 있다(변경 파일 수가 크게 나와 에이전트가 재검증). 캐시 삭제 UI는 아직 없다(폴더 삭제로 초기화).

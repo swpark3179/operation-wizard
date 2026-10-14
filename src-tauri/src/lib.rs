@@ -1,4 +1,5 @@
 mod agents;
+mod codebase_cache;
 mod codemap;
 mod confluence;
 mod detect;
@@ -397,6 +398,8 @@ pub fn run() {
             files::read_file,
             files::write_file,
             codemap::codebase_map,
+            codebase_cache::get_codebase_learnings,
+            codebase_cache::save_codebase_learnings,
             projects::ensure_project,
             projects::save_session,
             projects::list_sessions,

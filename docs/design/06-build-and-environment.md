@@ -93,7 +93,7 @@ release 빌드는 콘솔이 없어(`windows_subsystem = "windows"`) 부팅 실�
 D72에서 홈 루트로 통일). 필요한 값을 복사해 복구한 뒤 `.corrupt` 파일을 지우면 된다.
 
 > 참고(D72): 앱의 모든 설정·데이터는 `%USERPROFILE%\.operation-wizard\` 하위에 있다
-> (`settings.json`, `projects\`, `knowledge\`, `startup-error.log`). 과거 버전은 `settings.json`만
+> (`settings.json`, `projects\`, `knowledge\`, `codebases\`(코드베이스별 분석 Learnings 캐시 — D90), `startup-error.log`). 과거 버전은 `settings.json`만
 > `%APPDATA%\com.shi.operationwizard\`에 두었는데, 그 파일이 있으면 첫 실행 시 홈 루트로 자동 복사된다
 > (원본은 그대로 남음).
 
