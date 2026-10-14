@@ -1823,3 +1823,48 @@
   백엔드 `settings.rs` 검증 무변경(파생은 프론트 전용), **신규 의존성 0**.
 - **대안 기각**: 기본값에만 `output:"file"` 추가(stored override 사용자에게 미반영) / 파생을 모든 kind로 확대
   (search 단계 등 file 없는 단계에는 무의미, 범위 최소화).
+
+---
+
+### D86. 내장 코드 분석 방법론(Trail-Code식) + Learnings 계약 + 단계 간 산출물 인계 (D40/D52/D78 확장)
+- **배경**: 코드베이스·소스코드 분석 단계는 "읽기 전용으로 탐색해 분석서를 쓰라" 수준의 지시뿐이라, 에이전트가 파일
+  본문을 통째로 읽어 토큰을 낭비하고 단계마다 같은 코드베이스를 다시 탐색했다. 후속 단계는 "앞 단계의…"라고만 말할 뿐
+  산출물을 경로로 참조하지 않았고, 세션리스 에이전트(gemini/FabriX)는 `buildTranscript`가 자동 진행 단계의 wire(system
+  메시지)를 건너뛰며 CLI 에이전트의 응답은 한두 문장 보고뿐이라 **분석 내용이 사실상 다음 단계로 전달되지 않았다**.
+  사용자 요구 — Trail-Code(github.com/trailhq/Trail-Code: tree-sitter 코드 맵·스켈레톤·허브·호출 그래프·Blast
+  Radius·`.trail/learnings/`) 방법론을 분석 단계에 적용해 토큰을 줄이고 맥락 정확도를 높인다.
+- **결정(방법론 = 내장 런타임 주입, 사용자 확정)**: `src/lib/codeMethod.ts` — `codeAnalysisMode(step)`이 armed 단계의
+  역할을 정한다(`kind==="codebase"` → **orient**: 저장소 오리엔테이션 / id `source-analysis` 또는 `source-analysis`
+  스킬을 가진 생성형 단계 → **focus**: 변경 대상 심층). `codeMethodBody(mode, agentId)`가 ① 스켈레톤 우선(선언부·
+  입출력·어노테이션·Javadoc 먼저, 본문은 핵심 심볼만) ② 허브·진입점 우선(진입점에서 Controller→Service→DAO/Mapper→
+  SQL→테이블로 범위 축소) ③ Callers/Callees·Blast Radius ④ 사실만 기록 + **에이전트별 탐색 요령**(claude=Grep 정규식·
+  Read offset/limit, FabriX=`search_text`가 리터럴임을 전제한 앵커 검색 + `read_file` 범위 읽기, codex=셸 검색 명령,
+  그 외 일반 문구)을 만든다. 주입은 D78 프롬프트 최적화와 같은 **레지스트리 밖 코드 상수**(전체 교체형 override 사용자에게도
+  적용, Flows에서 편집 불가). wire 위치는 `[프롬프트 최적화 → 방법론 → 단계 스킬 → 지시문 …]`. 세션형은 합성 id
+  `__builtin:code-method:<mode>`로 `injectedSkillIdsRef` dedupe(기존 `injectedNow`/`unwindSkills` 되감기를 그대로 탐),
+  세션리스는 매번 주입. `settings.rs::validate_skills`가 `__builtin:` 접두사 사용자 스킬 id를 거부해 충돌을 막는다.
+- **결정(Learnings 계약 — 앱이 파싱하는 유일한 부분)**: 방법론이 산출 문서 **맨 끝**에 `## Learnings for Next Steps` +
+  `[Architecture Pattern]`/`[Core Flow]`(백틱 친 코드베이스 상대경로 인용)/`[Key Invariants/Decisions]`를 강제한다.
+  `src/lib/learnings.ts::extractLearnings`가 펜스 밖 헤딩(Learnings/학습)부터 같은/상위 레벨 다음 헤딩까지를 3000자
+  상한으로 추출(헤딩 없으면 `[Architecture Pattern]` 라벨부터 폴백). 문서의 나머지 구성(Repository Map / Key Interfaces /
+  Dependency Graph / Learnings 4섹션)은 **편집 가능한 기본 지시문**(`CODEBASE_STEP`)에 두고, `SOURCE_ANALYSIS_STEP`은
+  `docs/codebase-analysis.md`를 경로로 명시해 재활용 + Callers/Callees 표·Blast Radius(핵심 파일 목록)를 요구하도록
+  개정했다(오리엔테이션↔심층의 역할 분리). 하드코딩 문서 형식은 사용자 편집 지시문과 충돌하므로 내장에 넣지 않는다.
+- **결정(단계 간 인계)**: ChatPanel `producedDocsRef`(런타임 단계 index → 생성 파일 절대경로 + Learnings). end 분기의
+  생성형 성공 경로가 채운다 — **원격(FabriX)**은 앱이 저장하는 본문이 곧 문서이므로 메모리에서 즉시 추출(`writeFile`은
+  await되지 않으므로 다시 읽지 않음), **CLI**는 `undefined`(미독)로 두고 다음 단계 preflight가 지연 `readFile`해 추출·캐시
+  (실패=없음). rag/knowledge가 아닌 이후 생성형 단계의 `stepPreflight`가 `formatHandoffContext`로 `[앞 단계 산출물 —
+  절대경로]` 인덱스 + `[앞 단계 코드 분석 Learnings]` 발췌를 기존 preflight 컨텍스트 슬롯에 주입한다(wire 조립 무변경).
+  **fail-open — 인계 preflight는 절대 skip하지 않는다**(skip 체인이 단계를 조용히 건너뛰지 않도록). html 렌더 서브스텝은
+  직전 산출물만 재표현하므로 제외. 모든 에이전트에 주입한다(세션형은 압축 후 재고정, FabriX는 중복이지만 소량).
+- **결정(동시성)**: preflight의 모든 await를 busy 구간(`setStreaming(true)`) 안에서 실행한다 — 기존 `fetches`를
+  `busy`(rag/knowledge 또는 인계 파일 읽기 필요)와 `fetchNote`(네트워크 fetch만 채팅 안내)로 분리. `send()`의 가드는 렌더
+  시점 `streaming`뿐이라 busy 밖 await는 수동 전송/`retry()`가 두 번째 실행을 띄울 수 있다. Stop은 기존
+  `preflightAbortRef` 경로(halt → 일반 대화)를 그대로 탄다.
+- **대안 기각**: 방법론을 기본 스킬로(D40) — 사용자가 내장 주입 선택, override 사용자 미적용 / `learningsPendingRef`로
+  end에서 읽기를 시작해 send에서 await — 같은 턴(preflight)에서 해결하면 상태가 줄고 D68 자동 재시도·수동 재시도도
+  자연히 처리 / Learnings를 세션리스에만 주입 — 분기 비용 대비 이득 없음 / 4섹션 형식 내장 강제 — 편집 지시문과 충돌.
+- **하위호환/한계**: 프론트 전용(백엔드는 `validate_skills` 한 줄), **신규 의존성 0**. 이미 plan 워크플로우를 저장한
+  사용자는 개정된 기본 지시문을 "기본값으로 되돌리기"로만 받지만, 방법론·Learnings 계약·인계는 런타임이라 즉시 적용.
+  plain(opencode/antigravity)·세션리스가 계약을 안 지키면 Learnings 없음 → 산출물 인덱스만 주입(degrade). 후속:
+  정적 분석기(스켈레톤 추출·저장소 지도)와 코드베이스별 Learnings 캐시는 별도 결정으로 이어진다.

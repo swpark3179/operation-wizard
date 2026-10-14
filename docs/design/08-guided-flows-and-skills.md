@@ -30,12 +30,15 @@
 ```
 wire = [ (첫 실제 작업 턴 1회) 내장 프롬프트 최적화 스킬(PROMPT_OPTIMIZER_SKILL — 레지스트리 밖,
            스텝 arming과 독립; 스킵 재귀·실패 시 unwindSkills로 되감김 — D78),
+         (codebase / source-analysis 단계 armed면) 내장 코드 분석 방법론(codeMethodBody — 레지스트리 밖,
+           orient/focus, 에이전트별 탐색 요령 + Learnings 계약; 세션형은 모드당 1회 — D86),
          (단계 armed면) step.skillIds의 스킬 body들(세션형은 대화당 1회;
            스킬에 dir가 있으면 "[스킬 리소스 폴더] <dir>" 안내 부착 + extraDirs 등록),
          (단계 armed면) step.instruction,
          (생성형 단계면) 경로 컨텍스트(pathContext — 작업 폴더/코드베이스 절대경로 +
            탐색 시작점 지시; codebase 단계는 "이 폴더에서 탐색 시작" 강제 — D52),
          (기반 단계면) preflight 컨텍스트(RAG 발췌 / 지식 본문),
+         (그 외 생성형 단계면) 앞 단계 인계(산출물 절대경로 인덱스 + 코드 분석 Learnings 발췌 — D86),
          prompt ].join("\n\n")
 ```
 프리필 턴만 예외로 wire = `prefillInstruction(...)`이고, **스텝 커서/스킬 주입 이력/세션/영속화를 건드리지
@@ -191,6 +194,20 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
    **별도 수정 없이 분류 후보에 포함**된다. 분류 판단 기준을 다듬으려면 `src/lib/categorize.ts`의
    `categorizeInstruction`(카테고리별 한 줄 판단 기준)만 수정한다.
 
+### H. 코드 분석 방법론·Learnings 인계 조정 (D86)
+- **방법론 본문**(스켈레톤 우선·허브/진입점·Callers/Callees·Blast Radius + 에이전트별 탐색 요령)은
+  `src/lib/codeMethod.ts`의 `codeMethodBody(mode, agentId)`에 있다(코드 상수 — Flows에서 편집 불가, 저장된
+  override 사용자에게도 적용). 어떤 단계에 붙는지는 `codeAnalysisMode(step)`이 정한다: `kind==="codebase"` →
+  orient(저장소 오리엔테이션), id `source-analysis` 또는 `source-analysis` 스킬을 가진 생성형 단계 → focus
+  (변경 대상 심층). 사용자 정의 단계에 focus를 붙이려면 그 단계에 `source-analysis` 스킬을 연결한다.
+- **Learnings 계약**: 방법론이 산출 문서 맨 끝에 `## Learnings for Next Steps`(+ `[Architecture Pattern]`/
+  `[Core Flow]`/`[Key Invariants/Decisions]`)를 강제하고, `src/lib/learnings.ts`의 `extractLearnings`가 펜스 밖
+  헤딩(Learnings/학습)부터 같은/상위 레벨 다음 헤딩까지를 3000자 상한으로 뽑는다(헤딩이 없으면
+  `[Architecture Pattern]` 라벨부터 폴백). 헤딩 문구를 바꾸면 두 파일을 함께 고친다.
+- **인계 주입**: `formatHandoffContext`가 `[앞 단계 산출물 — 절대경로]` + Learnings 발췌를 만들고, ChatPanel의
+  preflight가 rag/knowledge를 제외한 이후 생성형 단계에 붙인다. 문서 구성(Repository Map 등 4섹션)은 편집 가능한
+  단계 지시문(`CODEBASE_STEP`/`SOURCE_ANALYSIS_STEP`)에 있다.
+
 ### G. 카테고리 자동 분류(⓪) 동작 조정 (D81)
 - 홈 컴포저 프롬프트로 시작할 때만 실행되는 격리 분류 턴. 지시문·파서·실행은 `src/lib/categorize.ts`
   (`categorizeInstruction`/`parseCategory`/`classifyCategory` — `ragRelevance.ts` 미러)에 있다.
@@ -203,15 +220,18 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
 ## 주입 지점 지도 (`ChatPanel`)
 
 - **wire 조립**: `send()` — workdir 확정(`ensure_project`)을 먼저 수행한 뒤(D52)
-  `[step.skillIds의 스킬 body들(armed, 세션형 dedupe; dir 안내 부착) → step.instruction(단계 armed) →
+  `[내장 프롬프트 최적화(D78) → 내장 코드 분석 방법론(codebase/source-analysis 단계 — D86) →
+  step.skillIds의 스킬 body들(armed, 세션형 dedupe; dir 안내 부착) → step.instruction(단계 armed) →
   경로 컨텍스트(`pathContext`, 생성형 단계 — 작업 폴더/코드베이스 절대경로 + 탐색 시작점 지시) →
-  preflight 컨텍스트(기반 단계) → prompt]`. 프리필은 `prefillInstruction`. 단계/스킬은
+  preflight 컨텍스트(기반 단계 / 그 외 생성형 단계는 앞 단계 인계 — D86) → prompt]`. 프리필은 `prefillInstruction`. 단계/스킬은
   `runtimeWorkflowFor(category, settings)`/`resolveSkills(settings)`로 해석해 **마운트 시 고정**.
   매 턴 `RunArgs.extraDirs = [codebasePath, ...주입된 스킬 dir들, ...지식 artifacts 루트(D59)]`
   (claude `--add-dir`, gemini `--include-directories`; 원격 FabriX는 `cwd`와 함께 읽기 전용 도구 샌드박스 —
   D84). 텍스트 전용 격리 턴(프리필·카테고리 분류·RAG 관련성)은 `RunArgs.tools=false`로 FabriX 도구를 끈다. `send()`는
   처리 여부를 boolean으로 반환하고 폼 제출/자동전진 nonce는 성공 시에만 소비된다(D55).
-- **preflight**: `stepPreflight(step, cwd)` — wire 조립 전 비동기 훅. `rag`=`rag_search` 후
+- **preflight**: `stepPreflight(step, cwd, stepIdx)` — wire 조립 전 비동기 훅(모든 await는 busy 구간 안 — D86).
+  rag/knowledge가 아닌 생성형 단계는 **앞 단계 인계**(`producedDocsBefore` → `formatHandoffContext`; CLI 산출
+  문서는 첫 사용 시 `readFile`로 Learnings 추출·캐시, 실패해도 skip 없음)를 받는다. `rag`=`rag_search` 후
   **관련성 판단 턴**(D70, `judgeRagRelevance` — 격리 실행): 검색 결과가 이번 작업과 관련 없다고 판단되면
   건너뛰고(패널·발췌 주입 없음), 관련 있으면 판단 턴이 정리한 섹션을 캔버스 '검색 결과' 탭
   (`ragCuratedHtml`)에 표시 + 원본 발췌를 wire에 주입(판단 실패=`null`이면 fail-open으로 원본 패널·주입).

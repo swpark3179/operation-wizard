@@ -429,9 +429,15 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   `WF`/스킬 맵은 **마운트 시 고정**(remount가 리셋). 로드 세션은 커서를 끝으로 시작 → 일반
   대화(재주입 없음). `send()`는 **workdir 확정(`ensure_project`)을 preflight·wire 조립보다 먼저** 수행해
   첫 턴에도 절대경로를 알 수 있다(D52). wire 조립은 `[내장 프롬프트 최적화 스킬(첫 실제 작업 턴 1회,
-  최상단 — D78) → step.skillIds의 스킬 body들(armed, 세션형 dedupe; dir 있으면 리소스 폴더 안내 부착) →
+  최상단 — D78) → **내장 코드 분석 방법론**(armed codebase 단계=orient / source-analysis 단계=focus, 레지스트리
+  밖·세션형 dedupe — D86) → step.skillIds의 스킬 body들(armed, 세션형 dedupe; dir 있으면 리소스 폴더 안내 부착) →
   step.instruction(armed) → 경로 컨텍스트(`pathContext` — 생성형 단계: 작업 폴더/코드베이스 절대경로 +
-  탐색 시작점 지시, D52) → preflight 컨텍스트(기반 단계) → prompt]`.
+  탐색 시작점 지시, D52) → preflight 컨텍스트(기반 단계 / 그 외 생성형 단계는 **앞 단계 산출물 인계** — D86) →
+  prompt]`. **단계 인계(D86)**: `producedDocsRef`(런타임 단계 index → 생성 파일 절대경로 + 코드 분석 단계의
+  `## Learnings for Next Steps` 발췌)를 end 분기가 채우고(원격은 메모리 본문에서 즉시 추출, CLI는 다음 단계
+  preflight가 파일을 지연 `readFile`), rag/knowledge가 아닌 이후 생성형 단계의 preflight가 `[앞 단계 산출물 —
+  절대경로]` 인덱스 + Learnings를 주입한다(실패 시 fail-open, 단계 skip 없음; html 렌더 서브스텝 제외).
+  preflight 중의 모든 await는 busy 구간(`setStreaming(true)` — Stop 동작·동시 전송 차단) 안에서 실행된다.
   메시지 상태 변경은 전부 **동기 커밋 헬퍼(`mutateMessages`)** 경유(stale ref로 인한 응답 소실 방지,
   D55); 폼 제출/자동전진 nonce는 `send()`가 턴을 실제로 처리했을 때만 소비된다(스트리밍 중 제출은
   유실되지 않고 재시도 — D55). 커서와 나란히 **`stepProgress` state**(단계별 진행 상태)가 갱신되어

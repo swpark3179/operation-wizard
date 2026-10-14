@@ -24,6 +24,7 @@ import {
   listSessions,
   loadSession,
   ragSearch,
+  readFile,
   runAgent,
   saveSession,
   setProjectCodebase,
@@ -41,6 +42,8 @@ import { judgeRagRelevance, type RagVerdict } from "../lib/ragRelevance";
 import { optionsFor, REQUIREMENT_QUESTION } from "../lib/options";
 import { PROMPT_NOTE, PROMPT_OPTIMIZER_SKILL, parsePromptBlock, stripPromptBlock } from "../lib/promptCraft";
 import { resolveSkills } from "../lib/skills";
+import { codeAnalysisMode, codeMethodBody, codeMethodSkillId } from "../lib/codeMethod";
+import { extractLearnings, formatHandoffContext, type ProducedDoc } from "../lib/learnings";
 import { isGenerative, progressLabel, runtimeWorkflowFor } from "../lib/workflow";
 import type {
   AgentInfo,
@@ -329,6 +332,13 @@ export function ChatPanel({
   // knowledge — once per session, dismissible.
   const producedFileRef = useRef(false);
   const completionFiredRef = useRef(false);
+  // Step hand-off (D86): runtime step index → the absolute path of the file it
+  // produced (+ its extracted Learnings for code-analysis steps; `undefined` =
+  // not read yet — CLI docs are read lazily by the next step's preflight, a
+  // remote doc's Learnings come from the in-memory reply). Later generative
+  // steps get this index + the Learnings injected, so they reuse the analysis
+  // instead of re-exploring (sessionless transcripts drop the step wires).
+  const producedDocsRef = useRef(new Map<number, { path: string; learnings?: string | null }>());
   const [kbProposal, setKbProposal] = useState(false);
   // Auto-advance: a generative step queues the next step's turn here; a
   // nonce-guarded effect fires it once (never call send() from the stream
@@ -642,6 +652,13 @@ export function ChatPanel({
                     stripPromptBlock(lastAssistantContent(messagesRef.current), "").replace(PROMPT_NOTE, ""),
                   );
                 if (body) {
+                  // Hand-off (D86): the reply IS the document — take its
+                  // Learnings now (the write below is not awaited, so the next
+                  // step must not read the file back).
+                  producedDocsRef.current.set(stepIdx, {
+                    path: abs,
+                    learnings: codeAnalysisMode(step) ? extractLearnings(body) : null,
+                  });
                   void writeFile(abs, body)
                     .then(() => onOpenFile(abs))
                     .catch((e) =>
@@ -651,7 +668,13 @@ export function ChatPanel({
                   mutateMessages((prev) => [...prev, note("응답이 비어 있어 산출물 파일을 저장하지 않았습니다.")]);
                 }
               } else {
-                onOpenFile(abs); // CLI agents wrote the file with their own tools
+                // CLI agents wrote the file with their own tools; its Learnings
+                // are read lazily by the next step's preflight (D86).
+                producedDocsRef.current.set(stepIdx, {
+                  path: abs,
+                  learnings: codeAnalysisMode(step) ? undefined : null,
+                });
+                onOpenFile(abs);
               }
             }
             const nextIdx = stepIdx + 1;
@@ -767,13 +790,14 @@ export function ChatPanel({
     ]);
   };
 
-  /** Foundation-step preflight (D44): resolve the extra wire context for this
-   * turn, or decide to skip the step (unconfigured / empty / failed — the
-   * foundation never blocks the flow). `codebase` is synchronous; `rag` and
-   * `knowledge` fetch before the agent turn. */
+  /** Step preflight (D44/D86): resolve the extra wire context for this turn,
+   * or decide to skip the step (unconfigured / empty / failed — the foundation
+   * never blocks the flow). `rag` and `knowledge` fetch before the agent turn;
+   * other generative steps get the earlier steps' hand-off (never skipped). */
   const stepPreflight = async (
     step: StepDef,
     cwd: string,
+    stepIdx: number,
   ): Promise<{ context?: string; skip?: string }> => {
     if (step.kind === "rag") {
       if (!settings?.rag?.endpoint?.trim()) {
@@ -829,8 +853,40 @@ export function ChatPanel({
         return { skip: `지식 베이스를 읽지 못해 단계를 건너뜁니다 — ${String(e)}` };
       }
     }
+    // Every other generative step (D86): hand off what earlier steps produced
+    // — the document index + the code-analysis Learnings. Fail-open (never
+    // skip): a missing/unreadable doc just contributes no Learnings. The HTML
+    // render sub-step only re-presents its predecessor, so it gets none.
+    if (isGenerative(step.kind) && !step.skillIds.includes("html-render")) {
+      const context = formatHandoffContext(await producedDocsBefore(stepIdx));
+      return context ? { context } : {};
+    }
     return {};
   };
+
+  /** Documents produced by the steps before `stepIdx`, in step order. Reads a
+   * CLI-written code-analysis doc on first use to extract its Learnings
+   * (cached; a read failure caches "none"). */
+  const producedDocsBefore = async (stepIdx: number): Promise<ProducedDoc[]> => {
+    const out: ProducedDoc[] = [];
+    const entries = [...producedDocsRef.current.entries()]
+      .filter(([i]) => i < stepIdx)
+      .sort(([a], [b]) => a - b);
+    for (const [i, doc] of entries) {
+      if (doc.learnings === undefined) {
+        doc.learnings = await readFile(doc.path)
+          .then((md) => extractLearnings(md))
+          .catch(() => null);
+      }
+      out.push({ step: WF[i], path: doc.path, learnings: doc.learnings });
+    }
+    return out;
+  };
+
+  /** Whether the hand-off preflight for `stepIdx` must read a file (→ the
+   * preflight runs inside the busy bracket, so a concurrent send can't spawn). */
+  const handoffNeedsRead = (stepIdx: number): boolean =>
+    [...producedDocsRef.current.entries()].some(([i, d]) => i < stepIdx && d.learnings === undefined);
 
   /** Absolute-path context injected on armed generative turns (D52): where
    * outputs go (workdir) and — when a codebase folder was selected — where the
@@ -943,6 +999,21 @@ export function ChatPanel({
         skillBodies.push(body);
       }
     }
+    // Built-in code-analysis method (D86): on an armed codebase / source-analysis
+    // turn, above the step skills — outside the registry so it applies even to
+    // saved overrides. Session agents get each mode once (synthetic id rides
+    // the same dedupe + unwind as registry skills); sessionless re-see it.
+    const codeMode = stepInject ? codeAnalysisMode(step) : null;
+    if (codeMode) {
+      const id = codeMethodSkillId(codeMode);
+      if (!sessionCapable || !injectedSkillIdsRef.current.has(id)) {
+        if (sessionCapable) {
+          injectedSkillIdsRef.current.add(id);
+          injectedNow.push(id);
+        }
+        skillBodies.unshift(codeMethodBody(codeMode, agentId));
+      }
+    }
     // Built-in prompt-optimizer skill (D78): inject once on the first real work
     // turn, independent of step arming — so guide's skipped rag step doesn't
     // consume it; it rides the first turn that actually reaches the agent.
@@ -969,17 +1040,23 @@ export function ChatPanel({
     // agent turn, or skip the step without one (note + advance + chain on).
     let preflightContext = "";
     if (!isPrefill && stepInject && step) {
+      const stepIdx = stepIndexRef.current;
       const fetches = step.kind === "rag" || step.kind === "knowledge";
       const fetchNote = step.kind === "rag" ? "사내 문서 검색·관련성 확인 중…" : "지식 베이스 확인 중…";
+      // Any awaited I/O runs inside the busy bracket (streaming=true): Stop
+      // stays live and a concurrent manual send/retry can't spawn a second
+      // run. Only the network fetches show a chat note (D57); a local hand-off
+      // read (D86) is quick.
+      const busy = fetches || handoffNeedsRead(stepIdx);
+      if (busy) setStreaming(true);
       if (fetches) {
-        setStreaming(true); // Stop stays live during the fetch
         // Visible fetch feedback (D57): the network call can take a while
         // (HTTP timeout 120s) — announce it, then drop the transient note.
         mutateMessages((prev) => [...prev, note(fetchNote)]);
       }
-      const pf = await stepPreflight(step, cwd);
+      const pf = await stepPreflight(step, cwd, stepIdx);
+      if (busy) setStreaming(false);
       if (fetches) {
-        setStreaming(false);
         mutateMessages((prev) =>
           prev.length && prev[prev.length - 1].system && prev[prev.length - 1].content === fetchNote
             ? prev.slice(0, -1)
