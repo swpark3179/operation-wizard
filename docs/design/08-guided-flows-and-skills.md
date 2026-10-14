@@ -38,7 +38,7 @@ wire = [ (첫 실제 작업 턴 1회) 내장 프롬프트 최적화 스킬(PROMP
          (생성형 단계면) 경로 컨텍스트(pathContext — 작업 폴더/코드베이스 절대경로 +
            탐색 시작점 지시; codebase 단계는 "이 폴더에서 탐색 시작" 강제 — D52),
          (기반 단계면) preflight 컨텍스트(RAG 발췌 / 지식 본문),
-         (codebase 단계면) 사전 계산된 저장소 지도(codebase_map — 비AI 정적 분석, D88),
+         (codebase 단계면) 이전 프로젝트의 Learnings 캐시(+변경 파일 — D90) → 사전 계산된 저장소 지도(codebase_map — 비AI 정적 분석, D88),
          (그 외 생성형 단계면) 앞 단계 인계(산출물 절대경로 인덱스 + 코드 분석 Learnings 발췌 — D86),
          prompt ].join("\n\n")
 ```
@@ -234,7 +234,9 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
   rag/knowledge가 아닌 생성형 단계는 **앞 단계 인계**(`producedDocsBefore` → `formatHandoffContext`; CLI 산출
   문서는 첫 사용 시 `readFile`로 Learnings 추출·캐시, 실패해도 skip 없음)를 받는다. `codebase` 단계는 여기에 더해
   **저장소 지도**(`codebaseMap(codebasePath, focusTermsFrom(요청+답변))` — 앱의 비AI 정적 분석, D88)가 맨 앞에 붙는다
-  (plain 에이전트는 2k자로 축약, 실패 시 생략). `rag`=`rag_search` 후
+  (plain 에이전트는 2k자로 축약, 실패 시 생략). 같은 코드베이스로 이전 프로젝트가 분석한 적이 있으면 그 Learnings
+  캐시(`getCodebaseLearnings` — 저장 이후 변경 파일 수·샘플 포함)가 지도보다 앞에 붙고 채팅에 재활용 노트가 남는다. orient
+  단계의 Learnings는 추출 즉시 `saveCodebaseLearnings`로 카테고리별 캐시를 갱신한다(D90). `rag`=`rag_search` 후
   **관련성 판단 턴**(D70, `judgeRagRelevance` — 격리 실행): 검색 결과가 이번 작업과 관련 없다고 판단되면
   건너뛰고(패널·발췌 주입 없음), 관련 있으면 판단 턴이 정리한 섹션을 캔버스 '검색 결과' 탭
   (`ragCuratedHtml`)에 표시 + 원본 발췌를 wire에 주입(판단 실패=`null`이면 fail-open으로 원본 패널·주입).

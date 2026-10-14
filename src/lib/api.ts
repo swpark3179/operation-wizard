@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AgentInfo,
+  CodebaseLearnings,
   ConfluenceConfig,
   DetectedAgent,
   FabrixConfig,
@@ -184,6 +185,23 @@ export function writeFile(path: string, contents: string): Promise<void> {
  * request) are listed first when they hit statements/types/routes. */
 export function codebaseMap(root: string, focusTerms: string[]): Promise<string> {
   return invoke<string>("codebase_map", { root, focusTerms });
+}
+
+/** Learnings an earlier project saved for this codebase + category, with the
+ * files changed since (D90). `null` when nothing is cached. */
+export function getCodebaseLearnings(codebasePath: string, category: string): Promise<CodebaseLearnings | null> {
+  return invoke<CodebaseLearnings | null>("get_codebase_learnings", { codebasePath, category });
+}
+
+/** Save an orientation step's Learnings for later projects on the same
+ * codebase (`~/.operation-wizard/codebases/` — never the codebase folder). */
+export function saveCodebaseLearnings(
+  codebasePath: string,
+  category: string,
+  text: string,
+  projectId: string,
+): Promise<void> {
+  return invoke("save_codebase_learnings", { codebasePath, category, text, projectId });
 }
 
 // ── Conversation persistence (projects/sessions) ─────────────────────────────

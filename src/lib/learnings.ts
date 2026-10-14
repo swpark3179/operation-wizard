@@ -5,7 +5,7 @@
 // the analysis instead of re-exploring the codebase (and sessionless agents,
 // whose transcript skips the auto-advanced step wires, keep the context).
 
-import type { StepDef } from "./types";
+import type { CodebaseLearnings, StepDef } from "./types";
 
 /** Per-step cap on the injected Learnings excerpt. */
 export const LEARNINGS_MAX = 3000;
@@ -93,4 +93,31 @@ export function formatHandoffContext(docs: ProducedDoc[]): string {
     );
   }
   return parts.join("\n\n");
+}
+
+function changedNote(c: CodebaseLearnings): string {
+  if (c.changedCount === 0) return "이후 변경된 파일 없음";
+  const sample = c.changedSample.length ? `: ${c.changedSample.join(", ")}` : "";
+  return `이후 변경 파일 ${c.changedCount}개${c.changedCapped ? " 이상" : ""}${sample}`;
+}
+
+function savedDate(c: CodebaseLearnings): string {
+  return c.updatedAt ? new Date(c.updatedAt).toISOString().slice(0, 10) : "?";
+}
+
+/** Wire context for Learnings an earlier project cached for this codebase
+ * (D90): start from them, re-check only what changed / what this request
+ * touches, and write the refreshed full Learnings again. */
+export function formatCachedLearnings(c: CodebaseLearnings): string {
+  return [
+    `[이전 분석 Learnings — 같은 코드베이스를 ${savedDate(c)}에 분석한 결과, ${changedNote(c)}]`,
+    c.text.trim(),
+    "이 내용을 출발점으로 삼아 저장소를 처음부터 다시 탐색하지 말고, 변경된 파일과 이번 요청 관련 영역만 확인·갱신하세요. " +
+      "이번 분석서의 Learnings 섹션에는 갱신된 전체 내용을 다시 쓰세요.",
+  ].join("\n");
+}
+
+/** The chat note shown when cached Learnings are reused. */
+export function cachedLearningsNote(c: CodebaseLearnings): string {
+  return `이전 코드베이스 분석(${savedDate(c)})의 Learnings를 출발점으로 재활용합니다 — ${changedNote(c)}.`;
 }

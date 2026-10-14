@@ -20,6 +20,7 @@ import {
   cancelRun,
   codebaseMap,
   ensureProject,
+  getCodebaseLearnings,
   getKnowledgeRoot,
   listKnowledge,
   listSessions,
@@ -27,6 +28,7 @@ import {
   ragSearch,
   readFile,
   runAgent,
+  saveCodebaseLearnings,
   saveSession,
   setProjectCodebase,
   writeFile,
@@ -44,7 +46,13 @@ import { optionsFor, REQUIREMENT_QUESTION } from "../lib/options";
 import { PROMPT_NOTE, PROMPT_OPTIMIZER_SKILL, parsePromptBlock, stripPromptBlock } from "../lib/promptCraft";
 import { resolveSkills } from "../lib/skills";
 import { codeAnalysisMode, codeMethodBody, codeMethodSkillId, focusTermsFrom } from "../lib/codeMethod";
-import { extractLearnings, formatHandoffContext, type ProducedDoc } from "../lib/learnings";
+import {
+  cachedLearningsNote,
+  extractLearnings,
+  formatCachedLearnings,
+  formatHandoffContext,
+  type ProducedDoc,
+} from "../lib/learnings";
 import { isGenerative, progressLabel, runtimeWorkflowFor } from "../lib/workflow";
 import type {
   AgentInfo,
@@ -663,10 +671,9 @@ export function ChatPanel({
                   // Hand-off (D86): the reply IS the document — take its
                   // Learnings now (the write below is not awaited, so the next
                   // step must not read the file back).
-                  producedDocsRef.current.set(stepIdx, {
-                    path: abs,
-                    learnings: codeAnalysisMode(step) ? extractLearnings(body) : null,
-                  });
+                  const learnings = codeAnalysisMode(step) ? extractLearnings(body) : null;
+                  producedDocsRef.current.set(stepIdx, { path: abs, learnings });
+                  if (codeAnalysisMode(step) === "orient") rememberCodebaseLearnings(learnings);
                   void writeFile(abs, body)
                     .then(() => onOpenFile(abs))
                     .catch((e) =>
@@ -678,10 +685,21 @@ export function ChatPanel({
               } else {
                 // CLI agents wrote the file with their own tools; its Learnings
                 // are read lazily by the next step's preflight (D86).
-                producedDocsRef.current.set(stepIdx, {
+                const entry: { path: string; learnings?: string | null } = {
                   path: abs,
                   learnings: codeAnalysisMode(step) ? undefined : null,
-                });
+                };
+                producedDocsRef.current.set(stepIdx, entry);
+                if (codeAnalysisMode(step) === "orient") {
+                  // Cache the orientation for later projects (D90) right away
+                  // (the next step may be rag/knowledge, which never reads it).
+                  void readFile(abs)
+                    .then((md) => {
+                      entry.learnings = extractLearnings(md);
+                      rememberCodebaseLearnings(entry.learnings);
+                    })
+                    .catch(() => {});
+                }
                 onOpenFile(abs);
               }
             }
@@ -806,7 +824,7 @@ export function ChatPanel({
     step: StepDef,
     cwd: string,
     stepIdx: number,
-  ): Promise<{ context?: string; skip?: string }> => {
+  ): Promise<{ context?: string; skip?: string; note?: string }> => {
     if (step.kind === "rag") {
       if (!settings?.rag?.endpoint?.trim()) {
         return { skip: "RAG가 설정되지 않아 사내 문서 검색 단계를 건너뜁니다. (지식 화면에서 등록)" };
@@ -867,29 +885,44 @@ export function ChatPanel({
     // render sub-step only re-presents its predecessor, so it gets none.
     if (isGenerative(step.kind) && !step.skillIds.includes("html-render")) {
       const parts = [formatHandoffContext(await producedDocsBefore(stepIdx))];
-      // Codebase step (D88): the app-computed repository map — the only way
-      // CLI agents (which can't call app tools) get the static analysis.
-      // Fail-open: no folder / an error just means no map.
+      let cacheNote: string | undefined;
+      // Codebase step: Learnings an earlier project cached for this codebase
+      // (D90) + the app-computed repository map (D88) — the only way CLI agents
+      // (which can't call app tools) get the static analysis. Both fetched in
+      // parallel; fail-open: no folder / an error just means none.
       const cb = codebasePathRef.current;
       if (step.kind === "codebase" && cb) {
-        try {
-          const terms = focusTermsFrom(`${seedPromptRef.current}\n${lastAnswersWireRef.current}`);
-          let map = await codebaseMap(cb, terms);
-          if (preflightAbortRef.current) return {};
-          if (PLAIN_AGENTS.includes(agentId) && map.length > PLAIN_MAP_MAX) {
-            map = `${map.slice(0, PLAIN_MAP_MAX)}\n…(프롬프트 길이 제한으로 저장소 지도 일부만 첨부)`;
-          }
+        const terms = focusTermsFrom(`${seedPromptRef.current}\n${lastAnswersWireRef.current}`);
+        const [map, cached] = await Promise.all([
+          codebaseMap(cb, terms).catch(() => null),
+          getCodebaseLearnings(cb, category).catch(() => null),
+        ]);
+        if (preflightAbortRef.current) return {};
+        if (map) {
+          const shown =
+            PLAIN_AGENTS.includes(agentId) && map.length > PLAIN_MAP_MAX
+              ? `${map.slice(0, PLAIN_MAP_MAX)}\n…(프롬프트 길이 제한으로 저장소 지도 일부만 첨부)`
+              : map;
           parts.unshift(
-            `[사전 계산된 저장소 지도 — 앱의 비AI 정적 분석 결과(근사치). 탐색 출발점으로 쓰고, 이번 요청의 핵심 경로는 실제 파일로 검증하세요]\n${map}`,
+            `[사전 계산된 저장소 지도 — 앱의 비AI 정적 분석 결과(근사치). 탐색 출발점으로 쓰고, 이번 요청의 핵심 경로는 실제 파일로 검증하세요]\n${shown}`,
           );
-        } catch {
-          /* no map — the step still runs */
+        }
+        if (cached) {
+          parts.unshift(formatCachedLearnings(cached));
+          cacheNote = cachedLearningsNote(cached);
         }
       }
       const context = parts.filter(Boolean).join("\n\n");
-      return context ? { context } : {};
+      return context ? { context, note: cacheNote } : {};
     }
     return {};
+  };
+
+  /** Cache an orientation step's Learnings for later projects on the same
+   * codebase (D90). Side effect only — failures are ignored. */
+  const rememberCodebaseLearnings = (learnings: string | null | undefined) => {
+    const cb = codebasePathRef.current;
+    if (learnings && cb) void saveCodebaseLearnings(cb, category, learnings, projectId).catch(() => {});
   };
 
   /** Documents produced by the steps before `stepIdx`, in step order. Reads a
@@ -1134,6 +1167,7 @@ export function ChatPanel({
         return true;
       }
       preflightContext = pf.context ?? "";
+      if (pf.note) mutateMessages((prev) => [...prev, note(pf.note!)]);
     }
 
     // Absolute-path context for generative turns (D52): output location + the

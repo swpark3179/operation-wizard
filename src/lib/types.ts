@@ -213,6 +213,20 @@ export interface KnowledgeEntry {
   updatedAt: number;
 }
 
+/** Cached code-analysis Learnings of a codebase (mirrors
+ * src-tauri/src/codebase_cache.rs — D90). */
+export interface CodebaseLearnings {
+  text: string;
+  /** Epoch ms of the save. */
+  updatedAt: number;
+  /** Files modified after `updatedAt` (lower bound when `changedCapped`). */
+  changedCount: number;
+  /** A few of those files (codebase-relative, `/`-separated). */
+  changedSample: string[];
+  changedCapped: boolean;
+  sourceProjectId?: string | null;
+}
+
 /** One directory entry (mirrors src-tauri/src/files.rs). */
 export interface FileEntry {
   name: string;
