@@ -18,12 +18,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use serde_json::{json, Value};
 
 use crate::codemap;
-use crate::files::SKIP_DIRS;
+use crate::files::{is_binary, is_secret_name, walk_files, WalkStop, SKIP_DIRS};
 
 /// Max characters of one tool result handed back to the model.
 pub const RESULT_CHARS: usize = 15_000;
@@ -36,8 +36,6 @@ const SEARCH_FILE_MAX: u64 = 1024 * 1024;
 const READ_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// Default (and maximum) number of lines one `read_file` call returns.
 const READ_LINES: usize = 2000;
-/// Upper bound on directory entries visited by one recursive walk.
-const WALK_MAX: usize = 50_000;
 /// Max characters of one matched line shown by `search_text`.
 const LINE_PREVIEW: usize = 300;
 
@@ -214,7 +212,7 @@ impl Sandbox {
             .file_name()
             .map(|n| n.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        if name == ".env" || name.starts_with(".env.") {
+        if is_secret_name(&name) {
             return true;
         }
         if let Some(home) = &self.deny_dir {
@@ -347,58 +345,6 @@ fn list_dir(sb: &Sandbox, args: &Value) -> Result<String, String> {
     Ok(out)
 }
 
-/// Why a recursive walk stopped.
-#[derive(Debug, PartialEq)]
-enum WalkStop {
-    Done,
-    /// Visited `WALK_MAX` entries.
-    Limit,
-    Canceled,
-    /// The visitor asked to stop (result cap reached).
-    Visitor,
-}
-
-/// Depth-first walk of `root` (alphabetical), calling `visit(file, size)` for
-/// every file. Skips symlinks/junctions and the shared noise dirs; polls the
-/// cancel flag per directory.
-fn walk_files(root: &Path, cancel: &AtomicBool, visit: &mut dyn FnMut(&Path, u64) -> bool) -> WalkStop {
-    let mut stack = vec![root.to_path_buf()];
-    let mut seen = 0usize;
-    while let Some(dir) = stack.pop() {
-        if cancel.load(Ordering::Relaxed) {
-            return WalkStop::Canceled;
-        }
-        let Ok(rd) = fs::read_dir(&dir) else { continue };
-        let mut entries: Vec<fs::DirEntry> = rd.flatten().collect();
-        entries.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase());
-        let mut subdirs = Vec::new();
-        for e in entries {
-            seen += 1;
-            if seen > WALK_MAX {
-                return WalkStop::Limit;
-            }
-            let Ok(ft) = e.file_type() else { continue };
-            if ft.is_symlink() {
-                continue;
-            }
-            if ft.is_dir() {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if !SKIP_DIRS.contains(&name.as_str()) {
-                    subdirs.push(e.path());
-                }
-                continue;
-            }
-            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-            if !visit(&e.path(), size) {
-                return WalkStop::Visitor;
-            }
-        }
-        // Reverse so the alphabetically-first subdirectory is walked next.
-        stack.extend(subdirs.into_iter().rev());
-    }
-    WalkStop::Done
-}
-
 /// Trailing note for a walk that did not finish normally.
 fn walk_note(stop: &WalkStop, cap: usize) -> Result<&'static str, String> {
     match stop {
@@ -438,11 +384,6 @@ fn find_files(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String,
     }
     out.push_str(note);
     Ok(out)
-}
-
-/// A NUL byte in the first 8 KiB marks a file as binary (skipped / refused).
-fn is_binary(bytes: &[u8]) -> bool {
-    bytes[..bytes.len().min(8192)].contains(&0)
 }
 
 fn search_text(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String, String> {

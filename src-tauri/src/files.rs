@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
 
@@ -21,8 +22,88 @@ pub struct FileEntry {
 }
 
 /// Heavy/noise directories hidden from the canvas tree and skipped by the
-/// FabriX read-only file tools (D84) — shared so both stay in sync.
-pub(crate) const SKIP_DIRS: [&str; 4] = [".git", "node_modules", "target", ".next"];
+/// FabriX read-only file tools (D84) and the code map (D88) — shared so they
+/// stay in sync. `.svn` matters for legacy checkouts: its pristine copies would
+/// otherwise double every search hit.
+pub(crate) const SKIP_DIRS: [&str; 8] = [".git", ".svn", "node_modules", "target", ".next", ".idea", ".gradle", ".vs"];
+
+/// Upper bound on directory entries visited by one recursive walk.
+pub(crate) const WALK_MAX: usize = 50_000;
+
+/// Why a recursive walk stopped.
+#[derive(Debug, PartialEq)]
+pub(crate) enum WalkStop {
+    Done,
+    /// Visited the entry cap.
+    Limit,
+    Canceled,
+    /// The visitor asked to stop (result cap / deadline reached).
+    Visitor,
+}
+
+/// Depth-first walk of `root` (alphabetical), calling `visit(file, size)` for
+/// every file. Skips symlinks/junctions and the shared noise dirs; polls the
+/// cancel flag per directory.
+pub(crate) fn walk_files(root: &Path, cancel: &AtomicBool, visit: &mut dyn FnMut(&Path, u64) -> bool) -> WalkStop {
+    walk_files_with(root, cancel, WALK_MAX, &|_| false, visit)
+}
+
+/// [`walk_files`] with an entry cap and an extra directory-name filter
+/// (`skip_dir(name) == true` → not entered) on top of `SKIP_DIRS`.
+pub(crate) fn walk_files_with(
+    root: &Path,
+    cancel: &AtomicBool,
+    max_entries: usize,
+    skip_dir: &dyn Fn(&str) -> bool,
+    visit: &mut dyn FnMut(&Path, u64) -> bool,
+) -> WalkStop {
+    let mut stack = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            return WalkStop::Canceled;
+        }
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        let mut entries: Vec<fs::DirEntry> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase());
+        let mut subdirs = Vec::new();
+        for e in entries {
+            seen += 1;
+            if seen > max_entries {
+                return WalkStop::Limit;
+            }
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !SKIP_DIRS.contains(&name.as_str()) && !skip_dir(&name) {
+                    subdirs.push(e.path());
+                }
+                continue;
+            }
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            if !visit(&e.path(), size) {
+                return WalkStop::Visitor;
+            }
+        }
+        // Reverse so the alphabetically-first subdirectory is walked next.
+        stack.extend(subdirs.into_iter().rev());
+    }
+    WalkStop::Done
+}
+
+/// A NUL byte in the first 8 KiB marks a file as binary (skipped / refused).
+pub(crate) fn is_binary(bytes: &[u8]) -> bool {
+    bytes[..bytes.len().min(8192)].contains(&0)
+}
+
+/// `.env` / `.env.*` — secrets never read or analyzed.
+pub(crate) fn is_secret_name(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name == ".env" || name.starts_with(".env.")
+}
 
 /// List a directory's immediate children, directories first then files, each
 /// alphabetical (case-insensitive). Common heavy/noise dirs are skipped.

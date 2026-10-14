@@ -41,6 +41,22 @@ export function codeMethodSkillId(mode: CodeAnalysisMode): string {
   return `__builtin:code-method:${mode}`;
 }
 
+/** Identifier-like words of a request (table / type / route names such as
+ * `TB_ORDER`, `OrderService`, `/api/orders`) for the repository map's focus
+ * section (D88). Korean business terms rarely match code, so only ASCII
+ * identifiers ≥3 chars are kept (deduped, ≤20). */
+export function focusTermsFrom(text: string): string[] {
+  const stop = new Set(["THE", "AND", "FOR", "WITH", "FROM", "SELECT", "WHERE", "TABLE", "DATA", "API", "SQL", "NULL"]);
+  const out: string[] = [];
+  for (const m of text.matchAll(/[A-Za-z_][A-Za-z0-9_]{2,}/g)) {
+    const w = m[0];
+    if (stop.has(w.toUpperCase()) || out.some((x) => x.toUpperCase() === w.toUpperCase())) continue;
+    out.push(w);
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
 /** Agent-specific reading tactics. The search tools differ: claude/gemini have
  * regex search + ranged reads, codex runs shell commands, FabriX's
  * `search_text` is a LITERAL substring search (D84). */
@@ -79,6 +95,8 @@ export function codeMethodBody(mode: CodeAnalysisMode, agentId: string): string 
     return `[시스템 스킬: 코드 분석 방법론 (내장)]
 당신은 대규모 저장소의 구조를 빠르고 정확하게 파악하는 시니어 소프트웨어 아키텍트입니다. 파일 본문을 통째로 읽어
 토큰을 낭비하지 말고, 구조와 의존성을 먼저 파악한 뒤 필요한 세부 구현만 선택적으로 확인하세요.
+0. 프롬프트에 [사전 계산된 저장소 지도]가 첨부되어 있으면 그것을 출발점으로 삼으세요(기술 스택·디렉터리·라우트·의존 체인·
+   허브·테이블이 이미 정리됨). 정적 분석 근사치이므로 이번 요청과 관련된 핵심 경로만 실제 파일로 확인합니다.
 1. 스켈레톤 우선: 클래스·인터페이스·메서드의 선언부(시그니처)·입출력 타입·어노테이션·Javadoc을 먼저 모아 API 뼈대를
    세웁니다. 메서드 본문은 로직 확인이 꼭 필요한 핵심 심볼에 한해서만 읽습니다.
 2. 허브·진입점 우선: 빌드/설정 파일(pom.xml·build.gradle·web.xml 등)로 기술 스택을 확인하고, 진입점(컨트롤러·라우터·
