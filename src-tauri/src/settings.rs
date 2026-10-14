@@ -257,9 +257,17 @@ pub fn validate_skills(skills: &[SkillDef]) -> Result<(), String> {
         if !seen.insert(s.id.trim()) {
             return Err(format!("duplicate skill id: {}", s.id));
         }
+        // Reserved for the app's built-in runtime skills (the code-analysis
+        // method's dedupe ids — D86), which must never collide with a user skill.
+        if s.id.trim().starts_with(BUILTIN_SKILL_PREFIX) {
+            return Err(format!("skill id '{}' uses the reserved '{BUILTIN_SKILL_PREFIX}' prefix", s.id));
+        }
     }
     Ok(())
 }
+
+/// Id prefix reserved for built-in runtime skills (frontend `codeMethod.ts`).
+const BUILTIN_SKILL_PREFIX: &str = "__builtin:";
 
 /// Save-time validation for one category's workflow steps.
 pub fn validate_steps(steps: &[StepDef]) -> Result<(), String> {
@@ -609,6 +617,10 @@ mod tests {
         let mut unnamed = skill("y");
         unnamed.name = String::new();
         assert!(validate_skills(&[unnamed]).is_err(), "empty name");
+        assert!(
+            validate_skills(&[skill("__builtin:code-method:orient")]).is_err(),
+            "reserved built-in prefix"
+        );
     }
 
     #[test]
