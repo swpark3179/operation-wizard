@@ -1911,3 +1911,35 @@
 - **한계/재검토**: 휴리스틱이라 드문 문법(유니코드 이스케이프 `\uXXXX`, 비표준 매퍼 확장)은 누락될 수 있고 `degraded`/근사로
   표시된다. CLI 에이전트(claude/codex/gemini)는 앱 도구를 호출할 수 없으므로, 이 분석기를 그쪽에 쓰려면 앱이 미리 계산해
   프롬프트로 넣어야 한다(후속 결정). `#[ignore]` E2E(`fabrix_e2e_mock`)는 샘플 목업 서버가 필요해 이번에 확장하지 않았다.
+
+---
+
+### D88. 저장소 지도(repo map) 사전 계산 → codebase 단계 preflight로 모든 에이전트에 주입 (D86/D87 확장)
+- **배경**: D87의 정적 분석기는 FabriX 도구(`outline_file`)로만 쓰였다. claude/codex/gemini 같은 CLI 에이전트는 앱 도구를 호출할
+  수 없어 여전히 저장소를 처음부터 탐색했고, FabriX도 오리엔테이션에 12라운드 중 여러 라운드를 썼다. Trail-Code의 `repo_map`·허브·
+  호출 그래프·Blast Radius에 해당하는 "첫 지도"가 없었다.
+- **결정**: `codemap::repo_map(root, MapOpts, cancel)` — LLM 없이 결정적으로 저장소 지도를 Markdown으로 렌더하고(섹션별 예산,
+  총 ≈12k자), 새 커맨드 **`codebase_map(root, focusTerms?)`**(async + `spawn_blocking`)로 노출한다. 섹션:
+  ① 기술 스택(pom.xml·build.gradle·build.xml·web.xml 내용과 `WEB-INF/lib` jar 이름에서 Spring MVC/Boot·eGovFrame·MyBatis·
+  iBATIS·Struts·JPA·Batch 등 + JSP 화면 수), ② 디렉터리 트리(단일 자식 체인 `src/main/java/com/x/` 접기, 크기순, 레벨당 12·
+  깊이 4), ③ **요청 관련**(요청+폼 답변의 ASCII 식별자 `focusTermsFrom` — 테이블·타입·라우트명 — 이 맞는 문장·타입·라우트),
+  ④ 진입점·라우트(클래스 `@RequestMapping` + 메서드 매핑 경로 결합, `@Scheduled`·`main`·Struts, web.xml·struts-config),
+  ⑤ **결정적 의존 체인**: 진입점 타입의 주입 필드 → 인터페이스면 `XImpl`/`implements` 구현 → Mapper 인터페이스는 XML
+  namespace로, eGov/iBATIS DAO는 본문의 `"namespace.id"` 문자열로 문장에 연결 ⇢ 문장 [테이블 CRUD] (진입점 10개·깊이 4·레벨당 5
+  — 출력 섹션 3 "Dependency Graph"를 LLM 없이 만들고 모델은 검증만), ⑥ 허브(프로젝트 안 타입의 import + 필드 타입 in-degree,
+  X/XImpl 합산), ⑦ 테이블 CRUD(매퍼·SQL 루틴 기준, 참조 문장 수), ⑧ 핵심 파일(요청 일치 → 진입점 → 허브 순 3개) 아웃라인.
+  가드: walk 6초·파싱 6000파일 상한(초과 시 "부분 분석" 표기), `build/out/dist/classes/generated/logs/.settings` 추가 스킵,
+  `.env*` 제외, 1 MiB 초과·바이너리 파일 제외.
+- **결정(주입)**: ChatPanel `stepPreflight`의 생성형 분기에서 `kind==="codebase"`이고 코드베이스 폴더가 있으면 `codebaseMap`을
+  호출해 `[사전 계산된 저장소 지도 — 앱의 비AI 정적 분석 결과(근사치)…]`를 인계 컨텍스트 앞에 붙인다. busy 구간 + "코드베이스
+  구조 사전 분석 중…" 노트(D57), Stop은 결과만 버림(`preflightAbortRef` → 기존 halt 경로), 실패는 지도 없이 진행(fail-open).
+  **plain 에이전트(opencode/antigravity)는 프롬프트를 `-p` argv(cmd.exe ≈8k 한도)로 받으므로 2k자로 축약**한다. 내장 방법론
+  (orient)에 "저장소 지도가 첨부되면 출발점으로 삼고 핵심 경로만 실제 파일로 확인" 규칙을 추가.
+- **결정(공유 walker)**: `walk_files`/`WalkStop`/`WALK_MAX`/`is_binary`를 `fabrix_tools.rs`에서 `files.rs`로 옮기고(`pub(crate)`)
+  디렉터리 필터를 받는 `walk_files_with`를 추가했다(FabriX 도구·코드 맵 공용). `SKIP_DIRS`에 `.svn`(레거시 SVN 체크아웃의
+  pristine 사본이 검색 결과를 두 배로 만들던 문제)·`.idea`·`.gradle`·`.vs`를 추가 — 캔버스 파일 트리에서도 숨겨진다.
+  `.env*` 판정은 `files::is_secret_name`으로 공유.
+- **대안 기각**: 저장소 지도를 FabriX 도구로만 제공(CLI 에이전트에 닿지 않음) / 파일로 저장 후 경로만 안내(세션리스·plain 에이전트가
+  읽지 않을 수 있고 산출물 목록을 오염) / LLM 요약 턴으로 지도 생성(비용·비결정성 — 비AI 전처리가 요구 사항).
+- **한계/재검토**: 휴리스틱 지도라 같은 패키지 단순명 충돌·리플렉션/XML 빈 주입(`<property ref>`)·동적 SQL id 조합은 체인에서
+  빠질 수 있다(근사치라고 명시하고 모델이 검증). 지도 계산은 매 codebase 단계마다 다시 한다(코드베이스별 캐시는 후속 결정).

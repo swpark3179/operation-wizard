@@ -24,7 +24,12 @@
 //! tool adapter (fabrix_tools.rs) owns sandboxing and size limits.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use crate::files::{is_binary, is_secret_name, walk_files_with, WalkStop, WALK_MAX};
 
 /// Files larger than this are not outlined (callers should search instead).
 pub const OUTLINE_FILE_MAX: u64 = 1024 * 1024;
@@ -92,11 +97,14 @@ pub struct OutlineItem {
     /// An entry point (controller, servlet, Struts action, scheduled job,
     /// `main`, URL mapping…).
     pub entry: bool,
+    /// Tables this item touches with C/R/U/D (mapper statements, SQL routines,
+    /// views) — the structured form of the `테이블:` doc text.
+    pub tables: Vec<(String, String)>,
 }
 
 impl OutlineItem {
     fn new(line: usize, depth: usize, kind: &'static str, signature: String) -> Self {
-        Self { line, end_line: None, depth, kind, signature, doc: None, entry: false }
+        Self { line, end_line: None, depth, kind, signature, doc: None, entry: false, tables: Vec::new() }
     }
 }
 
@@ -1236,6 +1244,7 @@ fn finish_stmt(o: &mut Outline, st: XStmt, end_line: Option<usize>, crud_acc: &m
         it.doc = Some(extra.join(" | "));
     }
     it.end_line = end_line;
+    it.tables = tables;
     o.push(it);
 }
 
@@ -2066,6 +2075,7 @@ fn outline_package(src: &[u8], t: &[Tok], lines: &Lines, k: usize, end: usize, b
                 it.doc = Some(format!("테이블: {}", format_tables(&tables)));
                 merge_tables(crud, &tables);
             }
+            it.tables = tables;
             let up = name.to_uppercase();
             if let Some(e) = (after..stop).find(|&x| word(t, x) == Some("END") && word(t, x + 1) == Some(up.as_str())) {
                 it.end_line = Some(lines.of(t[e].start));
@@ -2162,6 +2172,7 @@ fn outline_sql(src: &[u8]) -> Outline {
                     it.doc = Some(format!("테이블: {}", format_tables(&tables)));
                     merge_tables(&mut crud, &tables);
                 }
+                it.tables = tables;
                 it.end_line = end_line;
                 o.push(it);
             }
@@ -2257,6 +2268,726 @@ fn outline_generic(src: &[u8]) -> Outline {
         }
     }
     o
+}
+
+// ---------------------------------------------------------------------------
+// Repository map (D88): a whole-codebase orientation computed without an LLM
+// ---------------------------------------------------------------------------
+
+/// Options for [`repo_map`].
+pub struct MapOpts {
+    /// Stop parsing after this many source files.
+    pub max_parsed: usize,
+    /// Wall-clock budget; past it the map is rendered from what was collected.
+    pub deadline: Duration,
+    /// Identifier-like words from the request (table/type/route names) — what
+    /// they hit is listed first.
+    pub focus_terms: Vec<String>,
+    /// Total output budget in characters.
+    pub budget: usize,
+}
+
+impl Default for MapOpts {
+    fn default() -> Self {
+        Self { max_parsed: 6000, deadline: Duration::from_secs(6), focus_terms: Vec::new(), budget: 12_000 }
+    }
+}
+
+/// Directories the map skips on top of `files::SKIP_DIRS` (build output and
+/// generated copies would skew the hub ranking).
+const MAP_SKIP_DIRS: &[&str] = &["build", "out", "dist", "classes", ".settings", "generated", "logs"];
+
+struct JavaFile {
+    rel: String,
+    outline: Outline,
+    /// Top-level type names this file declares.
+    types: Vec<String>,
+    /// String literals — DAO files only (eGov/iBATIS DAOs call statements by
+    /// `"namespace.id"` strings).
+    strings: Vec<String>,
+}
+
+struct TypeDecl {
+    file: usize,
+    kind: &'static str,
+    entry: bool,
+    implements: Vec<String>,
+    /// Simple type names of the fields (injected collaborators).
+    fields: Vec<String>,
+}
+
+struct StmtRef {
+    rel: String,
+    ns: String,
+    id: String,
+    tables: Vec<(String, String)>,
+}
+
+#[derive(Default)]
+struct DirStat {
+    total: usize,
+    direct: usize,
+    exts: HashMap<String, usize>,
+    children: Vec<String>,
+}
+
+fn simple_type(t: &str) -> String {
+    let t = t.split('<').next().unwrap_or(t);
+    let t = t.trim().trim_end_matches("...").trim_end_matches("[]");
+    t.rsplit('.').next().unwrap_or(t).trim().to_string()
+}
+
+/// The declared name of a type signature.
+fn type_name_of(sig: &str) -> Option<String> {
+    let toks: Vec<&str> = sig.split_whitespace().collect();
+    let i = toks.iter().position(|t| matches!(*t, "class" | "interface" | "enum" | "record" | "@interface"))?;
+    let name: String = toks.get(i + 1)?.chars().take_while(|c| is_ident_char(*c)).collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Simple names after `implements` (or an interface's `extends`).
+fn implemented(sig: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(p) = sig.find(" implements ").map(|p| p + 12).or_else(|| {
+        (sig.contains(" interface ") || sig.starts_with("interface ")).then(|| sig.find(" extends ").map(|p| p + 9)).flatten()
+    }) else {
+        return out;
+    };
+    let rest = &sig[p..];
+    let rest = rest.split(" permits ").next().unwrap_or(rest);
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in rest.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(simple_type(&cur));
+                cur.clear();
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 && ch != '>' {
+            cur.push(ch);
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(simple_type(&cur));
+    }
+    out.retain(|s| !s.is_empty());
+    out
+}
+
+/// The declared type of a field signature (`@Autowired private Foo<Bar> foo`).
+fn field_type_of(sig: &str) -> Option<String> {
+    let (_, rest) = peel_annotations(sig);
+    let core = strip_modifiers(&rest);
+    let words: Vec<&str> = core.split_whitespace().collect();
+    if words.len() < 2 {
+        return None;
+    }
+    let t = simple_type(&words[..words.len() - 1].join(" "));
+    t.chars().next().is_some_and(|c| c.is_uppercase()).then_some(t)
+}
+
+/// A method signature's name (annotations peeled first — their args have parens).
+fn method_name_of(sig: &str) -> String {
+    let (_, rest) = peel_annotations(sig);
+    rest.split('(').next().unwrap_or("").split_whitespace().last().unwrap_or("").to_string()
+}
+
+/// `(HTTP method, path)` of the first Spring mapping annotation in a signature.
+fn mapping_of(sig: &str) -> Option<(String, String)> {
+    const ANNS: &[(&str, &str)] = &[
+        ("@GetMapping", "GET"),
+        ("@PostMapping", "POST"),
+        ("@PutMapping", "PUT"),
+        ("@DeleteMapping", "DELETE"),
+        ("@PatchMapping", "PATCH"),
+        ("@RequestMapping", ""),
+    ];
+    let (pos, ann, verb) = ANNS.iter().filter_map(|(a, v)| sig.find(a).map(|p| (p, *a, *v))).min_by_key(|x| x.0)?;
+    let after = &sig[pos + ann.len()..];
+    let mut method = verb.to_string();
+    let mut path = String::new();
+    if let Some(args) = after.strip_prefix('(') {
+        let args = &args[..args.find(')').unwrap_or(args.len())];
+        if let Some(q) = args.find('"') {
+            path = args[q + 1..].split('"').next().unwrap_or("").to_string();
+        }
+        if method.is_empty() {
+            if let Some(m) = args.find("RequestMethod.") {
+                method = args[m + 14..].chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+            }
+        }
+    }
+    if method.is_empty() {
+        method = "ANY".into();
+    }
+    Some((method, path))
+}
+
+fn join_paths(a: &str, b: &str) -> String {
+    let a = a.trim_end_matches('/');
+    match (a.is_empty(), b.is_empty()) {
+        (true, true) => "/".into(),
+        (_, true) => a.to_string(),
+        _ if b.starts_with('/') => format!("{a}{b}"),
+        _ => format!("{a}/{b}"),
+    }
+}
+
+fn is_dao_like(name: &str, sig: &str) -> bool {
+    name.ends_with("DAO")
+        || name.ends_with("Dao")
+        || ["EgovAbstractDAO", "EgovAbstractMapper", "SqlMapClientDaoSupport", "SqlSessionDaoSupport"].iter().any(|p| sig.contains(p))
+}
+
+/// String literal contents of a Java source (≤200 chars each).
+fn java_strings(src: &[u8]) -> Vec<String> {
+    let (mask, _) = lex_java(src);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < src.len() {
+        if mask[i] == STR && src[i] == b'"' {
+            let s = i + 1;
+            let mut j = s;
+            while j < src.len() && mask[j] == STR && src[j] != b'"' {
+                j += 1;
+            }
+            if j > s && j - s <= 200 {
+                out.push(lossy(&src[s..j]));
+            }
+            i = j + 1;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn bump_tables(acc: &mut Vec<(String, String, usize)>, tables: &[(String, String)]) {
+    for (t, c) in tables {
+        match acc.iter_mut().find(|(n, _, _)| n == t) {
+            Some((_, have, refs)) => {
+                *have = order_crud(&format!("{have}{c}"));
+                *refs += 1;
+            }
+            None => acc.push((t.clone(), order_crud(c), 1)),
+        }
+    }
+}
+
+fn clip_section(title: &str, lines: &[String], budget: usize) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("## {title}\n");
+    let mut used = out.chars().count();
+    let mut shown = 0usize;
+    for l in lines {
+        let n = l.chars().count() + 1;
+        if used + n > budget {
+            break;
+        }
+        out.push_str(l);
+        out.push('\n');
+        used += n;
+        shown += 1;
+    }
+    if shown < lines.len() {
+        out.push_str(&format!("…({}줄 생략)\n", lines.len() - shown));
+    }
+    out.push('\n');
+    out
+}
+
+/// Directory tree lines: single-child chains without own files collapse into
+/// one `a/b/c/` line; children sorted by size, ≤12 per level, depth ≤4.
+fn tree_lines(dirs: &HashMap<String, DirStat>, key: &str, label: &str, depth: usize, out: &mut Vec<String>) {
+    let mut key = key.to_string();
+    let mut label = label.to_string();
+    while let Some(st) = dirs.get(&key) {
+        if st.direct == 0 && st.children.len() == 1 {
+            let child = st.children[0].clone();
+            label.push_str(child.rsplit('/').next().unwrap_or(&child));
+            label.push('/');
+            key = child;
+        } else {
+            break;
+        }
+    }
+    let Some(st) = dirs.get(&key) else { return };
+    let mut exts: Vec<(&String, &usize)> = st.exts.iter().collect();
+    exts.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let ext_s: Vec<String> = exts.iter().take(2).map(|(e, c)| format!("{e} {c}")).collect();
+    let next_depth = if label.is_empty() {
+        depth
+    } else {
+        out.push(format!(
+            "{}{label}  (파일 {}{})",
+            "  ".repeat(depth),
+            st.total,
+            if ext_s.is_empty() { String::new() } else { format!(" · {}", ext_s.join(", ")) }
+        ));
+        depth + 1
+    };
+    if next_depth > 4 {
+        return;
+    }
+    let mut kids: Vec<&String> = st.children.iter().collect();
+    kids.sort_by(|a, b| dirs[*b].total.cmp(&dirs[*a].total).then(a.cmp(b)));
+    for (i, k) in kids.iter().enumerate() {
+        if i >= 12 {
+            out.push(format!("{}…(폴더 {}개 더)", "  ".repeat(next_depth), kids.len() - 12));
+            break;
+        }
+        let name = k.rsplit('/').next().unwrap_or(k);
+        tree_lines(dirs, k, &format!("{name}/"), next_depth, out);
+    }
+}
+
+const STACK_HINTS: &[(&str, &str)] = &[
+    ("spring-boot", "Spring Boot"),
+    ("spring-webmvc", "Spring MVC"),
+    ("egovframe", "eGovFrame"),
+    ("egovframework", "eGovFrame"),
+    ("mybatis", "MyBatis"),
+    ("ibatis", "iBATIS"),
+    ("struts", "Struts"),
+    ("hibernate", "Hibernate/JPA"),
+    ("spring-data-jpa", "Hibernate/JPA"),
+    ("spring-batch", "Spring Batch"),
+    ("quartz", "Quartz"),
+    ("tiles", "Tiles"),
+    ("lombok", "Lombok"),
+    ("ojdbc", "Oracle JDBC"),
+    ("tibero", "Tibero JDBC"),
+];
+
+fn add_hints(stack: &mut Vec<&'static str>, text: &str) {
+    for (hint, label) in STACK_HINTS {
+        if text.contains(hint) && !stack.contains(label) {
+            stack.push(label);
+        }
+    }
+}
+
+/// The interface's implementation (`XImpl`, or a class `implements X`).
+fn resolve_impl(decls: &HashMap<String, TypeDecl>, t: &str) -> String {
+    match decls.get(t) {
+        Some(d) if d.kind == "interface" => {
+            let named = format!("{t}Impl");
+            if decls.contains_key(&named) {
+                return named;
+            }
+            let mut found: Vec<&String> = decls.iter().filter(|(_, x)| x.implements.iter().any(|i| i == t)).map(|(n, _)| n).collect();
+            found.sort();
+            found.first().map(|n| (*n).clone()).unwrap_or_else(|| t.to_string())
+        }
+        _ => t.to_string(),
+    }
+}
+
+fn stmt_summary(stmts: &[StmtRef], idx: &[usize]) -> String {
+    let mut parts: Vec<String> = idx
+        .iter()
+        .take(4)
+        .map(|&i| {
+            let s = &stmts[i];
+            let t: Vec<String> = s.tables.iter().take(3).map(|(n, c)| format!("{n} {c}")).collect();
+            if t.is_empty() { s.id.clone() } else { format!("{} [{}]", s.id, t.join(", ")) }
+        })
+        .collect();
+    if idx.len() > 4 {
+        parts.push(format!("외 {}개", idx.len() - 4));
+    }
+    parts.join(", ")
+}
+
+struct ChainCtx<'a> {
+    decls: &'a HashMap<String, TypeDecl>,
+    java: &'a [JavaFile],
+    stmts: &'a [StmtRef],
+    by_ns: HashMap<String, Vec<usize>>,
+    by_key: HashMap<String, usize>,
+}
+
+impl ChainCtx<'_> {
+    /// Follow injected collaborators from `name`: service (→ impl) → DAO /
+    /// mapper; a mapper interface links to its XML statements by namespace, a
+    /// DAO by the `"namespace.id"` strings it passes.
+    fn walk(&self, name: &str, depth: usize, seen: &mut HashSet<String>, out: &mut Vec<String>) {
+        if depth > 4 || !seen.insert(name.to_string()) {
+            return;
+        }
+        let Some(d) = self.decls.get(name) else { return };
+        let indent = "  ".repeat(depth);
+        for f in d.fields.iter().filter(|f| self.decls.contains_key(*f)).take(5) {
+            let target = resolve_impl(self.decls, f);
+            let label = if &target == f { f.clone() } else { format!("{f} → {target}") };
+            let mut hits: Vec<usize> = self.by_ns.get(f).cloned().unwrap_or_default();
+            if let Some(td) = self.decls.get(&target) {
+                for s in &self.java[td.file].strings {
+                    if let Some(&i) = self.by_key.get(s) {
+                        if !hits.contains(&i) {
+                            hits.push(i);
+                        }
+                    }
+                }
+            }
+            if hits.is_empty() {
+                out.push(format!("{indent}→ {label}"));
+                self.walk(&target, depth + 1, seen, out);
+            } else {
+                out.push(format!(
+                    "{indent}→ {label} ⇢ {}: {}",
+                    self.stmts[hits[0]].rel.rsplit('/').next().unwrap_or(""),
+                    stmt_summary(self.stmts, &hits)
+                ));
+            }
+        }
+    }
+}
+
+/// Build the repository map of `root` as Markdown text (≈`opts.budget`
+/// chars): tech stack, directory tree, request-related hits, entry points/
+/// routes, dependency chains down to SQL tables, hub types, table CRUD and the
+/// outlines of a few key files. Deterministic, no model involved.
+pub fn repo_map(root: &Path, opts: &MapOpts, cancel: &AtomicBool) -> String {
+    let started = Instant::now();
+    let mut files: Vec<(String, u64)> = Vec::new();
+    let stop = walk_files_with(root, cancel, WALK_MAX, &|n| MAP_SKIP_DIRS.contains(&n), &mut |p, size| {
+        if let Ok(rel) = p.strip_prefix(root) {
+            files.push((rel.to_string_lossy().replace('\\', "/"), size));
+        }
+        started.elapsed() < opts.deadline
+    });
+    let mut partial: Vec<String> = Vec::new();
+    match stop {
+        WalkStop::Limit => partial.push(format!("탐색 항목 상한 {WALK_MAX}")),
+        WalkStop::Visitor => partial.push("시간 상한(파일 목록)".into()),
+        WalkStop::Canceled => partial.push("취소됨".into()),
+        WalkStop::Done => {}
+    }
+
+    // ── Directory stats + stack hints ────────────────────────────────────────
+    let mut dirs: HashMap<String, DirStat> = HashMap::new();
+    dirs.entry(String::new()).or_default();
+    let mut stack: Vec<&'static str> = Vec::new();
+    let mut build_files: Vec<String> = Vec::new();
+    let mut jsp = 0usize;
+    for (rel, _) in &files {
+        let name = rel.rsplit('/').next().unwrap_or(rel).to_lowercase();
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_string()).unwrap_or_default();
+        if ext == "jsp" {
+            jsp += 1;
+        }
+        if matches!(name.as_str(), "pom.xml" | "build.gradle" | "build.gradle.kts" | "build.xml" | "web.xml") {
+            build_files.push(rel.clone());
+        }
+        if ext == "jar" {
+            add_hints(&mut stack, &name);
+        }
+        let parts: Vec<&str> = rel.split('/').collect();
+        let mut parent = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            let st = dirs.entry(parent.clone()).or_default();
+            st.total += 1;
+            if !ext.is_empty() {
+                *st.exts.entry(ext.clone()).or_default() += 1;
+            }
+            if i + 1 == parts.len() {
+                st.direct += 1;
+                break;
+            }
+            let child = if parent.is_empty() { part.to_string() } else { format!("{parent}/{part}") };
+            if !st.children.contains(&child) {
+                st.children.push(child.clone());
+            }
+            parent = child;
+        }
+    }
+    for bf in &build_files {
+        if let Ok(bytes) = fs::read(root.join(bf)) {
+            add_hints(&mut stack, &String::from_utf8_lossy(&bytes[..bytes.len().min(512 * 1024)]).to_lowercase());
+        }
+    }
+
+    // ── Parse sources ────────────────────────────────────────────────────────
+    let mut java: Vec<JavaFile> = Vec::new();
+    let mut stmts: Vec<StmtRef> = Vec::new();
+    let mut xml_entries: Vec<String> = Vec::new();
+    let mut table_acc: Vec<(String, String, usize)> = Vec::new();
+    let mut parsed = 0usize;
+    for (rel, size) in &files {
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        let lang = lang_for(Path::new(name));
+        if *size > OUTLINE_FILE_MAX || is_secret_name(name) || !matches!(lang, Lang::Java | Lang::Xml | Lang::Sql) {
+            continue;
+        }
+        if parsed >= opts.max_parsed || started.elapsed() >= opts.deadline || cancel.load(Ordering::Relaxed) {
+            partial.push(format!("분석 파일·시간 상한 — {parsed}개까지 분석"));
+            break;
+        }
+        let Ok(bytes) = fs::read(root.join(rel)) else { continue };
+        if is_binary(&bytes) {
+            continue;
+        }
+        parsed += 1;
+        let o = outline(lang, &bytes);
+        match lang {
+            Lang::Java => {
+                let tops: Vec<&OutlineItem> =
+                    o.items.iter().filter(|i| i.depth == 0 && matches!(i.kind, "class" | "interface" | "enum" | "record")).collect();
+                let types: Vec<String> = tops.iter().filter_map(|i| type_name_of(&i.signature)).collect();
+                let dao = tops.iter().any(|i| type_name_of(&i.signature).is_some_and(|n| is_dao_like(&n, &i.signature)));
+                let strings = if dao { java_strings(&bytes) } else { Vec::new() };
+                java.push(JavaFile { rel: rel.clone(), outline: o, types, strings });
+            }
+            Lang::Xml => {
+                let ns = o.notes.first().and_then(|n| n.split("namespace=").nth(1)).unwrap_or("").to_string();
+                for it in &o.items {
+                    if it.kind == "statement" {
+                        let id = it.signature.split("id=").nth(1).and_then(|x| x.split_whitespace().next()).unwrap_or("?");
+                        bump_tables(&mut table_acc, &it.tables);
+                        stmts.push(StmtRef { rel: rel.clone(), ns: ns.clone(), id: id.to_string(), tables: it.tables.clone() });
+                    } else if it.entry {
+                        xml_entries.push(format!("{}  ({rel}:L{})", it.signature, it.line));
+                    }
+                }
+            }
+            _ => {
+                for it in &o.items {
+                    bump_tables(&mut table_acc, &it.tables);
+                }
+            }
+        }
+    }
+
+    // ── Type index ───────────────────────────────────────────────────────────
+    let mut decls: HashMap<String, TypeDecl> = HashMap::new();
+    for (fi, jf) in java.iter().enumerate() {
+        let mut current: Option<String> = None;
+        for it in &jf.outline.items {
+            if it.depth == 0 && matches!(it.kind, "class" | "interface" | "enum" | "record") {
+                current = type_name_of(&it.signature);
+                if let Some(name) = &current {
+                    decls.entry(name.clone()).or_insert(TypeDecl {
+                        file: fi,
+                        kind: it.kind,
+                        entry: it.entry,
+                        implements: implemented(&it.signature),
+                        fields: Vec::new(),
+                    });
+                }
+            } else if it.depth == 1 && it.kind == "field" {
+                if let (Some(c), Some(t)) = (current.as_ref(), field_type_of(&it.signature)) {
+                    if let Some(d) = decls.get_mut(c) {
+                        if d.file == fi && !d.fields.contains(&t) {
+                            d.fields.push(t);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Entry points / routes ────────────────────────────────────────────────
+    let mut routes: Vec<String> = Vec::new();
+    for jf in &java {
+        let mut base = String::new();
+        let mut cls = String::new();
+        for it in &jf.outline.items {
+            if it.depth == 0 && matches!(it.kind, "class" | "interface") {
+                cls = type_name_of(&it.signature).unwrap_or_default();
+                base = mapping_of(&it.signature).map(|(_, p)| p).unwrap_or_default();
+            } else if it.depth == 1 && it.entry && it.kind == "method" {
+                let m = method_name_of(&it.signature);
+                let at = format!("({}:L{})", jf.rel, it.line);
+                if let Some((verb, p)) = mapping_of(&it.signature) {
+                    routes.push(format!("{verb} {} → {cls}.{m}  {at}", join_paths(&base, &p)));
+                } else if it.signature.contains("@Scheduled") {
+                    routes.push(format!("SCHEDULED → {cls}.{m}  {at}"));
+                } else if it.signature.contains("static void main(") {
+                    routes.push(format!("MAIN → {cls}.{m}  {at}"));
+                } else if it.signature.contains("ActionMapping") {
+                    routes.push(format!("STRUTS → {cls}.{m}  {at}"));
+                } else {
+                    routes.push(format!("LISTENER → {cls}.{m}  {at}"));
+                }
+            }
+        }
+    }
+    routes.extend(xml_entries);
+
+    // ── Hubs: in-degree by simple name (imports + field types), X+XImpl merged ─
+    let key_of = |n: &str| n.strip_suffix("Impl").unwrap_or(n).to_string();
+    let mut indeg: HashMap<String, usize> = HashMap::new();
+    for jf in &java {
+        let mut refs: HashSet<String> = HashSet::new();
+        for imp in &jf.outline.imports {
+            let n = imp.trim_end_matches(';').rsplit('.').next().unwrap_or("");
+            if decls.contains_key(n) {
+                refs.insert(key_of(n));
+            }
+        }
+        for t in &jf.types {
+            if let Some(d) = decls.get(t) {
+                refs.extend(d.fields.iter().filter(|f| decls.contains_key(*f)).map(|f| key_of(f)));
+            }
+        }
+        for t in &jf.types {
+            refs.remove(&key_of(t));
+        }
+        for r in refs {
+            *indeg.entry(r).or_default() += 1;
+        }
+    }
+    let mut hubs: Vec<(String, usize)> = indeg.into_iter().filter(|(_, c)| *c >= 2).collect();
+    hubs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let hub_decl = |n: &str| decls.get(n).or_else(|| decls.get(&format!("{n}Impl")));
+    let hub_lines: Vec<String> = hubs
+        .iter()
+        .take(15)
+        .map(|(n, c)| {
+            let imp = if decls.contains_key(&format!("{n}Impl")) && decls.contains_key(n) { "(+Impl)" } else { "" };
+            let path = hub_decl(n).map(|d| java[d.file].rel.as_str()).unwrap_or("");
+            format!("- {n}{imp} — {c}개 파일이 참조  ({path})")
+        })
+        .collect();
+
+    // ── Focus terms ──────────────────────────────────────────────────────────
+    let terms: Vec<String> = opts.focus_terms.iter().map(|t| t.trim().to_uppercase()).filter(|t| t.chars().count() >= 3).collect();
+    let hit = |s: &str| {
+        let u = s.to_uppercase();
+        terms.iter().any(|t| u.contains(t.as_str()))
+    };
+    let mut focus_lines: Vec<String> = Vec::new();
+    let mut focus_files: Vec<String> = Vec::new();
+    if !terms.is_empty() {
+        for s in &stmts {
+            if hit(&s.id) || s.tables.iter().any(|(t, _)| hit(t)) {
+                let t: Vec<String> = s.tables.iter().take(4).map(|(n, c)| format!("{n} {c}")).collect();
+                let key = if s.ns.is_empty() { s.id.clone() } else { format!("{}.{}", s.ns, s.id) };
+                focus_lines.push(format!("- 문장 {key} [{}]  ({})", t.join(", "), s.rel));
+            }
+        }
+        let mut names: Vec<&String> = decls.keys().filter(|n| hit(n)).collect();
+        names.sort();
+        for n in names {
+            let d = &decls[n];
+            focus_lines.push(format!("- {} {n}  ({})", d.kind, java[d.file].rel));
+            focus_files.push(java[d.file].rel.clone());
+        }
+        focus_lines.extend(routes.iter().filter(|r| hit(r)).map(|r| format!("- 라우트 {r}")));
+    }
+
+    // ── Dependency chains ────────────────────────────────────────────────────
+    let mut by_ns: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut by_key: HashMap<String, usize> = HashMap::new();
+    for (i, s) in stmts.iter().enumerate() {
+        if s.ns.is_empty() {
+            continue;
+        }
+        by_ns.entry(s.ns.rsplit('.').next().unwrap_or(&s.ns).to_string()).or_default().push(i);
+        by_key.insert(format!("{}.{}", s.ns, s.id), i);
+    }
+    let ctx = ChainCtx { decls: &decls, java: &java, stmts: &stmts, by_ns, by_key };
+    let mut entries: Vec<&String> = decls.iter().filter(|(_, d)| d.entry).map(|(n, _)| n).collect();
+    entries.sort_by_key(|n| (!hit(n) && !focus_files.contains(&java[decls[*n].file].rel), (*n).clone()));
+    let mut chain_lines: Vec<String> = Vec::new();
+    for n in entries.iter().take(10) {
+        chain_lines.push(format!("▶ {n}  ({})", java[decls[*n].file].rel));
+        ctx.walk(n, 1, &mut HashSet::new(), &mut chain_lines);
+    }
+
+    // ── Tables ───────────────────────────────────────────────────────────────
+    table_acc.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+    let table_lines: Vec<String> = table_acc.iter().take(25).map(|(t, c, n)| format!("- {t} {c} · 문장 {n}개")).collect();
+
+    // ── Key file outlines: focus hits, entry points, then hubs ───────────────
+    let mut key_files: Vec<String> = Vec::new();
+    let candidates = focus_files
+        .iter()
+        .cloned()
+        .chain(entries.iter().map(|n| java[decls[*n].file].rel.clone()))
+        .chain(hubs.iter().filter_map(|(n, _)| hub_decl(n).map(|d| java[d.file].rel.clone())));
+    for f in candidates {
+        if !key_files.contains(&f) {
+            key_files.push(f);
+        }
+        if key_files.len() >= 3 {
+            break;
+        }
+    }
+
+    // ── Render ───────────────────────────────────────────────────────────────
+    let budget = opts.budget.max(2000);
+    let scale = |n: usize| n * budget / 12_000;
+    let mut out = format!(
+        "# 저장소 지도 — {}\n파일 {}개 (분석: Java {}개, 매퍼 SQL 문장 {}개){}\n\n",
+        root.display(),
+        files.len(),
+        java.len(),
+        stmts.len(),
+        if partial.is_empty() { String::new() } else { format!(" — 부분 분석: {}", partial.join(", ")) }
+    );
+    let mut stack_parts: Vec<String> = stack.iter().map(|s| s.to_string()).collect();
+    if jsp > 0 {
+        stack_parts.push(format!("JSP 화면 {jsp}개"));
+    }
+    if !stack_parts.is_empty() || !build_files.is_empty() {
+        let shown: Vec<&str> = build_files.iter().take(4).map(String::as_str).collect();
+        out.push_str(&format!(
+            "## 기술 스택\n- {}{}\n\n",
+            if stack_parts.is_empty() { "(프레임워크 단서 없음)".to_string() } else { stack_parts.join(" · ") },
+            if shown.is_empty() { String::new() } else { format!("  (빌드/설정: {})", shown.join(", ")) }
+        ));
+    }
+    let mut tl = Vec::new();
+    tree_lines(&dirs, "", "", 0, &mut tl);
+    out.push_str(&clip_section("디렉터리 (파일 수 · 주요 확장자)", &tl, scale(3000)));
+    out.push_str(&clip_section("요청 관련 (키워드 일치)", &focus_lines, scale(1200)));
+    out.push_str(&clip_section("진입점·라우트", &routes, scale(2200)));
+    out.push_str(&clip_section("의존 체인 (진입점 → 서비스 → DAO/Mapper ⇢ SQL 문장 [테이블 CRUD])", &chain_lines, scale(2000)));
+    out.push_str(&clip_section("허브 (프로젝트 안에서 가장 많이 참조되는 타입)", &hub_lines, scale(900)));
+    out.push_str(&clip_section("테이블 (매퍼·SQL 기준 CRUD, 참조 문장 수)", &table_lines, scale(1000)));
+    let outline_budget = scale(2000) / key_files.len().max(1);
+    let mut outlines = String::new();
+    for f in &key_files {
+        if let Some(jf) = java.iter().find(|j| &j.rel == f) {
+            outlines.push_str(&render_outline(&jf.outline, f, outline_budget.max(400)));
+            outlines.push('\n');
+        }
+    }
+    if !outlines.is_empty() {
+        out.push_str("## 핵심 파일 아웃라인\n");
+        out.push_str(&outlines);
+    }
+    if out.chars().count() > budget {
+        let kept: String = out.chars().take(budget).collect();
+        out = format!("{kept}\n…(저장소 지도 잘림)\n");
+    }
+    out
+}
+
+/// Tauri command: the repository map of a codebase folder (D88), injected by
+/// the codebase-step preflight for every agent (CLI agents can't call the
+/// app's tools). Off the IPC thread; bounded by `MapOpts` (≈6 s).
+#[tauri::command]
+pub async fn codebase_map(root: String, focus_terms: Option<Vec<String>>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = Path::new(root.trim());
+        if !path.is_dir() {
+            return Err(format!("코드베이스 폴더를 찾을 수 없습니다: {root}"));
+        }
+        let opts = MapOpts { focus_terms: focus_terms.unwrap_or_default(), ..MapOpts::default() };
+        Ok(repo_map(path, &opts, &AtomicBool::new(false)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]
@@ -2685,6 +3416,87 @@ public class OrderAction extends DispatchAction {
         assert!(r.contains("read_file(path, start_line="));
         let small = render_outline(&o, "C.java", 300);
         assert!(small.contains("출력 상한") || small.chars().count() <= 300, "{small}");
+    }
+
+    /// A small legacy-style repository: Spring controller → service (iface +
+    /// impl) → MyBatis mapper interface + XML, and an eGov DAO calling an
+    /// iBATIS statement by its "namespace.id" string; build output skipped.
+    fn sample_repo(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("ow-codemap-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let w = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        };
+        w("pom.xml", "<project><dependencies><dependency><artifactId>spring-webmvc</artifactId></dependency><dependency><groupId>egovframework.rte</groupId></dependency><dependency><artifactId>mybatis</artifactId></dependency></dependencies></project>");
+        let j = "src/main/java/com/sds/order";
+        w(&format!("{j}/web/OrderController.java"), "package com.sds.order.web;\nimport com.sds.order.service.OrderService;\nimport com.sds.order.common.CommonUtil;\n@RestController\n@RequestMapping(\"/api/orders\")\npublic class OrderController {\n    @Autowired private OrderService orderService;\n    @GetMapping(\"/{id}\")\n    public OrderDto get(@PathVariable Long id) { return orderService.find(id); }\n    @PostMapping\n    public void create(@RequestBody OrderDto dto) { orderService.create(dto); }\n}\n");
+        w(&format!("{j}/service/OrderService.java"), "package com.sds.order.service;\npublic interface OrderService {\n    OrderDto find(Long id);\n    void create(OrderDto dto);\n}\n");
+        w(&format!("{j}/service/impl/OrderServiceImpl.java"), "package com.sds.order.service.impl;\nimport com.sds.order.common.CommonUtil;\n@Service\npublic class OrderServiceImpl implements OrderService {\n    @Autowired private OrderMapper orderMapper;\n    @Resource(name = \"orderDAO\") private OrderDAO orderDAO;\n    public OrderDto find(Long id) { return orderMapper.selectOrder(id); }\n    public void create(OrderDto d) { orderDAO.insert(d); }\n}\n");
+        w(&format!("{j}/mapper/OrderMapper.java"), "package com.sds.order.mapper;\n@Mapper\npublic interface OrderMapper {\n    OrderDto selectOrder(Long id);\n}\n");
+        w(&format!("{j}/dao/OrderDAO.java"), "package com.sds.order.dao;\nimport com.sds.order.common.CommonUtil;\n@Repository(\"orderDAO\")\npublic class OrderDAO extends EgovAbstractDAO {\n    public void insert(OrderDto d) { insert(\"orderDAO.insertItem\", d); }\n}\n");
+        w(&format!("{j}/common/CommonUtil.java"), "package com.sds.order.common;\npublic class CommonUtil {\n    public static String trim(String s) { return s; }\n}\n");
+        w("src/main/resources/mapper/OrderMapper.xml", "<mapper namespace=\"com.sds.order.mapper.OrderMapper\">\n  <select id=\"selectOrder\" resultType=\"OrderDto\">SELECT * FROM TB_ORDER o JOIN TB_CUSTOMER c ON o.CUST_ID = c.CUST_ID WHERE o.ID = #{id}</select>\n</mapper>\n");
+        w("src/main/resources/sqlmap/Order_SQL.xml", "<sqlMap namespace=\"orderDAO\">\n  <insert id=\"insertItem\">INSERT INTO TB_ORDER_ITEM (ID) VALUES (#id#)</insert>\n</sqlMap>\n");
+        w("src/main/webapp/WEB-INF/web.xml", "<web-app><servlet-mapping><servlet-name>action</servlet-name><url-pattern>*.do</url-pattern></servlet-mapping></web-app>");
+        w("src/main/webapp/WEB-INF/jsp/order/list.jsp", "<html/>");
+        w("build/generated/Fake.java", "@RestController public class FakeController { @GetMapping(\"/fake\") public void f() {} }");
+        w("target/classes/Gen.java", "@RestController public class GenController {}");
+        w(".env", "SECRET=1");
+        root
+    }
+
+    #[test]
+    fn repo_map_orients_a_legacy_codebase() {
+        let root = sample_repo("map");
+        let opts = MapOpts { focus_terms: vec!["TB_ORDER_ITEM".into()], ..MapOpts::default() };
+        let m = repo_map(&root, &opts, &AtomicBool::new(false));
+        assert!(m.contains("# 저장소 지도"), "{m}");
+        assert!(!m.contains("부분 분석"), "{m}");
+        assert!(m.contains("Spring MVC") && m.contains("eGovFrame") && m.contains("MyBatis") && m.contains("JSP 화면 1개"), "{m}");
+        assert!(m.contains("src/main/"), "single-child chains collapse: {m}");
+        // Routes: class base path + method paths; build/target output is skipped.
+        assert!(m.contains("GET /api/orders/{id} → OrderController.get"), "{m}");
+        assert!(m.contains("POST /api/orders → OrderController.create"), "{m}");
+        assert!(m.contains("servlet-mapping action: *.do"), "{m}");
+        assert!(!m.contains("FakeController") && !m.contains("GenController"), "{m}");
+        // Chain: controller → service iface → impl → mapper XML / DAO string id.
+        assert!(m.contains("▶ OrderController"), "{m}");
+        assert!(m.contains("→ OrderService → OrderServiceImpl"), "{m}");
+        assert!(m.contains("→ OrderMapper ⇢ OrderMapper.xml: selectOrder [TB_ORDER R, TB_CUSTOMER R]"), "{m}");
+        assert!(m.contains("→ OrderDAO ⇢ Order_SQL.xml: insertItem [TB_ORDER_ITEM C]"), "{m}");
+        // Hubs, tables, focus hits, key outlines.
+        assert!(m.contains("- CommonUtil — 3개 파일이 참조"), "{m}");
+        assert!(m.contains("- TB_ORDER R · 문장 1개"), "{m}");
+        assert!(m.contains("문장 orderDAO.insertItem [TB_ORDER_ITEM C]"), "{m}");
+        assert!(m.contains("## 핵심 파일 아웃라인") && m.contains("OrderController.java — Java 아웃라인"), "{m}");
+        assert!(!m.contains("SECRET"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn repo_map_respects_limits_and_budget() {
+        let root = sample_repo("limits");
+        let opts = MapOpts { max_parsed: 1, budget: 2000, ..MapOpts::default() };
+        let m = repo_map(&root, &opts, &AtomicBool::new(false));
+        assert!(m.contains("부분 분석"), "{m}");
+        assert!(m.chars().count() <= 2100, "{}", m.chars().count());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn signature_helpers() {
+        assert_eq!(implemented("@Service public class A extends B implements C, D<E, F>"), vec!["C", "D"]);
+        assert_eq!(implemented("public interface X extends Y, Z"), vec!["Y", "Z"]);
+        assert_eq!(field_type_of("@Resource(name = \"x\") private List<Foo> foos").as_deref(), Some("List"));
+        assert_eq!(field_type_of("private final OrderService orderService").as_deref(), Some("OrderService"));
+        assert_eq!(field_type_of("int count"), None);
+        assert_eq!(method_name_of("@GetMapping(\"/{id}\") public Dto get(@PathVariable Long id)"), "get");
+        assert_eq!(mapping_of("@RequestMapping(value = \"/x\", method = RequestMethod.POST) public void a()"), Some(("POST".into(), "/x".into())));
+        assert_eq!(mapping_of("@GetMapping public void b()"), Some(("GET".into(), String::new())));
+        assert_eq!(join_paths("/api/", "/a"), "/api/a");
+        assert_eq!(join_paths("", ""), "/");
     }
 
     #[test]

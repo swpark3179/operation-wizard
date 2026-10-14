@@ -396,6 +396,7 @@ pub fn run() {
             files::list_dir,
             files::read_file,
             files::write_file,
+            codemap::codebase_map,
             projects::ensure_project,
             projects::save_session,
             projects::list_sessions,

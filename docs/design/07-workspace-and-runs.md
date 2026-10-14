@@ -234,6 +234,7 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 | `list_dir` | `path: string` | `FileEntry[]` | 캔버스 파일 트리 |
 | `read_file` | `path: string` | `string` | 파일 내용(상한 2 MiB) |
 | `write_file` | `path: string`, `contents: string` | — | 파일 쓰기(부모 dir 생성, 상한 5 MiB). 원격 에이전트(FabriX) 문서 산출물(최종 답변)을 `<workdir>/<step.file>`로 저장 — D67/D84 |
+| `codebase_map` | `root: string`, `focusTerms?: string[]` | `string` | 비AI 저장소 지도(기술 스택·트리·라우트·의존 체인⇢테이블·허브·핵심 아웃라인) — codebase 단계 preflight 주입(D88) |
 | `ensure_project` | `projectId: string`, `workdir: string`(빈값 허용), `title: string`, `category: string`, `codebasePath?: string` | `Project` | 프로젝트 폴더+매니페스트 생성(idempotent). workdir 빈값→`workspace/` 하위폴더 resolve해 반환. 홈에서 지정한 폴더면 그 경로 |
 | `set_project_codebase` | `projectId: string`, `codebasePath: string \| null` | `Project` | 기존 매니페스트의 코드베이스 경로 갱신/해제(D45) |
 | `set_project_title` | `projectId: string`, `title: string` | `Project` | 프로젝트 제목 변경(홈 최근 목록 인라인 편집 — D60; 빈 제목 거부, trim + 100자 상한) |
@@ -380,7 +381,9 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 - **①.5 기반 3단계(foundation, D44)** — 워크플로우 맨 앞에 고정(pinned)되는 필수 단계:
   `codebase`(코드베이스 분석 — 매 턴 `extraDirs`로 접근 부여(claude `--add-dir`, gemini
   `--include-directories` — D52; 원격 FabriX는 같은 폴더를 읽기 전용 파일 도구 샌드박스로 받음, D84) + 절대경로
-  컨텍스트(`pathContext`)가 "이 폴더에서 탐색 시작"을 지시) →
+  컨텍스트(`pathContext`)가 "이 폴더에서 탐색 시작"을 지시 + **preflight가 `codebase_map`으로 비AI 저장소 지도를
+  계산해 wire에 첨부**("코드베이스 구조 사전 분석 중…" 노트·Stop 가능, 실패 시 지도 없이 진행; plain 에이전트는
+  argv 길이 한계로 2k자로 축약 — D88) + 내장 코드 분석 방법론(orient — D86)) →
   `rag`(preflight가 `rag_search`로 사내 문서 발췌를 조회한 뒤 **관련성 판단 턴**(D70)이 이번 작업과의
   관련성을 판정 — 관련 없으면 표시·주입 없이 건너뛰고, 관련 있으면 정리된 캔버스 '검색 결과' 탭 표시 +
   발췌를 wire에 첨부) → `knowledge`(preflight가 `list_knowledge` 항목을 16KB 상한으로 주입;

@@ -18,6 +18,7 @@ import { categoryLabel, sessionTime, type Category, type ChatMessage } from "./w
 import {
   Channel,
   cancelRun,
+  codebaseMap,
   ensureProject,
   getKnowledgeRoot,
   listKnowledge,
@@ -42,7 +43,7 @@ import { judgeRagRelevance, type RagVerdict } from "../lib/ragRelevance";
 import { optionsFor, REQUIREMENT_QUESTION } from "../lib/options";
 import { PROMPT_NOTE, PROMPT_OPTIMIZER_SKILL, parsePromptBlock, stripPromptBlock } from "../lib/promptCraft";
 import { resolveSkills } from "../lib/skills";
-import { codeAnalysisMode, codeMethodBody, codeMethodSkillId } from "../lib/codeMethod";
+import { codeAnalysisMode, codeMethodBody, codeMethodSkillId, focusTermsFrom } from "../lib/codeMethod";
 import { extractLearnings, formatHandoffContext, type ProducedDoc } from "../lib/learnings";
 import { isGenerative, progressLabel, runtimeWorkflowFor } from "../lib/workflow";
 import type {
@@ -55,6 +56,13 @@ import type {
   StepDef,
   StoredSession,
 } from "../lib/types";
+
+/** Agents that take the prompt as a command-line argument (`-p "<prompt>"`,
+ * through a cmd.exe shim with an ~8k limit — agents.rs `RunSpec::plain`): the
+ * repository map is cut short for them (D88). */
+const PLAIN_AGENTS = ["opencode", "antigravity"];
+/** Repository-map cap for plain agents. */
+const PLAIN_MAP_MAX = 2000;
 
 /** Agents that keep a CLI session across turns (claude mints a UUID, codex
  * captures its own thread id). Others are sessionless → we re-send the
@@ -858,7 +866,27 @@ export function ChatPanel({
     // skip): a missing/unreadable doc just contributes no Learnings. The HTML
     // render sub-step only re-presents its predecessor, so it gets none.
     if (isGenerative(step.kind) && !step.skillIds.includes("html-render")) {
-      const context = formatHandoffContext(await producedDocsBefore(stepIdx));
+      const parts = [formatHandoffContext(await producedDocsBefore(stepIdx))];
+      // Codebase step (D88): the app-computed repository map — the only way
+      // CLI agents (which can't call app tools) get the static analysis.
+      // Fail-open: no folder / an error just means no map.
+      const cb = codebasePathRef.current;
+      if (step.kind === "codebase" && cb) {
+        try {
+          const terms = focusTermsFrom(`${seedPromptRef.current}\n${lastAnswersWireRef.current}`);
+          let map = await codebaseMap(cb, terms);
+          if (preflightAbortRef.current) return {};
+          if (PLAIN_AGENTS.includes(agentId) && map.length > PLAIN_MAP_MAX) {
+            map = `${map.slice(0, PLAIN_MAP_MAX)}\n…(프롬프트 길이 제한으로 저장소 지도 일부만 첨부)`;
+          }
+          parts.unshift(
+            `[사전 계산된 저장소 지도 — 앱의 비AI 정적 분석 결과(근사치). 탐색 출발점으로 쓰고, 이번 요청의 핵심 경로는 실제 파일로 검증하세요]\n${map}`,
+          );
+        } catch {
+          /* no map — the step still runs */
+        }
+      }
+      const context = parts.filter(Boolean).join("\n\n");
       return context ? { context } : {};
     }
     return {};
@@ -1041,8 +1069,14 @@ export function ChatPanel({
     let preflightContext = "";
     if (!isPrefill && stepInject && step) {
       const stepIdx = stepIndexRef.current;
-      const fetches = step.kind === "rag" || step.kind === "knowledge";
-      const fetchNote = step.kind === "rag" ? "사내 문서 검색·관련성 확인 중…" : "지식 베이스 확인 중…";
+      const mapsCodebase = step.kind === "codebase" && !!codebasePathRef.current;
+      const fetches = step.kind === "rag" || step.kind === "knowledge" || mapsCodebase;
+      const fetchNote =
+        step.kind === "rag"
+          ? "사내 문서 검색·관련성 확인 중…"
+          : mapsCodebase
+            ? "코드베이스 구조 사전 분석 중…"
+            : "지식 베이스 확인 중…";
       // Any awaited I/O runs inside the busy bracket (streaming=true): Stop
       // stays live and a concurrent manual send/retry can't spawn a second
       // run. Only the network fetches show a chat note (D57); a local hand-off
