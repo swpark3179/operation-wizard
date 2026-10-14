@@ -505,7 +505,8 @@
 
 ### D47. 단계별 결과형식 output(chat/file/html) + html은 렌더 서브스텝으로 런타임 확장
 - **결정**: `StepDef.output?: "chat"|"file"|"html"`(`STEP_OUTPUTS`, 백엔드 save 검증·plain String)을
-  추가한다. 미지정 시 kind에서 파생(document→file, 그 외→chat; `stepOutput`). Flows 편집기는
+  추가한다. 미지정 시 kind에서 파생(document→file, 그 외→chat; `stepOutput` — **D85에서 file이 있는 codebase→file로
+  개정**). Flows 편집기는
   search/document/codebase kind에 "결과 형태" 셀렉트를 노출한다. `"chat"`은 런타임에 file을 제거(산출물
   없음), `"html"`은 `runtimeWorkflowFor` = `expandOutputSteps(workflowFor(...))`가 원 단계 뒤에 **합성
   렌더 서브스텝**(`{id: <id>-html, kind:"document", file: <file>.html, skillIds:["html-render"]}`)을
@@ -898,6 +899,8 @@
      기본 output을 `"chat"`으로 파생하고 `expandOutputSteps`가 그 file을 스트립한다. 참조 SQL 후보
      목록(`docs/query-references.md`)을 **산출물로 보존**하려면 codebase 단계에 `output:"file"`을
      명시해야 한다. → 산출물 3종(참조목록 + ERD + 참고 SQL)이 산출물 허브·다이어그램 갤러리에 노출.
+     (⚠️ **D85**: 이후 file이 있는 codebase 단계는 기본 output이 "file"로 파생되도록 바뀌었다 — 명시값은
+     하위호환용으로 유지.)
   3. **`foundationEnabled` 폴백 보정(`lib/workflow.ts`)**: 기존엔 `settings.workflows[category]`
      (저장된 override)만 보아, query처럼 **기본 워크플로우가 트리오를 갖는** 카테고리가 override 없으면
      false → `optionsFor`가 필수 `codebasePath` folder 질문(D45)을 프리펜드하지 않아 codebase 단계가
@@ -1800,3 +1803,23 @@
   (EUC-KR) 소스는 lossy 디코딩이라 한글 검색이 누락될 수 있고, `search_text`는 정규식이 아니다. trial `x-fabrix-client` 키는
   만료일이 있다(OIDC 401 힌트로 재발급 안내). reqwest는 UA를 보내지 않는다 — 게이트웨이가 UA를 요구하면(D74 부류 406/500)
   UA 상수를 추가한다.
+
+---
+
+### D85. file이 있는 codebase 단계의 기본 output = "file" (D47/D61 개정 — 코드베이스 분석서 소실 버그 수정)
+- **배경**: plan의 기반 `codebase-analysis` 단계(`DEFAULT_FOUNDATION_STEPS[0]`)는 지시문이 `docs/codebase-analysis.md`
+  저장을 요구하고 `file`도 지정하지만 `output`이 없다. D47 파생 규칙(document→file, **그 외→chat**)에 따라
+  `stepOutput`이 "chat"이 되고 `expandOutputSteps`가 런타임에 `file`을 지웠다. 결과: CLI 에이전트는 파일을
+  쓰지만 앱이 열지 않아 산출물 허브·다이어그램·지식 저장(D58/D59)에서 빠지고, FabriX(D67/D84)는 `remoteDocCtx`·
+  end 핸들러 write가 `step.file`을 요구해 **아예 저장되지 않았다**. query/change는 `output:"file"` 명시(D61/D62)로
+  피했지만 plan은 아니었다.
+- **결정**: `stepOutput`에서 **`kind==="codebase"`이고 `file`이 있으면(명시 output 없음) "file"**로 파생한다.
+  기본값에 `output:"file"`을 추가하는 대신 파생 규칙을 고친 이유: 이미 plan 워크플로우를 저장한 사용자의 stored
+  codebase 단계(`coerceSteps`가 stored를 우선)도 별도 마이그레이션 없이 함께 고쳐진다. 코드베이스 분석서는
+  후속 단계로의 인계물(이후 Learnings 전달의 근거)이라 파일로 남는 것이 의도다.
+- **파급(의도)**: Flows "결과 형태" 셀렉트가 "파일"로 표시되고, `artifactsFor`가 분석서를 산출물로 집계하며
+  (허브·다이어그램 갤러리·지식 저장 대상), FabriX는 최종 답변을 그 파일로 저장한다. 명시 `output:"chat"`은
+  그대로 존중된다(파일 없음). query/change 기본값의 명시 `output:"file"`은 하위호환용으로 유지.
+  백엔드 `settings.rs` 검증 무변경(파생은 프론트 전용), **신규 의존성 0**.
+- **대안 기각**: 기본값에만 `output:"file"` 추가(stored override 사용자에게 미반영) / 파생을 모든 kind로 확대
+  (search 단계 등 file 없는 단계에는 무의미, 범위 최소화).

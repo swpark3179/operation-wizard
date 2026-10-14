@@ -51,7 +51,7 @@ export const CATEGORY_FOUNDATION: Record<Category, readonly string[]> = {
 };
 
 /** Step output modes — keep in sync with `STEP_OUTPUTS` in settings.rs (D47).
- * Absent → derived from kind (document→"file", else "chat"). */
+ * Absent → derived from kind (document→"file"; codebase with a file→"file" — D85; else "chat"). */
 export const STEP_OUTPUTS: readonly string[] = ["chat", "file", "html"];
 
 /** Generative steps auto-advance on success; only terminal `chat` waits. */
@@ -359,8 +359,8 @@ export const DEFAULT_WORKFLOWS: Record<Category, StepDef[]> = {
       kind: "codebase",
       instruction: QUERY_CODEBASE_STEP,
       file: "docs/query-references.md",
-      // codebase 기본 output은 "chat"(파일 스트립)이므로, 참조 목록을 산출물로
-      // 남기려면 "file"을 명시한다(D61).
+      // file이 있는 codebase 단계는 기본 output이 "file"이다(D85). 명시값은
+      // 기존 저장본과의 일관성을 위해 유지한다(D61).
       output: "file",
       skillIds: ["reference-sql-explore"],
     },
@@ -403,8 +403,8 @@ export const DEFAULT_WORKFLOWS: Record<Category, StepDef[]> = {
       kind: "codebase",
       instruction: CHANGE_CODEBASE_STEP,
       file: "docs/change-references.md",
-      // codebase 기본 output은 "chat"(파일 스트립)이므로, 참조·영향 목록을
-      // 산출물로 남기려면 "file"을 명시한다(D61/D62 패턴).
+      // file이 있는 codebase 단계는 기본 output이 "file"이다(D85). 명시값은
+      // 기존 저장본과의 일관성을 위해 유지한다(D61/D62 패턴).
       output: "file",
       skillIds: ["change-impact-explore"],
     },
@@ -509,10 +509,15 @@ export function mandatoryFoundation(
   return foundationEnabled(category, settings) ? CATEGORY_FOUNDATION[category] : undefined;
 }
 
-/** Derive a step's effective output mode (D47). */
+/** Derive a step's effective output mode (D47). Absent → `document` writes a
+ * file; a `codebase` step that names a file writes it too (its analysis doc is
+ * the hand-off to later steps — D85; this also repairs stored plan overrides
+ * whose pinned codebase step carries a file but no `output`); else chat. */
 export function stepOutput(step: StepDef): string {
   if (step.output && STEP_OUTPUTS.includes(step.output)) return step.output;
-  return step.kind === "document" ? "file" : "chat";
+  if (step.kind === "document") return "file";
+  if (step.kind === "codebase" && step.file?.trim()) return "file";
+  return "chat";
 }
 
 function htmlFileFor(step: StepDef): string {

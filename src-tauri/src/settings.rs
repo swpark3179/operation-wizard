@@ -69,7 +69,8 @@ pub struct StepDef {
     pub skill_ids: Vec<String>,
     /// Result form: "chat" | "file" | "html" (see `STEP_OUTPUTS`). Kept a plain
     /// string for the same no-wipe reason as `kind`. Absent → the frontend
-    /// derives it from `kind` (document→"file", else "chat") — D47.
+    /// derives it from `kind` (document→"file"; codebase with a file→"file" —
+    /// D85; else "chat") — D47.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
 }
