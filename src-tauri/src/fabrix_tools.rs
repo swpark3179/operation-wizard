@@ -1,10 +1,11 @@
 //! Read-only file tools for the FabriX tool-calling loop (D84).
 //!
-//! FabriX is an HTTP API with no filesystem of its own. The app exposes five
+//! FabriX is an HTTP API with no filesystem of its own. The app exposes six
 //! read-only tools over the OpenAI `tools` protocol so the model can actually
 //! read the codebase (lifting the pre-D84 "remote agents can't read the
 //! codebase" limitation, D67): `list_dir`, `find_files`, `search_text`,
-//! `outline_file` (the skeleton-first view from `codemap.rs` — D87) and
+//! `outline_file` (the skeleton-first view from `codemap.rs` — D87),
+//! `find_references` (callers / first blast-radius ring — D89) and
 //! `read_file`. There is deliberately no write/exec tool — document artifacts
 //! are still persisted by the app (ChatPanel → `write_file`, D67).
 //!
@@ -72,6 +73,15 @@ pub fn tool_specs() -> Value {
             "parameters": { "type": "object", "properties": {
                 "path": { "type": "string", "description": "파일 경로(절대경로 또는 허용 폴더 기준 상대경로)" }
             }, "required": ["path"] }
+        }},
+        { "type": "function", "function": {
+            "name": "find_references",
+            "description": "심볼(클래스·메서드·필드·테이블명·매퍼 문장 id)을 참조하는 위치를 파일별로 찾고, 각 위치를 감싸는 메서드/SQL 문장과 정의 여부를 표시합니다(호출자·영향 범위 파악). 주석 속 일치는 제외, 문자열 속 일치는 '(문자열)'로 표시. 'Class.method' 형식이면 Class를 언급하는 파일로 좁힙니다. 대문자 심볼(테이블명)은 대소문자 무시. Find references / callers of a symbol.",
+            "parameters": { "type": "object", "properties": {
+                "symbol": { "type": "string", "description": "찾을 심볼, 예: OrderService.findOrder, selectOrders, TB_ORDER" },
+                "path": { "type": "string", "description": "검색할 폴더 또는 파일. 생략하면 모든 허용 폴더." },
+                "file_pattern": { "type": "string", "description": "파일명 와일드카드 필터, 예: *.java" }
+            }, "required": ["symbol"] }
         }},
         { "type": "function", "function": {
             "name": "read_file",
@@ -200,6 +210,11 @@ impl Sandbox {
         self.roots.is_empty()
     }
 
+    /// The canonical roots (cwd first).
+    pub(crate) fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
     /// Display form of the roots (for the system prompt and error messages).
     pub fn root_labels(&self) -> Vec<String> {
         self.roots.iter().map(|r| display_path(r)).collect()
@@ -285,9 +300,10 @@ pub fn run_tool(name: &str, args: &Value, sb: &Sandbox, cancel: &AtomicBool) -> 
         "find_files" => find_files(sb, args, cancel),
         "search_text" => search_text(sb, args, cancel),
         "outline_file" => outline_file(sb, args),
+        "find_references" => find_references(sb, args, cancel),
         "read_file" => read_file(sb, args),
         other => Err(format!(
-            "'{other}' 도구는 없습니다. 사용할 수 있는 도구는 list_dir, find_files, search_text, outline_file, read_file(모두 읽기 전용)뿐입니다. \
+            "'{other}' 도구는 없습니다. 사용할 수 있는 도구는 list_dir, find_files, search_text, outline_file, find_references, read_file(모두 읽기 전용)뿐입니다. \
              파일 저장은 앱이 처리하므로, 문서를 작성하는 단계라면 최종 답변에 문서 본문만 출력하세요."
         )),
     };
@@ -473,6 +489,23 @@ fn outline_file(sb: &Sandbox, args: &Value) -> Result<String, String> {
     }
     let o = codemap::outline(codemap::lang_for(&path), &bytes);
     Ok(codemap::render_outline(&o, &display_path(&path), RESULT_CHARS.saturating_sub(200)))
+}
+
+fn find_references(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String, String> {
+    let symbol = str_arg(args, "symbol").ok_or("symbol 인자가 필요합니다 (예: OrderService.findOrder, selectOrders, TB_ORDER).")?;
+    let roots: Vec<PathBuf> = match str_arg(args, "path") {
+        Some(p) => vec![sb.resolve(Some(p))?],
+        None => sb.roots().to_vec(),
+    };
+    let pattern = str_arg(args, "file_pattern");
+    codemap::find_references(
+        &roots,
+        symbol,
+        &|name: &str| pattern.map(|fp| wildcard_match(fp, name)).unwrap_or(true),
+        &|p: &Path| sb.denied(p),
+        &|p: &Path| display_path(p),
+        cancel,
+    )
 }
 
 fn read_file(sb: &Sandbox, args: &Value) -> Result<String, String> {
@@ -739,6 +772,25 @@ mod tests {
     }
 
     #[test]
+    fn find_references_tool_scans_all_roots_or_a_path() {
+        let work = tree("refs-work");
+        let code = tree("refs-code");
+        fs::write(code.join("src").join("util").join("Helper.java"), "class Helper {\n  static int calc(int a) { return a; }\n}\n").unwrap();
+        fs::write(code.join("Order.java"), "class Order {\n  int total() { return Helper.calc(1); }\n}\n").unwrap();
+        let s = Sandbox::new(&work.to_string_lossy(), &[code.to_string_lossy().into_owned()]);
+        let out = run_tool("find_references", &json!({ "symbol": "Helper.calc" }), &s, &no_cancel());
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("Order.java(1)") && out.content.contains("[int total()]"), "{}", out.content);
+        assert!(out.content.contains("Helper.java(1, 정의)"), "{}", out.content);
+        // Narrowed by file_pattern → only the definition file remains.
+        let only = run_tool("find_references", &json!({ "symbol": "calc", "file_pattern": "Helper*" }), &s, &no_cancel());
+        assert!(only.content.contains("Helper.java") && !only.content.contains("Order.java"), "{}", only.content);
+        assert!(run_tool("find_references", &json!({}), &s, &no_cancel()).is_error);
+        let _ = fs::remove_dir_all(&work);
+        let _ = fs::remove_dir_all(&code);
+    }
+
+    #[test]
     fn relative_paths_fall_back_to_the_other_roots() {
         let work = tree("rel-work");
         let code = tree("rel-code");
@@ -767,7 +819,7 @@ mod tests {
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["list_dir", "find_files", "search_text", "outline_file", "read_file"]);
+        assert_eq!(names, vec!["list_dir", "find_files", "search_text", "outline_file", "find_references", "read_file"]);
         for t in specs.as_array().unwrap() {
             assert_eq!(t["type"], "function");
             assert!(t["function"]["parameters"].is_object(), "parameters must be a JSON Schema object");

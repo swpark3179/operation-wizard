@@ -262,8 +262,8 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
   남는다(lossy). 단계별 주입이 반복되며 크기 증가. 코드베이스/스킬 폴더 접근은 `--include-directories`로
   부여된다(D52).
 - **FabriX(원격 HTTP, 세션리스 — D64/D84)**: gemini처럼 매 턴 transcript 재전송(lossy). 파일시스템은 없지만
-  앱이 제공하는 **읽기 전용 파일 도구**(`list_dir`/`find_files`/`search_text`/`outline_file`/`read_file` — 샌드박스 = 작업 폴더 +
-  extraDirs; 소스는 `outline_file` 스켈레톤을 먼저 보고 범위만 읽는다 — D87)로 코드베이스·스킬 리소스 폴더·지식 산출물을 직접 읽는다(도구 행이 채팅 타임라인에 표시). 쓰기는 못 하므로
+  앱이 제공하는 **읽기 전용 파일 도구**(`list_dir`/`find_files`/`search_text`/`outline_file`/`find_references`/`read_file` — 샌드박스 = 작업 폴더 +
+  extraDirs; 소스는 `outline_file` 스켈레톤을 먼저 보고 범위만 읽으며, 호출자·영향 범위는 `find_references`로 — D87/D89)로 코드베이스·스킬 리소스 폴더·지식 산출물을 직접 읽는다(도구 행이 채팅 타임라인에 표시). 쓰기는 못 하므로
   문서 단계 산출물은 앱이 최종 답변(마지막 도구 호출 이후 텍스트)을 `write_file`로 저장한다(D67). 도구 미지원 모델
   (예: 4·7)을 고르면 텍스트 스트림만.
 - **opencode/antigravity(plain)**: 도구 스트림/파일쓰기 보장이 약해 `search`/`document` 단계가 degrade.

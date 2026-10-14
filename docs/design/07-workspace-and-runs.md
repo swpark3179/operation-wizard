@@ -65,8 +65,9 @@ Open Design의 `RuntimeAgentDef.buildArgs`/`streamFormat`/`promptViaStdin`에 �
   SSE를 파싱한다. 모델은 `resolve_model`이 결정(요청 id ∈ 캐시 ? 그대로 : `defaultModelId`/70). 한 턴은
   **tool-calling 루프**다: 라운드마다 `StreamAccumulator`가 `delta.reasoning`→`thinkingDelta`,
   `delta.content`→`textDelta`를 즉시 방출하고 `delta.tool_calls`를 index별로 병합 → tool_calls가 있으면
-  `toolUse` 방출 → `fabrix_tools::run_tool`(읽기 전용 `list_dir`/`find_files`/`search_text`/`outline_file`/`read_file`,
-  샌드박스 = `cwd` + extraDirs; `outline_file`은 `codemap`의 스켈레톤 — 선언부·줄 범위만, 본문 제외 — D87) → `toolResult`(UI엔 2k자 미리보기) → assistant(tool_calls)+`role:"tool"`
+  `toolUse` 방출 → `fabrix_tools::run_tool`(읽기 전용 `list_dir`/`find_files`/`search_text`/`outline_file`/`find_references`/`read_file`,
+  샌드박스 = `cwd` + extraDirs; `outline_file`은 `codemap`의 스켈레톤 — 선언부·줄 범위만, 본문 제외 — D87;
+  `find_references`는 심볼의 참조를 감싸는 메서드/문장과 함께 파일별로 묶은 호출자 목록 — D89) → `toolResult`(UI엔 2k자 미리보기) → assistant(tool_calls)+`role:"tool"`
   메시지를 덧붙여 다음 라운드. 상한 12라운드·`[Context]` 기반 도구 출력 예산, 소진 시 `tool_choice:"none"`으로
   답 강제. `RunArgs.tools=false`(텍스트 전용 격리 턴)나 도구 미지원 모델이면 도구 없이 1라운드. 세션리스
   (매 턴 transcript 재전송). 파일을 **쓰지는** 못하므로 **문서 단계 산출물은 클라이언트가 `write_file`로 저장**

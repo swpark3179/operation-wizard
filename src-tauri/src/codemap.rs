@@ -2990,6 +2990,220 @@ pub async fn codebase_map(root: String, focus_terms: Option<Vec<String>>) -> Res
     .map_err(|e| e.to_string())?
 }
 
+// ---------------------------------------------------------------------------
+// References / callers (D89): the first step of a blast-radius trace
+// ---------------------------------------------------------------------------
+
+const REF_MAX: usize = 200;
+const REF_PER_FILE: usize = 20;
+const REF_FILE_MAX: u64 = 1024 * 1024;
+
+struct RefHit {
+    line: usize,
+    text: String,
+    enclosing: Option<String>,
+    definition: bool,
+    in_string: bool,
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// Byte offsets of whole-word occurrences of `needle` in `hay`.
+fn word_hits(hay: &[u8], needle: &[u8], ignore_case: bool) -> Vec<usize> {
+    let mut out = Vec::new();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return out;
+    }
+    let eq = |a: &[u8]| if ignore_case { a.eq_ignore_ascii_case(needle) } else { a == needle };
+    let mut i = 0;
+    while i + needle.len() <= hay.len() {
+        if eq(&hay[i..i + needle.len()]) {
+            let before = i == 0 || !is_word_byte(hay[i - 1]);
+            let after = i + needle.len() == hay.len() || !is_word_byte(hay[i + needle.len()]);
+            if before && after {
+                out.push(i);
+                i += needle.len();
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The innermost outline item whose range covers `line`.
+fn enclosing_item(o: &Outline, line: usize) -> Option<&OutlineItem> {
+    o.items
+        .iter()
+        .filter(|it| it.kind != "more" && it.line <= line && it.end_line.unwrap_or(it.line) >= line)
+        .max_by_key(|it| (it.depth, it.line))
+}
+
+/// Find the references of `symbol` under `roots` (folders or files), grouped
+/// by file, each with the enclosing method/statement — the callers, i.e. the
+/// first ring of the blast radius. `Class.method` narrows to files that
+/// mention `Class` (plus mapper XMLs whose namespace ends with it); hits in
+/// comments are dropped, hits inside string literals are flagged (eGov DAOs
+/// call SQL statements by `"namespace.id"` strings). ALL-CAPS symbols (table
+/// names) match case-insensitively.
+pub fn find_references(
+    roots: &[std::path::PathBuf],
+    symbol: &str,
+    name_filter: &dyn Fn(&str) -> bool,
+    skip_file: &dyn Fn(&Path) -> bool,
+    label: &dyn Fn(&Path) -> String,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    let symbol = symbol.trim().trim_end_matches("()");
+    if symbol.is_empty() {
+        return Err("symbol 인자가 필요합니다 (예: OrderService.find, selectOrders, TB_ORDER).".into());
+    }
+    // `a.b.C.method` → qualifier `C`, name `method`; a full statement id
+    // `ns.id` also stays searchable as a whole (string-literal calls).
+    let (qual, name) = match symbol.rsplit_once('.') {
+        Some((q, n)) if !n.is_empty() => (Some(q.rsplit('.').next().unwrap_or(q).to_string()), n.to_string()),
+        _ => (None, symbol.to_string()),
+    };
+    let ignore_case = name.chars().any(|c| c.is_ascii_alphabetic()) && name == name.to_uppercase();
+    let needle = name.as_bytes();
+
+    let mut per_file: Vec<(String, Vec<RefHit>, usize)> = Vec::new(); // label, hits, total
+    let mut total = 0usize;
+    let mut scanned = 0usize;
+    let mut capped = false;
+    let mut seen_files: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut visit = |p: &Path, size: u64| -> bool {
+        if size > REF_FILE_MAX || skip_file(p) || !seen_files.insert(p.to_path_buf()) {
+            return true;
+        }
+        let fname = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if !name_filter(&fname) {
+            return true;
+        }
+        let Ok(bytes) = fs::read(p) else { return true };
+        if is_binary(&bytes) {
+            return true;
+        }
+        scanned += 1;
+        let hits = word_hits(&bytes, needle, ignore_case);
+        if hits.is_empty() {
+            return true;
+        }
+        let lang = lang_for(p);
+        if let Some(q) = &qual {
+            let mentions = !word_hits(&bytes, q.as_bytes(), false).is_empty();
+            let own = fname.split('.').next() == Some(q.as_str());
+            if !mentions && !own {
+                return true;
+            }
+        }
+        let mask = (lang == Lang::Java).then(|| lex_java(&bytes).0);
+        let outline_o = matches!(lang, Lang::Java | Lang::Xml | Lang::Sql).then(|| outline(lang, &bytes));
+        let lines = Lines::new(&bytes);
+        let mut file_hits: Vec<RefHit> = Vec::new();
+        let mut file_total = 0usize;
+        let mut last_line = 0usize;
+        for pos in hits {
+            let class = mask.as_ref().map(|m| m[pos]).unwrap_or(CODE);
+            if class == COMMENT {
+                continue;
+            }
+            let line = lines.of(pos);
+            if line == last_line {
+                continue; // one row per line
+            }
+            last_line = line;
+            file_total += 1;
+            total += 1;
+            if file_hits.len() >= REF_PER_FILE {
+                continue;
+            }
+            let start = lines.0[line - 1];
+            let end = lines.0.get(line).copied().unwrap_or(bytes.len());
+            let text = trunc(lossy(&bytes[start..end]).trim(), 160);
+            let enc = outline_o.as_ref().and_then(|o| enclosing_item(o, line));
+            let definition = enc.is_some_and(|it| {
+                it.line == line && (it.signature.contains(&format!(" {name}(")) || it.signature.contains(&format!("id={name}")) || it.signature.ends_with(&format!(" {name}")))
+            });
+            file_hits.push(RefHit {
+                line,
+                text,
+                enclosing: enc.filter(|_| !definition).map(|it| trunc(&it.signature, 90)),
+                definition,
+                in_string: class == STR,
+            });
+        }
+        if file_total > 0 {
+            per_file.push((label(p), file_hits, file_total));
+        }
+        if total >= REF_MAX {
+            capped = true;
+            return false;
+        }
+        true
+    };
+    let mut canceled = false;
+    for r in roots {
+        if r.is_file() {
+            let size = fs::metadata(r).map(|m| m.len()).unwrap_or(0);
+            if !visit(r, size) {
+                break;
+            }
+        } else {
+            match walk_files_with(r, cancel, WALK_MAX, &|_| false, &mut visit) {
+                WalkStop::Canceled => {
+                    canceled = true;
+                    break;
+                }
+                WalkStop::Visitor => break,
+                _ => {}
+            }
+        }
+    }
+    if canceled {
+        return Err("취소되었습니다.".into());
+    }
+    if per_file.is_empty() {
+        return Ok(format!("'{symbol}' 참조를 찾지 못했습니다 (파일 {scanned}개 확인). 철자·대소문자를 확인하거나 search_text로 넓게 찾아보세요.\n"));
+    }
+    per_file.sort_by(|a, b| a.0.cmp(&b.0));
+    let defs = per_file.iter().flat_map(|(_, h, _)| h.iter()).filter(|h| h.definition).count();
+    let strs = per_file.iter().flat_map(|(_, h, _)| h.iter()).filter(|h| h.in_string).count();
+    let mut out = format!(
+        "'{symbol}' 참조 — 파일 {}개 · 위치 {total}건 (정의 {defs}, 문자열 {strs}; 주석 제외){}\n",
+        per_file.len(),
+        if capped { format!(" — 상한 {REF_MAX}건에서 중단") } else { String::new() }
+    );
+    let radius: Vec<String> = per_file
+        .iter()
+        .map(|(l, h, n)| {
+            let short = l.rsplit(['/', '\\']).next().unwrap_or(l);
+            if h.iter().any(|x| x.definition) { format!("{short}({n}, 정의)") } else { format!("{short}({n})") }
+        })
+        .collect();
+    out.push_str(&format!("영향 파일(Blast Radius 1단계): {}\n\n", radius.join(", ")));
+    for (l, hits, n) in &per_file {
+        out.push_str(l);
+        out.push('\n');
+        for h in hits {
+            let tag = if h.definition {
+                "[정의] ".to_string()
+            } else {
+                h.enclosing.as_ref().map(|e| format!("[{e}] ")).unwrap_or_default()
+            };
+            let s = if h.in_string { " (문자열)" } else { "" };
+            out.push_str(&format!("  L{} {tag}{}{s}\n", h.line, h.text));
+        }
+        if *n > hits.len() {
+            out.push_str(&format!("  …(이 파일 {}건 더)\n", n - hits.len()));
+        }
+    }
+    out.push_str("재귀 추적: 위 [감싸는 메서드]의 이름으로 find_references를 다시 호출하면 다음 단계 호출자를 찾습니다.\n");
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3497,6 +3711,45 @@ public class OrderAction extends DispatchAction {
         assert_eq!(mapping_of("@GetMapping public void b()"), Some(("GET".into(), String::new())));
         assert_eq!(join_paths("/api/", "/a"), "/api/a");
         assert_eq!(join_paths("", ""), "/");
+    }
+
+    fn refs(root: &Path, symbol: &str) -> String {
+        find_references(&[root.to_path_buf()], symbol, &|_| true, &|_| false, &|p: &Path| p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/"), &AtomicBool::new(false)).unwrap()
+    }
+
+    #[test]
+    fn find_references_reports_callers_with_enclosing_symbols() {
+        let root = sample_repo("refs");
+        fs::write(
+            root.join("src/main/java/com/sds/order/web/Legacy.java"),
+            "package com.sds.order.web;\npublic class Legacy {\n    // orderService.find(1) — commented out\n    void old() { /* OrderService x; x.find(2); */ }\n}\n",
+        )
+        .unwrap();
+        let r = refs(&root, "OrderService.find");
+        assert!(r.contains("OrderController.java(1)"), "{r}");
+        assert!(r.contains("L9 [@GetMapping(\"/{id}\") public OrderDto get(@PathVariable Long id)] public OrderDto get("), "{r}");
+        assert!(r.contains("OrderService.java(1, 정의)") && r.contains("[정의] OrderDto find(Long id);"), "{r}");
+        assert!(!r.contains("Legacy.java"), "comment-only hits are dropped: {r}");
+        assert!(!r.contains("OrderMapper.java"), "files not mentioning the qualifier are skipped: {r}");
+
+        // A statement id: the DAO's string call + the XML definition.
+        let s = refs(&root, "insertItem");
+        assert!(s.contains("OrderDAO.java") && s.contains("(문자열)"), "{s}");
+        assert!(s.contains("Order_SQL.xml(1, 정의)"), "{s}");
+
+        // ALL-CAPS table names match case-insensitively; none → a clear message.
+        let t = refs(&root, "tb_order");
+        assert!(t.contains("찾지 못했습니다"), "lower-case symbol stays case-sensitive: {t}");
+        let t = refs(&root, "TB_ORDER");
+        assert!(t.contains("OrderMapper.xml(1)"), "{t}");
+        assert!(refs(&root, "nothingLikeThis").contains("찾지 못했습니다"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn word_hits_respect_boundaries() {
+        assert_eq!(word_hits(b"find findAll refind find(", b"find", false), vec![0, 20]);
+        assert_eq!(word_hits(b"FROM tb_order o", b"TB_ORDER", true), vec![5]);
     }
 
     #[test]
