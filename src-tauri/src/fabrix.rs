@@ -32,6 +32,7 @@ use tauri::ipc::Channel;
 use tauri::Manager;
 
 use crate::detect::{DetectedAgent, ModelOption};
+use crate::fabrix_rate;
 use crate::fabrix_tools::{self, Sandbox, ToolOutcome};
 use crate::run::{RunArgs, RunEvent, RunRegistry};
 use crate::settings::{self, FabrixConfig};
@@ -63,8 +64,6 @@ const DEFAULT_TOOL_BUDGET: usize = 64_000;
 /// Tool results shown in the chat timeline (and saved in session JSON) are
 /// previews; the model always gets the full (capped) text.
 const UI_PREVIEW_CHARS: usize = 2_000;
-/// Honour a 429 `Retry-After` once when it is this short (seconds).
-const RETRY_AFTER_MAX_SECS: u64 = 10;
 
 const LENGTH_MSG: &str = "FabriX 응답이 출력 토큰 한도(추론 토큰 포함, 게이트웨이 기본 16384)에 도달해 잘렸습니다(finish_reason=length). 요청 범위를 나누거나 다시 시도하세요.";
 
@@ -75,7 +74,7 @@ const HINT_UNKNOWN_MODEL: &str =
 const HINT_TOKEN: &str = "x-openapi-token 값을 확인하세요('Bearer ' 접두사·만료 여부).";
 const HINT_CLIENT: &str =
     "x-fabrix-client 키가 잘못되었거나 만료되었습니다 — FabriX 포털에서 재발급받아 저장하세요.";
-const HINT_RATE: &str = "호출 한도를 초과했습니다 — 잠시 후 다시 시도하세요.";
+const HINT_RATE: &str = "호출 한도를 초과했습니다 — 잠시 후 다시 시도하고, Agents 화면 FabriX 카드의 '분당 호출 한도'를 라이선스 값에 맞추세요.";
 const HINT_PATH: &str =
     "API 경로 오류입니다 — 엔드포인트에는 발급받은 Endpoint URL만 입력하세요(/openapi/llm은 앱이 붙입니다).";
 
@@ -266,6 +265,8 @@ pub fn parse_models(body: &str) -> Result<Vec<ModelOption>, String> {
 fn fetch_models(cfg: &FabrixConfig) -> Result<Vec<ModelOption>, String> {
     let client = build_client(MODELS_TIMEOUT)?;
     let url = format!("{}/v1/models", base_url(cfg));
+    // Counted (not paced): detection must not stall on the quota (D91).
+    fabrix_rate::record();
     let resp = with_auth(client.get(&url), cfg)
         .header("Accept", "application/json")
         .send()
@@ -566,7 +567,7 @@ impl StreamAccumulator {
 // Chat request + tool loop
 // ---------------------------------------------------------------------------
 
-fn system_prompt(tools: bool, roots: &[String]) -> String {
+fn system_prompt(tools: bool, roots: &[String], limit: u32) -> String {
     let mut s = String::from(
         "당신은 Samsung SDS Operation Wizard의 업무 보조 AI입니다. 사용자 요청에 정확하고 도움이 되게 답합니다.",
     );
@@ -585,8 +586,20 @@ fn system_prompt(tools: bool, roots: &[String]) -> String {
              - 도구로는 파일을 만들거나 수정할 수 없습니다. 문서 산출물 저장은 앱이 처리하므로, 문서를 작성하는 단계에서는 최종 답변에 문서 본문만 출력하세요.\n\
              - 충분히 파악했으면 더 읽지 말고 바로 답하세요.",
         );
+        s.push_str(&call_budget_rule(limit));
     }
     s
+}
+
+/// The call-cost rule appended to the tool principles (D91): every response
+/// that calls tools is one API call against the licence quota, so independent
+/// lookups must be requested together.
+fn call_budget_rule(limit: u32) -> String {
+    let quota = if limit == 0 { "호출 수는 비용과 대기 시간으로 이어집니다".to_string() } else { format!("라이선스상 분당 {limit}회까지만 호출할 수 있습니다") };
+    format!(
+        "\n- 도구를 호출하는 응답 1회가 API 호출 1회로 계산되고 {quota}. 서로 독립적인 조회(여러 파일 읽기·여러 검색어·여러 아웃라인)는 \
+         한 응답에서 여러 도구를 동시에 호출해 한 번에 요청하고, 파일을 하나씩 순차로 열지 마세요."
+    )
 }
 
 /// The `/chat/completions` body. No `max_tokens`: the gateway default (16384)
@@ -673,17 +686,6 @@ fn spend_budget(content: String, budget: &mut usize) -> String {
     format!("{kept}\n…(도구 출력 예산 소진 — 지금까지 읽은 내용으로 답하세요)")
 }
 
-/// Sleep `secs`, polling the cancel flag; `true` if canceled meanwhile.
-fn sleep_cancellable(secs: u64, cancel: &AtomicBool) -> bool {
-    for _ in 0..(secs * 4) {
-        if cancel.load(Ordering::Relaxed) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    cancel.load(Ordering::Relaxed)
-}
-
 enum PostError {
     Canceled,
     Failed(String),
@@ -697,10 +699,16 @@ struct Turn<'a> {
     model: &'a str,
     plain_system: &'a str,
     cancel: &'a AtomicBool,
+    /// Licence quota (calls per minute; 0 = unpaced) — D91.
+    limit: u32,
+    emit: &'a dyn Fn(RunEvent),
 }
 
-/// POST one round. Retries once on a 429 with a short `Retry-After`, and — on
-/// the first round — once without tools if the gateway rejects them (400).
+/// POST one round. Every attempt first waits for the licence quota (the
+/// process-wide gate in `fabrix_rate.rs`, D91). A 429 is waited out and the
+/// SAME request re-sent (the conversation so far stays in memory, so no tool
+/// round is lost) up to `MAX_RATE_RETRIES` times; on the first round the
+/// request is also retried once without tools if the gateway rejects them (400).
 fn post_round(
     t: &Turn,
     messages: &mut [Value],
@@ -708,9 +716,15 @@ fn post_round(
     final_round: bool,
     round: usize,
 ) -> Result<reqwest::blocking::Response, PostError> {
-    let mut retried_rate = false;
+    let mut rate_retries = 0u32;
     let mut retried_tools = false;
     loop {
+        let paced = fabrix_rate::acquire(t.limit, t.cancel, &|secs| {
+            (t.emit)(RunEvent::Notice { message: pace_notice(t.limit, secs) })
+        });
+        if !paced {
+            return Err(PostError::Canceled);
+        }
         let body = chat_body(messages, *tools, final_round);
         let resp = with_auth(t.client.post(t.url), t.cfg)
             .header("x-llm-model-id", t.model)
@@ -728,10 +742,17 @@ fn post_round(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok());
         let text = resp.text().unwrap_or_default();
-        if status.as_u16() == 429 && !retried_rate {
-            if let Some(secs) = retry_after.filter(|s| *s <= RETRY_AFTER_MAX_SECS) {
-                retried_rate = true;
-                if sleep_cancellable(secs, t.cancel) {
+        if status.as_u16() == 429 && rate_retries < fabrix_rate::MAX_RATE_RETRIES {
+            if let Some(wait) = fabrix_rate::on_rate_limited(retry_after, rate_retries) {
+                rate_retries += 1;
+                (t.emit)(RunEvent::Notice {
+                    message: format!(
+                        "FabriX 호출 한도 초과(HTTP 429) — {}초 대기 후 같은 요청을 다시 보냅니다 ({rate_retries}/{}).",
+                        fabrix_rate::ceil_secs(wait),
+                        fabrix_rate::MAX_RATE_RETRIES
+                    ),
+                });
+                if fabrix_rate::sleep_cancellable(wait, t.cancel) {
                     return Err(PostError::Canceled);
                 }
                 continue;
@@ -744,6 +765,15 @@ fn post_round(
             continue;
         }
         return Err(PostError::Failed(error_message(status.as_u16(), &text)));
+    }
+}
+
+/// The chat notice shown while a call waits for the licence quota (D91).
+fn pace_notice(limit: u32, secs: u64) -> String {
+    if limit == 0 {
+        format!("FabriX 호출 한도 초과 이후 대기 중 — {secs}초 후 이어서 진행합니다.")
+    } else {
+        format!("FabriX 분당 호출 한도({limit}회)에 맞춰 {secs}초 대기 후 이어서 진행합니다.")
     }
 }
 
@@ -768,11 +798,12 @@ fn drive(
     let mut tools = args.tools != Some(false) && meta.and_then(|m| m.tools) != Some(false) && !sandbox.is_empty();
     let mut budget = tool_budget(meta.and_then(|m| m.context.as_deref()));
     let url = format!("{}/chat/completions", base_url(cfg));
-    let plain_system = system_prompt(false, &[]);
-    let turn = Turn { client: &client, url: &url, cfg, model, plain_system: &plain_system, cancel };
+    let limit = fabrix_rate::limit_of(cfg);
+    let plain_system = system_prompt(false, &[], limit);
+    let turn = Turn { client: &client, url: &url, cfg, model, plain_system: &plain_system, cancel, limit, emit };
 
     let mut messages = vec![
-        json!({ "role": "system", "content": system_prompt(tools, &sandbox.root_labels()) }),
+        json!({ "role": "system", "content": system_prompt(tools, &sandbox.root_labels(), limit) }),
         json!({ "role": "user", "content": args.prompt }),
     ];
 
@@ -960,6 +991,7 @@ mod tests {
             allow_invalid_certs: false,
             default_model_id: default.map(str::to_string),
             models,
+            calls_per_minute: None,
         }
     }
 
@@ -1309,9 +1341,9 @@ mod tests {
     #[test]
     fn system_prompt_lists_roots_only_with_tools() {
         let roots = vec![r"C:\work".to_string(), r"D:\code".to_string()];
-        let with = system_prompt(true, &roots);
+        let with = system_prompt(true, &roots, 10);
         assert!(with.contains(r"- C:\work") && with.contains("read_file") && with.contains("outline_file") && with.contains("find_references") && with.contains("앱이 처리"));
-        let without = system_prompt(false, &roots);
+        let without = system_prompt(false, &roots, 10);
         assert!(!without.contains("read_file"));
     }
 }

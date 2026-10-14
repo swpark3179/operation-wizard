@@ -580,6 +580,14 @@ export function ChatPanel({
       case "error":
         updateLastAssistant((m) => ({ ...m, error: ev.message }));
         break;
+      case "notice":
+        // e.g. FabriX pacing to its per-minute call quota (D91). Not part of the
+        // reply text (the remote document body is unaffected).
+        updateLastAssistant((m) => ({
+          ...m,
+          events: [...m.events, { kind: "notice", text: ev.message }],
+        }));
+        break;
       case "end": {
         setStreaming(false);
         runIdRef.current = null;

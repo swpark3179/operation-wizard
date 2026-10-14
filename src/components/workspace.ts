@@ -124,4 +124,6 @@ export interface ChatMessage {
 export type TimelineEvent =
   | { kind: "toolUse"; id: string; name: string; input: unknown }
   | { kind: "toolResult"; toolUseId: string; content: string; isError: boolean }
-  | { kind: "usage"; inputTokens?: number; outputTokens?: number };
+  | { kind: "usage"; inputTokens?: number; outputTokens?: number }
+  /** Informational line, e.g. FabriX waiting for its call quota (D91). */
+  | { kind: "notice"; text: string };

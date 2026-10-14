@@ -23,6 +23,14 @@ const badgeCls = "rounded-full bg-subtle px-1.5 py-0.5 text-[10.5px] text-ink-so
 /** Default model when none is configured — 70 = Glm 5.2 (analysis + tool
  * calling; mirrors `fabrix::DEFAULT_MODEL_ID`). */
 const DEFAULT_MODEL_ID = "70";
+/** Licence quota when the card leaves the field blank (D91 — mirrors
+ * `fabrix_rate::DEFAULT_CALLS_PER_MINUTE`). */
+const DEFAULT_CALLS_PER_MINUTE = 10;
+
+/** The saved quota as input text (absent → blank = default). */
+function quotaText(v: number | null | undefined): string {
+  return v === null || v === undefined ? "" : String(v);
+}
 
 /** Card for the FabriX remote HTTP agent — the FabriX LLM Serving API
  * (OpenAI-compatible, D64/D84). Unlike {@link AgentCard} (a single custom
@@ -54,6 +62,7 @@ export function FabrixCard({
   const [client, setClient] = useState(cfg?.client ?? "");
   const [token, setToken] = useState(cfg?.openapiToken ?? "");
   const [defaultModel, setDefaultModel] = useState(cfg?.defaultModelId ?? DEFAULT_MODEL_ID);
+  const [callsPerMinute, setCallsPerMinute] = useState(quotaText(cfg?.callsPerMinute));
   const [showModels, setShowModels] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -67,6 +76,7 @@ export function FabrixCard({
     setClient(cfg?.client ?? "");
     setToken(cfg?.openapiToken ?? "");
     setDefaultModel(cfg?.defaultModelId ?? DEFAULT_MODEL_ID);
+    setCallsPerMinute(quotaText(cfg?.callsPerMinute));
     setSaved(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
@@ -81,6 +91,12 @@ export function FabrixCard({
     setSaving(true);
     setSaveError(null);
     setProbe(null);
+    const quota = callsPerMinute.trim();
+    if (quota && !/^\d+$/.test(quota)) {
+      setSaveError("분당 호출 한도는 0 이상의 정수로 입력하세요 (0 = 제한 없음).");
+      setSaving(false);
+      return;
+    }
     try {
       const next: FabrixConfig | null = endpoint.trim()
         ? {
@@ -90,6 +106,8 @@ export function FabrixCard({
             // TLS is always verified (D84) — the legacy opt-out stays off.
             allowInvalidCerts: false,
             defaultModelId: defaultModel.trim() || null,
+            // Blank → the default licence quota (D91); the backend caps it.
+            callsPerMinute: quota ? Number(quota) : null,
           }
         : null;
       await onSaveFabrix(next);
@@ -288,6 +306,27 @@ export function FabrixCard({
             <p className="mt-1 text-[11.5px] text-ink-soft">
               채팅의 기본 선택 모델입니다. 70(Glm 5.2)은 분석·도구 활용, 16(gpt-oss-120b)은 빠르고 저렴한
               간단 질의에 권장됩니다. 도구 미지원 모델은 파일을 읽지 못합니다.
+            </p>
+          </div>
+          <div>
+            <label className={labelCls}>분당 호출 한도 (라이선스)</label>
+            <div className="w-[120px]">
+              <input
+                value={callsPerMinute}
+                onChange={(e) => {
+                  setCallsPerMinute(e.target.value);
+                  setSaved(false);
+                }}
+                disabled={saving}
+                inputMode="numeric"
+                placeholder={String(DEFAULT_CALLS_PER_MINUTE)}
+                className={inputCls + " font-mono text-[12px]"}
+              />
+            </div>
+            <p className="mt-1 text-[11.5px] text-ink-soft">
+              도구를 쓰는 대화는 조회 라운드마다 API를 1회 호출합니다. 앱이 이 한도에 맞춰 호출 간격을
+              조절하고, 한도에 걸리면 실패 대신 잠시 기다렸다가 이어서 진행합니다. 비우면{" "}
+              {DEFAULT_CALLS_PER_MINUTE}회, 0이면 제한 없음.
             </p>
           </div>
         </div>

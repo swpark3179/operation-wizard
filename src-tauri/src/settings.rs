@@ -161,6 +161,11 @@ pub struct FabrixConfig {
     /// carry the FabriX `context`/`tools` metadata (D84).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelOption>,
+    /// Licence quota: FabriX API calls allowed per minute. Every tool-loop round
+    /// is one call, so `fabrix_rate.rs` paces all FabriX runs to stay under it
+    /// (D91). `None` → 10 (the common licence); `0` = no pacing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls_per_minute: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -471,6 +476,7 @@ mod tests {
                 },
                 ModelOption::new("16", "gpt-oss-120b(Mid)"),
             ],
+            calls_per_minute: Some(20),
         }));
         save(&root, &s).unwrap();
 
@@ -557,6 +563,7 @@ mod tests {
         let fx = s.fabrix.clone().unwrap();
         assert_eq!(fx.endpoint_url, "https://f");
         assert!(fx.default_model_id.is_none());
+        assert!(fx.calls_per_minute.is_none(), "no quota saved → default pacing (D91)");
         // Old `{id,label}` cache entries still deserialize (metadata → None).
         assert_eq!(fx.models[0].id, "m-uuid");
         assert!(fx.models[0].context.is_none() && fx.models[0].tools.is_none());
