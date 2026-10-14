@@ -179,7 +179,10 @@ resolve  →  version probe  →  models probe(있으면)  →  DetectedAgent
   `[Context]`/`[Tools]`·nbsp), endpoint 정규화·`Bearer` 자동 부착, `resolve_model`/기본 모델 정렬/구 UUID 캐시 무효,
   `error_message`(WSO2/OIDC/litellm 오류 3종 + 429/405 힌트), `StreamAccumulator`(captured 도구 호출 스트림의
   조각 병합·usage 청크·reasoning), `chat_body`(헤더 모델·`/mnt/models`·`max_tokens` 없음·`tool_choice`),
-  도구 예산. `fabrix_tools`: 와일드카드·샌드박스(`..`/외부 경로/`.env` 거부)·4종 도구·취소.
+  도구 예산. `fabrix_tools`: 와일드카드·샌드박스(`..`/외부 경로/`.env` 거부, 상대경로 다중 루트 해석)·5종 도구
+  (`outline_file` 포함 — D87)·취소. `codemap`: Java(Spring 컨트롤러·렉싱 토처·enum/익명 클래스/람다·record/제네릭·
+  eGov/Struts·CRLF·깨진 UTF-8·불균형)·MyBatis/iBATIS/web.xml/struts/beans/매퍼 조각·SQL(DDL+COMMENT ON·패키지
+  spec/body·트리거/뷰·문자열/주석 렉싱·`sql_tables` 패턴)·Markdown·근사 폴백·렌더 예산 fixture.
   `#[ignore]` **E2E `fabrix_e2e_mock`**: 샘플 목업 서버 상대로 모델 목록·도구 루프·no-tools 스트림·404/401 힌트.
 - **rag 파서 단위 테스트**: rag-chat `/models`용 `parse_models_json`(ko content 매핑·폴백·비배열/비JSON→Err —
   D84에서 fabrix.rs에서 rag.rs로 이동, 동작 불변).

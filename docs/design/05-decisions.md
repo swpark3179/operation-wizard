@@ -1868,3 +1868,46 @@
   사용자는 개정된 기본 지시문을 "기본값으로 되돌리기"로만 받지만, 방법론·Learnings 계약·인계는 런타임이라 즉시 적용.
   plain(opencode/antigravity)·세션리스가 계약을 안 지키면 Learnings 없음 → 산출물 인덱스만 주입(degrade). 후속:
   정적 분석기(스켈레톤 추출·저장소 지도)와 코드베이스별 Learnings 캐시는 별도 결정으로 이어진다.
+
+---
+
+### D87. 휴리스틱 정적 코드 맵 `codemap.rs` + FabriX `outline_file` 도구 + 상대경로 다중 루트 해석 (D84/D86 확장)
+- **배경**: D86의 방법론은 "선언부(스켈레톤) 먼저, 본문은 핵심 심볼만"을 지시하지만, FabriX에는 그런 뷰를 줄 도구가 없어
+  결국 `read_file`로 본문을 통째로 읽었다(결과당 최대 15k자 — 12라운드·도구 예산을 빠르게 소진). Trail-Code는 tree-sitter로
+  스켈레톤을 만든다. 또 `Sandbox::resolve`는 상대경로를 작업 폴더 기준으로만 해석해, 코드베이스 기준 상대경로로 다시 읽으면
+  "찾을 수 없습니다"가 났다.
+- **결정(자체 휴리스틱 파서, 사용자 확정 — 신규 crate 0)**: 새 모듈 `src-tauri/src/codemap.rs` — Sandbox를 모르는 **순수
+  함수**(`outline(lang, &[u8]) -> Outline`, `render_outline`)만 둔다. 우선 언어는 SDS 레거시 스택(사용자 확정):
+  - **Java**: 바이트 단위 클래스 마스크(코드/주석/문자열·텍스트 블록·문자 리터럴) + 프레임 스택(Type/Member/Expr) 스캐너.
+    **헤더는 최상위나 타입 직속에서만 해석**하고 메서드 본문은 중괄호만 세므로 람다·익명/로컬 클래스가 구조를 깨지 못한다.
+    헤더 분류 = 어노테이션 제거(화이트리스트만 표시: Spring 역할·매핑·주입·트랜잭션·스케줄) → 수식어 제거 → 타입/호출부
+    (꺾쇠 깊이 0의 첫 `(`, `=` 이전)/필드(초기화식 제거)/초기화 블록. enum 상수(본문 포함)·record compact 생성자·
+    `@interface`·`sealed/non-sealed`·제네릭 메서드를 처리. 파라미터에서는 바인딩 어노테이션(`@PathVariable`·`@RequestParam`·
+    `@RequestBody`·`@Param`…)만 남기고 `@Valid`·`final`을 지운다. 진입점 표시(▶): `@Controller`/`@RestController`/
+    `@SpringBootApplication`/서블릿/Struts `Action`·`DispatchAction`/Spring 2 컨트롤러, 메서드는 `*Mapping`/`@Scheduled`/
+    리스너/`main`/`ActionMapping`. Javadoc은 첫 문장(UTF-8이 아니면 생략 — EUC-KR 레거시에서도 구조는 유지).
+  - **XML**: 따옴표 인식 태그 스캐너(주석·PI·DOCTYPE 건너뜀, CDATA는 텍스트). MyBatis `mapper`/iBATIS `sqlMap`(+ 문장 태그가
+    있는 **매퍼 조각**)은 문장별 `id`·param/result·`include`와 **참조 테이블 C/R/U/D**(`#{}`·`${}`·`#x#`·`$x$` 바인드 제거,
+    `selectKey` 본문 제외, `{call PKG.P}` 호출 표시) + 파일 단위 CRUD 요약. `web.xml`(servlet·mapping·filter·listener·
+    context-param)·`struts-config`(action·form-bean)는 진입점 맵, Spring `beans`(bean·component-scan·import),
+    `configuration`/`sqlMapConfig`(매퍼 등록), 그 외는 하위 요소 개수만(근사).
+  - **SQL/PL-SQL**: 토크나이저(`--`·`/* */`·`''`·`q'[…]'`·`"ident"`) 위에서 CREATE TABLE(컬럼 ≤40·PK·`COMMENT ON`·
+    인라인 COMMENT)/VIEW/INDEX/SEQUENCE/SYNONYM/PROCEDURE/FUNCTION/PACKAGE [BODY](멤버 시그니처 + 멤버별 테이블·`END name`
+    종료 줄)/TRIGGER. `BEGIN/END` 깊이는 추적하지 않는다(`END IF/LOOP` 오작동 방지). CREATE가 없으면 DML 스크립트 요약.
+  - `sql_tables_in`: FROM/JOIN/INTO(INSERT·MERGE 뒤만 — PL/SQL `SELECT … INTO v`는 변수)/UPDATE(`FOR UPDATE`·`THEN UPDATE`
+    제외)/DELETE/USING/TRUNCATE, 콤마 조인 목록·서브쿼리 건너뛰기·CTE·DUAL 제외, `EXTRACT(YEAR FROM col)` 같은 함수 인자
+    FROM 무시.
+  - Markdown 헤딩(펜스 인식), 그 외 언어는 선언처럼 보이는 줄만 **근사**로 표시. 상한: 파일 1 MiB, 항목 300, 시그니처
+    200자, 타입당 필드 25·enum 상수 20·컬럼 40. 불균형 입력은 `degraded`로 표시하고 **절대 패닉하지 않는다**.
+  - 렌더: `L12-40 시그니처 — 문서` 줄을 깊이별 들여쓰기 + ▶ 진입점 + "본문은 read_file(start_line, max_lines)로 범위만"
+    안내, 글자 예산 내에서 자르고 생략 개수 표시.
+- **결정(FabriX 연동)**: `fabrix_tools`에 다섯 번째 도구 **`outline_file(path)`**(sandbox resolve → 1 MiB·바이너리 거부 →
+  `codemap` → 결과 상한). `Sandbox::resolve`는 **상대경로가 cwd에 없으면 다른 루트(코드베이스·스킬·지식)를 순서대로 시도**한다
+  (샌드박스 검사는 그대로 — `..` 탈출 불가). 도구 이름을 하드코딩한 곳(시스템 프롬프트의 도구 목록·원칙 "outline_file로
+  선언부 먼저", unknown-tool 메시지, ChatPanel `remoteDocCtx`, 내장 방법론의 FabriX 요령, 테스트)을 함께 갱신.
+- **대안 기각**: tree-sitter(정확하지만 언어별 grammar crate + C 컴파일, 단일 exe·사내망·MSVC 빌드 부담 — 사용자가 휴리스틱
+  선택) / 정규식 기반(`regex` crate 추가 + 중첩 구조에 취약) / C-like 범용 파서로 TS/JS까지(정규식 리터럴·템플릿 `${}`
+  중첩 등 비용 대비 이득 낮음 — 우선 언어 밖) / `symbol_body` 별도 도구(아웃라인의 줄 범위 + 기존 `read_file`로 충분).
+- **한계/재검토**: 휴리스틱이라 드문 문법(유니코드 이스케이프 `\uXXXX`, 비표준 매퍼 확장)은 누락될 수 있고 `degraded`/근사로
+  표시된다. CLI 에이전트(claude/codex/gemini)는 앱 도구를 호출할 수 없으므로, 이 분석기를 그쪽에 쓰려면 앱이 미리 계산해
+  프롬프트로 넣어야 한다(후속 결정). `#[ignore]` E2E(`fabrix_e2e_mock`)는 샘플 목업 서버가 필요해 이번에 확장하지 않았다.

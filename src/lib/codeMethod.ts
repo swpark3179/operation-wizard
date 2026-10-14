@@ -52,9 +52,11 @@ function tacticsFor(agentId: string): string {
   \`<mapper namespace=|<(select|insert|update|delete) id=\`, \`CREATE (OR REPLACE )?(TABLE|VIEW|PROCEDURE|FUNCTION|PACKAGE)\`.
 - Read는 offset/limit로 필요한 줄 범위만 읽으세요. 파일 전체 읽기는 짧은 설정 파일에만 씁니다.`;
     case "fabrix":
-      return `- 읽기 전용 도구를 쓰세요. \`search_text\`는 정규식이 아닌 **리터럴(부분 문자열) 검색**입니다 —
-  \`@RestController\`, \`@RequestMapping\`, \`<mapper namespace=\`, \`CREATE OR REPLACE\` 같은 리터럴 앵커로 위치를 찾고,
-  \`read_file\`의 start_line/max_lines로 그 주변만 읽으세요. \`find_files\`로 *Controller.java·*Mapper.xml 등의 분포를 봅니다.`;
+      return `- 읽기 전용 도구를 쓰세요. 소스 파일은 본문 대신 **\`outline_file\`(선언부·어노테이션·줄 범위, 매퍼 XML은 문장 id와
+  참조 테이블 CRUD)** 을 먼저 보고, 필요한 범위만 \`read_file\`의 start_line/max_lines로 읽습니다.
+- \`search_text\`는 정규식이 아닌 **리터럴(부분 문자열) 검색**입니다 — \`@RestController\`, \`@RequestMapping\`,
+  \`<mapper namespace=\`, \`CREATE OR REPLACE\` 같은 리터럴 앵커로 위치를 찾고, \`find_files\`로 *Controller.java·
+  *Mapper.xml 등의 분포를 봅니다.`;
     case "codex":
       return `- 검색 명령(rg -n / grep -n / Select-String)으로 선언부 패턴(어노테이션·public 메서드·mapper id·CREATE 문)만 먼저 모으고,
   파일은 필요한 줄 범위만 출력해 읽으세요(전체 cat 금지).`;

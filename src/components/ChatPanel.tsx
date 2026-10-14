@@ -1114,7 +1114,7 @@ export function ChatPanel({
     // Only for remote document steps; CLI wire unchanged.
     const remoteDocCtx =
       !isPrefill && isRemote && stepInject && step && isGenerative(step.kind) && step.file
-        ? "이 단계의 최종 답변 전체가 그대로 문서 파일로 저장됩니다(저장은 앱이 처리). 필요하면 먼저 읽기 전용 파일 도구(list_dir·find_files·search_text·read_file)로 근거 파일을 읽은 뒤, 최종 답변에는 파일 저장 도구 사용·저장 여부 언급·인사말·메타설명 없이 문서 본문(마크다운/HTML)만 출력하세요."
+        ? "이 단계의 최종 답변 전체가 그대로 문서 파일로 저장됩니다(저장은 앱이 처리). 필요하면 먼저 읽기 전용 파일 도구(list_dir·find_files·search_text·outline_file·read_file)로 근거 파일을 읽은 뒤, 최종 답변에는 파일 저장 도구 사용·저장 여부 언급·인사말·메타설명 없이 문서 본문(마크다운/HTML)만 출력하세요."
         : "";
 
     const wire = isPrefill
