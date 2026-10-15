@@ -66,6 +66,16 @@ const DEFAULT_TOOL_BUDGET: usize = 64_000;
 const UI_PREVIEW_CHARS: usize = 2_000;
 
 const LENGTH_MSG: &str = "FabriX 응답이 출력 토큰 한도(추론 토큰 포함, 게이트웨이 기본 16384)에 도달해 잘렸습니다(finish_reason=length). 요청 범위를 나누거나 다시 시도하세요.";
+/// Final error after the in-turn re-asks also came back empty. The frontend
+/// matches "FabriX가 빈 응답" to skip the workflow step instead of halting it (D93).
+const EMPTY_MSG: &str =
+    "FabriX가 빈 응답을 반환했습니다(도구 없이 다시 요청해도 비어 있음) — 다시 시도하거나 다른 모델을 선택하세요.";
+const RECOVERY_NOTICE: &str =
+    "FabriX 응답이 비어 있어, 지금까지 조회한 내용을 붙여 도구 없이 답변을 한 번 더 요청합니다.";
+/// Closing instruction of the recovery request (D93).
+const RECOVERY_INSTRUCTION: &str = "[앱 안내] 직전 응답이 비어 있었습니다. 이제 도구는 사용할 수 없습니다 — 위 요청과 조회 결과만으로 지금 바로 최종 답변을 작성하세요. 이 단계가 문서를 요구하면 문서 본문만 출력하고, 조회하지 못해 확인할 수 없는 내용은 '미확인'으로 표시하세요.";
+/// Tool arguments shown per entry in the recovery request.
+const RECOVERY_ARGS_CHARS: usize = 300;
 
 const HINT_MISSING_MODEL: &str =
     "x-llm-model-id(모델 ID) 헤더가 없거나 잘못되면 이 401이 납니다 — 모델을 다시 선택하세요.";
@@ -639,6 +649,34 @@ fn assistant_tool_message(content: &str, calls: &[ToolCallAcc]) -> Value {
     })
 }
 
+/// One executed tool call, kept (without the round footer) for the recovery
+/// request.
+struct ToolLogEntry {
+    name: String,
+    arguments: String,
+    content: String,
+}
+
+/// The tool-free request sent once when a reply comes back empty (D93): the
+/// original request plus everything the tools returned so far, flattened into
+/// one user message. No `tool_calls`/`tool` roles and no `tools` field — the
+/// shape that just came back empty (a gateway that ignores
+/// `tool_choice:"none"`, or a malformed call dropped by its parser) is exactly
+/// what this avoids.
+fn recovery_messages(system: &str, prompt: &str, log: &[ToolLogEntry]) -> Vec<Value> {
+    let mut user = String::from(prompt);
+    if !log.is_empty() {
+        user.push_str("\n\n---\n[앞서 읽기 전용 도구로 조회한 내용]\n");
+        for (i, e) in log.iter().enumerate() {
+            let args = fabrix_tools::clip_chars(e.arguments.trim(), RECOVERY_ARGS_CHARS);
+            user.push_str(&format!("\n### {}. {} {args}\n{}\n", i + 1, e.name, e.content));
+        }
+    }
+    user.push_str("\n---\n");
+    user.push_str(RECOVERY_INSTRUCTION);
+    vec![json!({ "role": "system", "content": system }), json!({ "role": "user", "content": user })]
+}
+
 /// Tool-call `arguments` → a JSON object (`""` → `{}`).
 fn parse_arguments(raw: &str) -> Result<Value, String> {
     let t = raw.trim();
@@ -829,12 +867,19 @@ fn drive(
     let (mut tokens_in, mut tokens_out, mut saw_usage) = (0u64, 0u64, false);
     let (mut any_text, mut any_thinking) = (false, false);
     let mut force_final = false;
+    // Empty-reply recovery (D93): the executed calls, and whether the single
+    // tool-free retry was sent. It may run one round past MAX_ROUNDS.
+    let mut tool_log: Vec<ToolLogEntry> = Vec::new();
+    let mut recovering = false;
 
-    for round in 0..=MAX_ROUNDS {
+    for round in 0..=MAX_ROUNDS + 1 {
         if cancel.load(Ordering::Relaxed) {
             return "canceled";
         }
-        let final_round = force_final || round == MAX_ROUNDS || budget == 0;
+        if round > MAX_ROUNDS && !recovering {
+            break;
+        }
+        let final_round = recovering || force_final || round >= MAX_ROUNDS || budget == 0;
         let resp = match post_round(&turn, &mut messages, &mut tools, final_round, round) {
             Ok(r) => r,
             Err(PostError::Canceled) => return "canceled",
@@ -909,16 +954,25 @@ fn drive(
                 emit(RunEvent::Error { message: LENGTH_MSG.to_string() });
                 return "failed";
             }
+            let empty = acc.content.trim().is_empty();
             // `finish_reason:"tool_calls"` with no calls, or an empty reply after
             // tool results (Gotcha #8): ask once more with tools forbidden.
-            if calls.is_empty() && acc.content.trim().is_empty() && !final_round && tools {
+            if empty && calls.is_empty() && !final_round && tools {
                 force_final = true;
                 continue;
             }
+            // Still empty (or tool calls despite `tool_choice:"none"`): one
+            // tool-free re-ask carrying what the tools returned, so the
+            // exploration so far is not lost (D93).
+            if empty && !recovering {
+                recovering = true;
+                tools = false;
+                messages = recovery_messages(&plain_system, &args.prompt, &tool_log);
+                emit(RunEvent::Notice { message: RECOVERY_NOTICE.to_string() });
+                continue;
+            }
             if !any_text {
-                emit(RunEvent::Error {
-                    message: "FabriX가 빈 응답을 반환했습니다 — 다시 시도하거나 다른 모델을 선택하세요.".to_string(),
-                });
+                emit(RunEvent::Error { message: EMPTY_MSG.to_string() });
                 return "failed";
             }
             break;
@@ -954,6 +1008,7 @@ fn drive(
                 is_error: outcome.is_error,
             });
             messages.push(json!({ "role": "tool", "tool_call_id": call.id, "content": content }));
+            tool_log.push(ToolLogEntry { name: call.name.clone(), arguments: call.arguments.clone(), content });
         }
         // Model-only footer on the round's last result (D91): how many tool
         // rounds remain, nudging the model to batch what it still needs.
@@ -1380,5 +1435,142 @@ mod tests {
         assert!(round_footer(MAX_ROUNDS - 1, false).contains("한도에 도달"));
         assert!(round_footer(2, true).contains("한도에 도달"), "spent tool budget ends the lookups too");
         assert!(pace_notice(10, 23).contains("분당 호출 한도(10회)") && pace_notice(10, 23).contains("23초"));
+    }
+
+    #[test]
+    fn recovery_request_flattens_tool_results_without_tool_roles() {
+        let log = vec![ToolLogEntry {
+            name: "read_file".into(),
+            arguments: format!("{{\"path\":\"{}\"}}", "a".repeat(400)),
+            content: "class UserService {}".into(),
+        }];
+        let msgs = recovery_messages("SYS", "코드베이스를 분석하세요", &log);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "SYS");
+        let user = msgs[1]["content"].as_str().unwrap();
+        assert!(user.starts_with("코드베이스를 분석하세요"), "{user}");
+        assert!(user.contains("### 1. read_file") && user.contains("class UserService {}"), "{user}");
+        assert!(user.contains("잘림"), "long arguments are clipped: {user}");
+        assert!(user.ends_with(RECOVERY_INSTRUCTION));
+        assert!(msgs.iter().all(|m| m.get("tool_calls").is_none() && m["role"] != "tool"));
+        // Nothing was read yet: just the request and the instruction.
+        let bare = recovery_messages("SYS", "요청", &[]);
+        assert!(!bare[1]["content"].as_str().unwrap().contains("조회한 내용"));
+    }
+
+    // -- the tool loop against a scripted local SSE server -------------------
+
+    /// Answers the n-th POST with the n-th scripted SSE reply (`data:`
+    /// payloads, then `[DONE]`) and records every request body.
+    fn sse_server(replies: Vec<Vec<&'static str>>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((mut s, _)) = listener.accept() else { return };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if s.read(&mut byte).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                let len = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0u8; len];
+                let _ = s.read_exact(&mut body);
+                seen.lock().unwrap().push(serde_json::from_slice(&body).unwrap_or(Value::Null));
+                let mut out =
+                    String::from("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n");
+                for d in reply {
+                    out.push_str(&format!("data: {d}\n\n"));
+                }
+                out.push_str("data: [DONE]\n\n");
+                let _ = s.write_all(out.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), bodies)
+    }
+
+    const SSE_LIST_DIR: &str = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"list_dir","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+    const SSE_EMPTY: &str = r#"{"choices":[{"index":0,"delta":{"reasoning":"생각 중…","content":""},"finish_reason":"stop"}]}"#;
+    const SSE_ANSWER: &str = r#"{"choices":[{"index":0,"delta":{"content":"분석서 본문"},"finish_reason":"stop"}]}"#;
+
+    fn drive_scripted(replies: Vec<Vec<&'static str>>, tools: Option<bool>) -> (&'static str, Vec<RunEvent>, Vec<Value>) {
+        use std::cell::RefCell;
+        let (url, bodies) = sse_server(replies);
+        let cfg = FabrixConfig { endpoint_url: url, calls_per_minute: Some(0), ..Default::default() };
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("ow-fx-empty-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("README.md"), "# demo\n").unwrap();
+        let args = RunArgs {
+            agent_id: "fabrix".into(),
+            prompt: "코드베이스를 분석하세요".into(),
+            cwd: dir.to_string_lossy().into_owned(),
+            model: Some("70".into()),
+            session_id: None,
+            resume: None,
+            extra_dirs: vec![],
+            tools,
+        };
+        let events = RefCell::new(Vec::new());
+        let status = drive(&cfg, "70", &args, &|e| events.borrow_mut().push(e), &AtomicBool::new(false));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bodies = bodies.lock().unwrap().clone();
+        (status, events.into_inner(), bodies)
+    }
+
+    #[test]
+    fn empty_reply_after_tools_is_re_asked_without_tools() {
+        // tool round → empty → forced final (tool_choice none) still empty →
+        // tool-free recovery request answers.
+        let (status, events, bodies) =
+            drive_scripted(vec![vec![SSE_LIST_DIR], vec![SSE_EMPTY], vec![SSE_EMPTY], vec![SSE_ANSWER]], None);
+        assert_eq!(status, "succeeded", "{events:?}");
+        assert_eq!(bodies.len(), 4);
+        assert_eq!(bodies[2]["tool_choice"], "none", "forced final keeps tools declared");
+        let last = &bodies[3];
+        assert!(last.get("tools").is_none() && last.get("tool_choice").is_none(), "{last}");
+        let msgs = last["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        let user = msgs[1]["content"].as_str().unwrap();
+        assert!(user.contains("### 1. list_dir") && user.contains("README.md"), "tool results carried: {user}");
+        assert!(!user.contains("도구 라운드"), "round footer is model-only and not carried: {user}");
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Notice { message } if message == RECOVERY_NOTICE)));
+        assert!(events.iter().any(|e| matches!(e, RunEvent::TextDelta { delta } if delta.contains("분석서"))));
+        assert!(!events.iter().any(|e| matches!(e, RunEvent::Error { .. })), "{events:?}");
+    }
+
+    #[test]
+    fn still_empty_after_recovery_fails_with_the_skip_marker() {
+        let (status, events, bodies) =
+            drive_scripted(vec![vec![SSE_LIST_DIR], vec![SSE_EMPTY], vec![SSE_EMPTY], vec![SSE_EMPTY]], None);
+        assert_eq!(status, "failed");
+        assert_eq!(bodies.len(), 4, "one re-ask, then give up");
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Error { message } if message.contains("빈 응답"))),
+            "the frontend skips the step on this marker: {events:?}"
+        );
+    }
+
+    #[test]
+    fn text_only_turn_gets_one_re_ask_too() {
+        let (status, events, bodies) = drive_scripted(vec![vec![SSE_EMPTY], vec![SSE_ANSWER]], Some(false));
+        assert_eq!(status, "succeeded", "{events:?}");
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies.iter().all(|b| b.get("tools").is_none()));
+        let user = bodies[1]["messages"][1]["content"].as_str().unwrap();
+        assert!(user.starts_with("코드베이스를 분석하세요") && user.ends_with(RECOVERY_INSTRUCTION), "{user}");
     }
 }

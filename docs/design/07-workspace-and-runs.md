@@ -105,7 +105,9 @@ Open Design의 `RuntimeAgentDef.buildArgs`/`streamFormat`/`promptViaStdin`에 �
    → 응답을 `BufReader`로 읽어 `data:` 라인을 lossy 디코드(`run::stream_lines`와 동일 방식) →
    `StreamAccumulator::feed`로 `RunEvent` 방출 → tool_calls가 있으면 도구 실행 후 다음 라운드
    (라인·라운드·도구 실행·디렉터리 순회 사이 취소 플래그 확인) → 종료 후 합산 `usage` 1회 + `unregister` +
-   단일 `end`(실패면 `Error` 선행; `finish_reason=length`도 오류). HTTP 클라이언트는 `.no_proxy()` +
+   단일 `end`(실패면 `Error` 선행; `finish_reason=length`도 오류). 본문이 빈 응답은 `tool_choice:"none"` 재요청 →
+   그래도 비면 **도구 없는 복구 요청 1회**(원 요청 + 지금까지의 도구 결과를 user 메시지 하나로 평탄화, `notice` 표시) 후에야
+   "빈 응답" 오류로 끝난다(D93). HTTP 클라이언트는 `.no_proxy()` +
    명시 `timeout(180s)`(reqwest blocking 기본 30초가 헤더 대기·매 read에 걸리던 것을 대체).
 
 > **취소 지연(원격)**: 취소 플래그는 SSE `data:` 라인 사이에서 확인되므로 서버가 조용하면 다음 바이트까지
@@ -472,7 +474,9 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     오류(타임아웃/스트림/네트워크 시그니처)로 실패하면 중단 전에 같은 단계를 자동으로 최대 2회
     재시도**한다(실패 쌍 제거 + 단계 re-arm + `setAutoTurn` 재발사; 원격 백엔드의 간헐적 first-byte
     타임아웃 흡수 — D68). 치명적 오류(Model not found·TLS·인증/가드레일)와 사용자 취소는 재시도하지 않고
-    즉시 중단. 소진 시 halt 노트 + 수동 '다시 시도'(D57).
+    즉시 중단. 소진 시 halt 노트 + 수동 '다시 시도'(D57). **FabriX "빈 응답" 실패는 중단하지 않고 그 단계(+HTML 렌더
+    서브스텝)를 `skipped`로 표시한 뒤 다음 단계로 진행**한다(백엔드가 이미 같은 턴에서 도구 없이 재요청했으므로 단계 전체
+    재시도 없음 — D93).
 - **리프트(WorkspaceView)**: `clarify`(옵션 질문)/`clarifyPrefill`(자동채움 답변)/`prefillNonce`/`canvasTab`/
   `streaming`/`answerSubmission` + `refreshNonce`(문서 생성 후 트리 리로드) + `resolvedWorkdir` +
   `codebasePath`(프로젝트 스코프 — 새 세션에도 유지) + `ragResult`(검색 결과 탭 HTML) +
