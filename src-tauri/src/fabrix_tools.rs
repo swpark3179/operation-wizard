@@ -327,17 +327,16 @@ fn int_arg(args: &Value, key: &str) -> Option<usize> {
 /// Run one tool call. Never panics; every failure becomes an error outcome the
 /// model can read and react to (the run itself keeps going).
 pub fn run_tool(name: &str, args: &Value, sb: &Sandbox, cancel: &AtomicBool) -> ToolOutcome {
-    let batch_key = match name {
-        "search_text" => Some("queries"),
-        "outline_file" => Some("paths"),
-        "find_references" => Some("symbols"),
-        "read_file" => Some("files"),
-        _ => None,
+    // `read_file` also accepts `paths` (an alias models reach for).
+    let batch_keys: &[&str] = match name {
+        "search_text" => &["queries"],
+        "outline_file" => &["paths"],
+        "find_references" => &["symbols"],
+        "read_file" => &["files", "paths"],
+        _ => &[],
     };
-    let cap = match batch_key.and_then(|k| list_arg(args, k)) {
-        Some(items) if items.len() > 1 => BATCH_RESULT_CHARS,
-        _ => RESULT_CHARS,
-    };
+    let batched = batch_keys.iter().any(|k| list_arg(args, k).is_some_and(|items| items.len() > 1));
+    let cap = if batched { BATCH_RESULT_CHARS } else { RESULT_CHARS };
     let res = match name {
         "list_dir" => list_dir(sb, args),
         "find_files" => find_files(sb, args, cancel),
@@ -1118,6 +1117,9 @@ mod tests {
         let many: Vec<Value> = (0..10).map(|_| json!("README.md")).collect();
         let capped = run_tool("read_file", &json!({ "files": many }), &s, &no_cancel());
         assert!(capped.content.contains("요청 10개 중 앞의 8개만"), "{}", capped.content);
+        // The `paths` alias is a batch too (shares the batch cap, all items shown).
+        let alias = run_tool("read_file", &json!({ "paths": ["README.md", "Order.java"] }), &s, &no_cancel());
+        assert!(alias.content.contains("### [2/2] Order.java") && alias.content.contains("class Order {"), "{}", alias.content);
         assert!(run_tool("read_file", &json!({}), &s, &no_cancel()).is_error);
         let _ = fs::remove_dir_all(&root);
     }

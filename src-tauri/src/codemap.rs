@@ -2336,7 +2336,7 @@ impl MapDetail {
         match self {
             MapDetail::Standard => (3, 0),
             MapDetail::Extended => (6, 5),
-            MapDetail::Focus => (4, 5),
+            MapDetail::Focus => (4, 4),
         }
     }
 
@@ -2346,8 +2346,8 @@ impl MapDetail {
     fn weights(self) -> [usize; 8] {
         match self {
             MapDetail::Standard => [3000, 1200, 2200, 2000, 900, 1000, 2000, 0],
-            MapDetail::Extended => [1500, 1000, 1300, 1500, 450, 600, 3500, 2000],
-            MapDetail::Focus => [0, 2000, 0, 3000, 0, 0, 4000, 3000],
+            MapDetail::Extended => [1200, 800, 1000, 1500, 400, 500, 3000, 3600],
+            MapDetail::Focus => [0, 1500, 0, 2500, 0, 0, 3000, 5000],
         }
     }
 }
