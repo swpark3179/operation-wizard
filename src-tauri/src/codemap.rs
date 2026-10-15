@@ -2285,13 +2285,75 @@ pub struct MapOpts {
     pub focus_terms: Vec<String>,
     /// Total output budget in characters.
     pub budget: usize,
+    /// How much to render (D91): the standard orientation map, a larger one
+    /// for FabriX (whose every lookup is a billed call), or only the
+    /// request-specific sections.
+    pub detail: MapDetail,
 }
 
 impl Default for MapOpts {
     fn default() -> Self {
-        Self { max_parsed: 6000, deadline: Duration::from_secs(6), focus_terms: Vec::new(), budget: 12_000 }
+        Self {
+            max_parsed: 6000,
+            deadline: Duration::from_secs(6),
+            focus_terms: Vec::new(),
+            budget: 12_000,
+            detail: MapDetail::Standard,
+        }
     }
 }
+
+impl MapOpts {
+    /// The options for a `codebase_map` detail level ("extended" / "focus";
+    /// anything else = standard).
+    pub fn for_detail(detail: Option<&str>, focus_terms: Vec<String>) -> Self {
+        let detail = match detail.map(str::trim) {
+            Some("extended") => MapDetail::Extended,
+            Some("focus") => MapDetail::Focus,
+            _ => MapDetail::Standard,
+        };
+        let budget = if detail == MapDetail::Extended { 24_000 } else { 12_000 };
+        Self { focus_terms, budget, detail, ..Self::default() }
+    }
+}
+
+/// Render level of [`repo_map`] (D91).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapDetail {
+    /// The orientation map every agent gets (D88).
+    Standard,
+    /// FabriX's codebase step: more key-file outlines + the bodies of the SQL
+    /// statements the request names, so fewer lookup rounds are needed.
+    Extended,
+    /// FabriX's source-analysis step: only the request hits, dependency chains,
+    /// statement bodies and key outlines (its transcript lacks the earlier map).
+    Focus,
+}
+
+impl MapDetail {
+    /// (key-file outlines, SQL statement bodies) rendered.
+    fn counts(self) -> (usize, usize) {
+        match self {
+            MapDetail::Standard => (3, 0),
+            MapDetail::Extended => (6, 5),
+            MapDetail::Focus => (4, 5),
+        }
+    }
+
+    /// Section budgets at the 12k reference total (scaled to `budget`):
+    /// directory, request hits, routes, chains, hubs, tables, key outlines,
+    /// statement bodies. Extended's are meant for its 24k budget (×2).
+    fn weights(self) -> [usize; 8] {
+        match self {
+            MapDetail::Standard => [3000, 1200, 2200, 2000, 900, 1000, 2000, 0],
+            MapDetail::Extended => [1500, 1000, 1300, 1500, 450, 600, 3500, 2000],
+            MapDetail::Focus => [0, 2000, 0, 3000, 0, 0, 4000, 3000],
+        }
+    }
+}
+
+/// Lines of one SQL statement body shown in the map.
+const STMT_BODY_LINES: usize = 40;
 
 /// Directories the map skips on top of `files::SKIP_DIRS` (build output and
 /// generated copies would skew the hub ranking).
@@ -2321,6 +2383,9 @@ struct StmtRef {
     ns: String,
     id: String,
     tables: Vec<(String, String)>,
+    /// 1-based line range of the statement in its file.
+    line: usize,
+    end_line: Option<usize>,
 }
 
 #[derive(Default)]
@@ -2752,7 +2817,14 @@ pub fn repo_map(root: &Path, opts: &MapOpts, cancel: &AtomicBool) -> String {
                     if it.kind == "statement" {
                         let id = it.signature.split("id=").nth(1).and_then(|x| x.split_whitespace().next()).unwrap_or("?");
                         bump_tables(&mut table_acc, &it.tables);
-                        stmts.push(StmtRef { rel: rel.clone(), ns: ns.clone(), id: id.to_string(), tables: it.tables.clone() });
+                        stmts.push(StmtRef {
+                            rel: rel.clone(),
+                            ns: ns.clone(),
+                            id: id.to_string(),
+                            tables: it.tables.clone(),
+                            line: it.line,
+                            end_line: it.end_line,
+                        });
                     } else if it.entry {
                         xml_entries.push(format!("{}  ({rel}:L{})", it.signature, it.line));
                     }
@@ -2866,9 +2938,11 @@ pub fn repo_map(root: &Path, opts: &MapOpts, cancel: &AtomicBool) -> String {
     };
     let mut focus_lines: Vec<String> = Vec::new();
     let mut focus_files: Vec<String> = Vec::new();
+    let mut focus_stmts: Vec<usize> = Vec::new();
     if !terms.is_empty() {
-        for s in &stmts {
+        for (si, s) in stmts.iter().enumerate() {
             if hit(&s.id) || s.tables.iter().any(|(t, _)| hit(t)) {
+                focus_stmts.push(si);
                 let t: Vec<String> = s.tables.iter().take(4).map(|(n, c)| format!("{n} {c}")).collect();
                 let key = if s.ns.is_empty() { s.id.clone() } else { format!("{}.{}", s.ns, s.id) };
                 focus_lines.push(format!("- 문장 {key} [{}]  ({})", t.join(", "), s.rel));
@@ -2914,18 +2988,23 @@ pub fn repo_map(root: &Path, opts: &MapOpts, cancel: &AtomicBool) -> String {
         .cloned()
         .chain(entries.iter().map(|n| java[decls[*n].file].rel.clone()))
         .chain(hubs.iter().filter_map(|(n, _)| hub_decl(n).map(|d| java[d.file].rel.clone())));
+    let (key_max, bodies_max) = opts.detail.counts();
     for f in candidates {
         if !key_files.contains(&f) {
             key_files.push(f);
         }
-        if key_files.len() >= 3 {
+        if key_files.len() >= key_max {
             break;
         }
     }
 
     // ── Render ───────────────────────────────────────────────────────────────
     let budget = opts.budget.max(2000);
+    // Section weights are written at the 12k reference total (Extended's double
+    // at its 24k budget).
+    let [w_dir, w_focus, w_routes, w_chain, w_hubs, w_tables, w_outlines, w_bodies] = opts.detail.weights();
     let scale = |n: usize| n * budget / 12_000;
+    let focus_only = opts.detail == MapDetail::Focus;
     let mut out = format!(
         "# 저장소 지도 — {}\n파일 {}개 (분석: Java {}개, 매퍼 SQL 문장 {}개){}\n\n",
         root.display(),
@@ -2946,15 +3025,38 @@ pub fn repo_map(root: &Path, opts: &MapOpts, cancel: &AtomicBool) -> String {
             if shown.is_empty() { String::new() } else { format!("  (빌드/설정: {})", shown.join(", ")) }
         ));
     }
-    let mut tl = Vec::new();
-    tree_lines(&dirs, "", "", 0, &mut tl);
-    out.push_str(&clip_section("디렉터리 (파일 수 · 주요 확장자)", &tl, scale(3000)));
-    out.push_str(&clip_section("요청 관련 (키워드 일치)", &focus_lines, scale(1200)));
-    out.push_str(&clip_section("진입점·라우트", &routes, scale(2200)));
-    out.push_str(&clip_section("의존 체인 (진입점 → 서비스 → DAO/Mapper ⇢ SQL 문장 [테이블 CRUD])", &chain_lines, scale(2000)));
-    out.push_str(&clip_section("허브 (프로젝트 안에서 가장 많이 참조되는 타입)", &hub_lines, scale(900)));
-    out.push_str(&clip_section("테이블 (매퍼·SQL 기준 CRUD, 참조 문장 수)", &table_lines, scale(1000)));
-    let outline_budget = scale(2000) / key_files.len().max(1);
+    if !focus_only {
+        let mut tl = Vec::new();
+        tree_lines(&dirs, "", "", 0, &mut tl);
+        out.push_str(&clip_section("디렉터리 (파일 수 · 주요 확장자)", &tl, scale(w_dir)));
+    }
+    out.push_str(&clip_section("요청 관련 (키워드 일치)", &focus_lines, scale(w_focus)));
+    if !focus_only {
+        out.push_str(&clip_section("진입점·라우트", &routes, scale(w_routes)));
+    }
+    out.push_str(&clip_section("의존 체인 (진입점 → 서비스 → DAO/Mapper ⇢ SQL 문장 [테이블 CRUD])", &chain_lines, scale(w_chain)));
+    if !focus_only {
+        out.push_str(&clip_section("허브 (프로젝트 안에서 가장 많이 참조되는 타입)", &hub_lines, scale(w_hubs)));
+        out.push_str(&clip_section("테이블 (매퍼·SQL 기준 CRUD, 참조 문장 수)", &table_lines, scale(w_tables)));
+    }
+    // Bodies of the SQL statements the request names (D91) — what a FabriX
+    // turn would otherwise read with one lookup round each.
+    if bodies_max > 0 && !focus_stmts.is_empty() {
+        let shown: Vec<&StmtRef> = focus_stmts.iter().take(bodies_max).map(|i| &stmts[*i]).collect();
+        let per = scale(w_bodies) / shown.len();
+        let mut section = String::from("## 요청 관련 SQL 문장 본문 (발췌 — 이미 첨부되었으니 다시 읽지 않아도 됨)\n");
+        for st in &shown {
+            if let Some(body) = stmt_body(root, st, per) {
+                section.push_str(&body);
+            }
+        }
+        if focus_stmts.len() > shown.len() {
+            section.push_str(&format!("…(일치 문장 {}개 중 {}개만 첨부)\n", focus_stmts.len(), shown.len()));
+        }
+        out.push_str(&section);
+        out.push('\n');
+    }
+    let outline_budget = scale(w_outlines) / key_files.len().max(1);
     let mut outlines = String::new();
     for f in &key_files {
         if let Some(jf) = java.iter().find(|j| &j.rel == f) {
@@ -2973,17 +3075,52 @@ pub fn repo_map(root: &Path, opts: &MapOpts, cancel: &AtomicBool) -> String {
     out
 }
 
+/// One SQL statement's text for the map: a header with its key and range, then
+/// up to `STMT_BODY_LINES` lines within `budget` characters. `None` when the
+/// file can no longer be read.
+fn stmt_body(root: &Path, st: &StmtRef, budget: usize) -> Option<String> {
+    let bytes = fs::read(root.join(&st.rel)).ok()?;
+    let text = lossy(&bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let from = st.line.max(1);
+    let to = st.end_line.unwrap_or(from).max(from).min(lines.len()).min(from + STMT_BODY_LINES - 1);
+    if from > lines.len() {
+        return None;
+    }
+    let key = if st.ns.is_empty() { st.id.clone() } else { format!("{}.{}", st.ns, st.id) };
+    let mut out = format!("### {key}  ({}:L{from}-{to})\n```xml\n", st.rel);
+    let mut used = 0usize;
+    for line in &lines[from - 1..to] {
+        let n = line.chars().count() + 1;
+        if used + n > budget.max(300) {
+            out.push_str("…\n");
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+        used += n;
+    }
+    let full_end = st.end_line.unwrap_or(to);
+    out.push_str("```\n");
+    if full_end > to {
+        out.push_str(&format!("…(문장 나머지 L{}-{full_end})\n", to + 1));
+    }
+    Some(out)
+}
+
 /// Tauri command: the repository map of a codebase folder (D88), injected by
 /// the codebase-step preflight for every agent (CLI agents can't call the
-/// app's tools). Off the IPC thread; bounded by `MapOpts` (≈6 s).
+/// app's tools). `detail` = "extended" / "focus" renders the larger or the
+/// request-only variant for FabriX (D91). Off the IPC thread; bounded by
+/// `MapOpts` (≈6 s).
 #[tauri::command]
-pub async fn codebase_map(root: String, focus_terms: Option<Vec<String>>) -> Result<String, String> {
+pub async fn codebase_map(root: String, focus_terms: Option<Vec<String>>, detail: Option<String>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = Path::new(root.trim());
         if !path.is_dir() {
             return Err(format!("코드베이스 폴더를 찾을 수 없습니다: {root}"));
         }
-        let opts = MapOpts { focus_terms: focus_terms.unwrap_or_default(), ..MapOpts::default() };
+        let opts = MapOpts::for_detail(detail.as_deref(), focus_terms.unwrap_or_default());
         Ok(repo_map(path, &opts, &AtomicBool::new(false)))
     })
     .await
@@ -3774,6 +3911,37 @@ public class OrderAction extends DispatchAction {
         assert!(m.contains("문장 orderDAO.insertItem [TB_ORDER_ITEM C]"), "{m}");
         assert!(m.contains("## 핵심 파일 아웃라인") && m.contains("OrderController.java — Java 아웃라인"), "{m}");
         assert!(!m.contains("SECRET"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn repo_map_detail_levels_for_fabrix() {
+        let root = sample_repo("detail");
+        let terms = vec!["TB_ORDER".to_string()];
+        let std_map = repo_map(&root, &MapOpts::for_detail(None, terms.clone()), &AtomicBool::new(false));
+        assert!(!std_map.contains("SQL 문장 본문"), "standard has no statement bodies");
+
+        // Extended: statement bodies of the request-matching SQL + more key outlines.
+        let ext = repo_map(&root, &MapOpts::for_detail(Some("extended"), terms.clone()), &AtomicBool::new(false));
+        assert!(ext.contains("## 요청 관련 SQL 문장 본문"), "{ext}");
+        assert!(ext.contains("### com.sds.order.mapper.OrderMapper.selectOrder  (src/main/resources/mapper/OrderMapper.xml:L2-2)"), "{ext}");
+        assert!(ext.contains("SELECT * FROM TB_ORDER o JOIN TB_CUSTOMER"), "{ext}");
+        assert!(ext.contains("### orderDAO.insertItem"), "TB_ORDER_ITEM contains the term: {ext}");
+        // More key-file outlines when there are candidates (every Order* type hits).
+        let outlines = |m: &str| m.matches("— Java 아웃라인").count();
+        let wide = vec!["Order".to_string()];
+        let std_wide = repo_map(&root, &MapOpts::for_detail(None, wide.clone()), &AtomicBool::new(false));
+        let ext_wide = repo_map(&root, &MapOpts::for_detail(Some("extended"), wide), &AtomicBool::new(false));
+        assert_eq!(outlines(&std_wide), 3, "{std_wide}");
+        assert_eq!(outlines(&ext_wide), 6, "{ext_wide}");
+        assert!(ext.contains("## 진입점·라우트") && ext.contains("## 허브"), "{ext}");
+        assert!(ext.chars().count() <= 24_100);
+
+        // Focus: request-specific sections only.
+        let foc = repo_map(&root, &MapOpts::for_detail(Some("focus"), terms), &AtomicBool::new(false));
+        assert!(foc.contains("## 요청 관련 (키워드 일치)") && foc.contains("## 의존 체인") && foc.contains("SQL 문장 본문"), "{foc}");
+        assert!(!foc.contains("## 디렉터리") && !foc.contains("## 진입점·라우트") && !foc.contains("## 허브") && !foc.contains("## 테이블"), "{foc}");
+        assert!(foc.chars().count() <= 12_100);
         let _ = fs::remove_dir_all(&root);
     }
 

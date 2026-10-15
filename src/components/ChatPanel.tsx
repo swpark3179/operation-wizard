@@ -901,8 +901,10 @@ export function ChatPanel({
       const cb = codebasePathRef.current;
       if (step.kind === "codebase" && cb) {
         const terms = focusTermsFrom(`${seedPromptRef.current}\n${lastAnswersWireRef.current}`);
+        // FabriX pays one quota-limited call per lookup round (D91): give it the
+        // larger map (more key outlines + the request's SQL bodies).
         const [map, cached] = await Promise.all([
-          codebaseMap(cb, terms).catch(() => null),
+          codebaseMap(cb, terms, isRemote ? "extended" : undefined).catch(() => null),
           getCodebaseLearnings(cb, category).catch(() => null),
         ]);
         if (preflightAbortRef.current) return {};
@@ -918,6 +920,19 @@ export function ChatPanel({
         if (cached) {
           parts.unshift(formatCachedLearnings(cached));
           cacheNote = cachedLearningsNote(cached);
+        }
+      }
+      // FabriX source analysis (D91): its sessionless transcript skips the
+      // codebase step's wire, so the map is gone — re-attach the request-specific
+      // part (hits, chains, SQL bodies, key outlines) instead of re-exploring.
+      if (isRemote && cb && codeAnalysisMode(step) === "focus") {
+        const terms = focusTermsFrom(`${seedPromptRef.current}\n${lastAnswersWireRef.current}`);
+        const focusMap = await codebaseMap(cb, terms, "focus").catch(() => null);
+        if (preflightAbortRef.current) return {};
+        if (focusMap) {
+          parts.unshift(
+            `[사전 계산된 변경 대상 지도 — 앱의 비AI 정적 분석 결과(근사치). 여기 있는 구조·SQL 본문은 다시 조회하지 말고, 필요한 심볼만 도구로 확인하세요]\n${focusMap}`,
+          );
         }
       }
       const context = parts.filter(Boolean).join("\n\n");
@@ -1110,7 +1125,9 @@ export function ChatPanel({
     let preflightContext = "";
     if (!isPrefill && stepInject && step) {
       const stepIdx = stepIndexRef.current;
-      const mapsCodebase = step.kind === "codebase" && !!codebasePathRef.current;
+      const mapsCodebase =
+        !!codebasePathRef.current &&
+        (step.kind === "codebase" || (isRemote && codeAnalysisMode(step) === "focus"));
       const fetches = step.kind === "rag" || step.kind === "knowledge" || mapsCodebase;
       const fetchNote =
         step.kind === "rag"
