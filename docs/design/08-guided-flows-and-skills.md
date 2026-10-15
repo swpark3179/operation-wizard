@@ -9,7 +9,7 @@
 
 로컬 CLI 에이전트 스트림에는 **우리가 제어하는 표준 도구(tool-call) 채널이 없다**(D30 재확인). 따라서
 모든 **실행 강제**는 **클라이언트 오케스트레이션**으로 한다: 프롬프트에 지시문을 (사용자에게 안 보이게)
-주입하고, 에이전트가 낸 텍스트를 **약속된 fenced 코드블록**으로 해석한다. 파싱/프리필이 실패하면 **항상
+주입하고, 에이전트가 낸 텍스트를 **약속된 fenced 코드블록**으로 해석한다. 파싱이 실패하면 **항상
 일반 chat으로 폴백**해 대화가 깨지지 않는다.
 
 단계·스킬의 **정의**는 D39부터 사용자가 **Flows 설정 화면**에서 등록하고 `settings.json`에 영속화된다
@@ -22,7 +22,7 @@
 
 | 층 | 정의 위치 | 역할 | 강제 시점 |
 |----|------|------|-----------|
-| ① 고정 선택지(옵션) | `src/lib/options.ts` (`CATEGORY_OPTIONS`, 코드 정적) + `src/lib/clarify.ts`(프리필) | 카테고리 진입 시 **즉시** 보여줄 선택지 카탈로그. 프롬프트로 시작하면 아는 값 자동 채움. **폼 대기 중 채팅 차단**(D41) | 워크플로우 **이전**(프리플로우). 폼 제출이 첫 작업 턴을 발사 |
+| ① 고정 선택지(옵션) | `src/lib/options.ts` (`CATEGORY_OPTIONS`, 코드 정적) + `src/lib/clarify.ts`(답변 포맷) | 카테고리 진입 시 **즉시** 보여줄 선택지 카탈로그. 맨 앞은 필수 요구사항 필드(세션 제목의 원천 — D97), 하단 바에 RAG 단계 스위치(D96). **폼 대기 중 채팅 차단**(D41) | 워크플로우 **이전**(프리플로우). 폼 제출이 첫 작업 턴을 발사 |
 | ② 스킬 | **Flows 설정 화면**(settings.json `skills`) ?? `src/lib/skills.ts` (`DEFAULT_SKILLS`); 조회는 `resolveSkills(settings)` | **단계에 귀속되는 지시문 묶음**(페르소나·방법·제약·산출 형식). CLI 자체 스킬과 무관 | 그 스킬을 가진 **단계가 armed된 턴**에 주입. 세션형은 대화당 1회 dedupe(D40) |
 | ③ 워크플로우 단계 | **Flows 설정 화면**(settings.json `workflows[category]`) ?? `src/lib/workflow.ts` (`DEFAULT_WORKFLOWS`); 조회는 `workflowFor(category, settings)`(편집용) / `runtimeWorkflowFor`(실행용, output 확장) | 옵션 제출 **이후**의 에이전트 턴들. **기반 3단계(`codebase`/`rag`/`knowledge`)가 pinned 프리픽스**(D44), 그 뒤 조사/문서작성/대화. `StepDef{id,name,kind,instruction,file?,skillIds,output?}`. 자동전진·정지 제어 | 매 턴 단계 스킬+지시문(+기반 단계 preflight 컨텍스트) 주입 + `end`에서 `kind`로 분기 |
 
@@ -44,39 +44,34 @@ wire = [ (첫 실제 작업 턴 1회) 내장 프롬프트 최적화 스킬(PROMP
          (그 외 생성형 단계면) 앞 단계 인계(산출물 절대경로 인덱스(+저장소 지도 경로 — D94) + 코드 분석 Learnings 발췌 — D86),
          prompt ].join("\n\n")
 ```
-프리필 턴만 예외로 wire = `prefillInstruction(...)`이고, **스텝 커서/스킬 주입 이력/세션/영속화를 건드리지
-않는다**(격리 실행). `send()`는 workdir 확정(`ensure_project`)을 wire 조립보다 먼저 수행해 첫 턴에도
+`send()`는 workdir 확정(`ensure_project`)을 wire 조립보다 먼저 수행해 첫 턴에도
 경로 컨텍스트가 절대경로를 갖는다(D52). 기반 단계(rag/knowledge)의 preflight는 wire 조립 **전에**
-백엔드를 조회하며, 미설정·0건·실패면 에이전트 턴 없이 건너뛴다(D44).
+백엔드를 조회하며, 미설정·0건·실패면(rag는 폼의 RAG 스위치가 꺼졌을 때도 — D96) 에이전트 턴 없이 건너뛴다(D44).
+세션 제목 요약 턴(D97)은 이 wire와 무관한 **격리 실행**이다(세션 id·스텝 커서·영속화를 건드리지 않음).
 
 ## 흐름 한눈에 (plan 기본값 기준)
 
 ```
-홈 시작
-  ├─ 카테고리 카드 클릭 → 그 카테고리로 진입(분류 없음)
-  └─ 컴포저 프롬프트 전송 → 잠정 plan + autoCategory=true로 진입
-        └─ (D81) WorkspaceView: ensureProject(cwd 확정) → classifyCategory(격리 턴, ```category)
-                  → 최종 카테고리로 ChatPanel 1회 마운트 (실패/취소 → plan)
-                  (분류 중: 채팅 컬럼 "작업 유형 분석 중…+중지" placeholder)
-카테고리 진입 (위에서 정해진 카테고리)
-  └─ optionsFor(category, settings) 비었나?
-       ├─ 아니오 → onClarify([userRequest(text, 필수), codebasePath(folder, 필수)*, ...옵션]) [즉시 폼 · 채팅 차단]
-       │            └─ seedPrompt 있으면 → userRequest 즉시 클라이언트 채움 + 프리필 턴(숨김, folder·noPrefill 제외)
-       │                                    → onPrefill(자동채움 · seed 병합 — D78)
-       │            └─ 사용자 폼 제출 → codebasePath 상태 분리 + answerSubmission(requirement 포함) [차단 해제 · 탭 소멸]
-       │                  └─ 첫 작업 턴: 내장 프롬프트 최적화 스킬(D78) + WF[0].skills + WF[0].instruction + preflight + 답변(요구사항 포함)
-       │                       ├─ end: ```prompt → '프롬프트' 탭(캔버스), 나머지 텍스트는 작업 계속
-       │                       └─ (plan 기본, 기반 3단계 — D44)
-       │                          코드베이스 분석(codebase, extraDirs=--add-dir/--include-directories;
-       │                                     preflight가 비AI 저장소 지도 → docs/repo-map.md 산출물 — D94;
-       │                                     변경 대상·영향 범위까지 이 단계에서 분석 — 소스코드 분석 단계 통합)
-       │                          → (auto) RAG 검색(rag: rag_search → '검색 결과' 탭 + 발췌 주입,
-       │                                     미설정/0건/실패 = 건너뜀)
-       │                          → (auto) 지식 주입(knowledge: list_knowledge, 비면 건너뜀)
-       │                          → (auto) 계획 생성(document)
-       │                          → (auto) 변경영향분석서(document) → (auto) 테스트 계획서(document)
-       │                          → chat(정지)     * folder 질문은 기반 단계 활성 카테고리에만
-       └─ 예 → seedPrompt를 첫 작업 턴으로 자동 전송(기존 동작)
+홈 시작 (채팅 컴포저 없음 — D95)
+  └─ '시작 설정'(에이전트·모델·작업 폴더) → 카테고리 카드 클릭 → 그 카테고리로 진입
+카테고리 진입
+  └─ onClarify([userRequest(text, 필수), codebasePath(folder, 필수)*, ...옵션]) [즉시 폼 · 채팅 차단]
+       │   (폼 하단 바: '사내 문서 RAG 검색' 스위치 — rag 단계가 있을 때만, D96)
+       └─ 사용자 폼 제출 → codebasePath 상태 분리 + answerSubmission(requirement·ragEnabled) [차단 해제 · 탭 소멸]
+             ├─ 세션 제목 = heuristicTitle(요구사항) 즉시 → 첫 작업 턴의 ensure_project 직후 격리 요약 턴 병렬
+             │     (```title → 세션 제목 교체, 새 프로젝트면 set_project_title — D97)
+             └─ 첫 작업 턴: 내장 프롬프트 최적화 스킬(D78) + WF[0].skills + WF[0].instruction + preflight + 답변(요구사항 포함)
+                  ├─ end: ```prompt → '프롬프트' 탭(캔버스), 나머지 텍스트는 작업 계속
+                  └─ (plan 기본, 기반 3단계 — D44)
+                     코드베이스 분석(codebase, extraDirs=--add-dir/--include-directories;
+                                preflight가 비AI 저장소 지도 → docs/repo-map.md 산출물 — D94;
+                                변경 대상·영향 범위까지 이 단계에서 분석 — 소스코드 분석 단계 통합)
+                     → (auto) RAG 검색(rag: rag_search → '검색 결과' 탭 + 발췌 주입,
+                                미설정/스위치 off/0건/실패 = 건너뜀)
+                     → (auto) 지식 주입(knowledge: list_knowledge, 비면 건너뜀)
+                     → (auto) 계획 생성(document)
+                     → (auto) 변경영향분석서(document) → (auto) 테스트 계획서(document)
+                     → chat(정지)     * folder 질문은 워크플로우에 codebase 단계가 있을 때만
 ```
 
 각 생성형 단계는 자기 스킬(예: 코드베이스 분석 = 코드베이스 탐색 스킬)을 그 턴에 주입하고, document
@@ -119,9 +114,10 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
 - `src/lib/options.ts`의 `CATEGORY_OPTIONS[category]` 배열만 편집.
 - 항목은 `ClarifyQuestion`(`single`/`multi`/`text`/`folder`) 스키마 그대로. `single/multi`는 `options`
   필수, `required: true`로 필수화. 렌더는 `RequirementsForm`(accent 카드 그리드; `folder`는 네이티브
-  폴더 픽커 버튼 + 경로 칩)이 자동 처리(D35/D45). **folder 질문은 프리필에서 제외**된다.
-- 빈 배열이면 그 카테고리는 옵션 단계 없이 기존 seed-first 동작. 단, 기반 단계 활성 카테고리는
-  `optionsFor(category, settings)`가 필수 `codebasePath` folder 질문을 맨 앞에 프리펜드한다(D45).
+  폴더 픽커 버튼 + 경로 칩)이 자동 처리(D35/D45). text 질문은 `placeholder`로 입력 예시를 줄 수 있다.
+- 배열이 비어도 폼은 생긴다 — `optionsFor(category, settings)`가 맨 앞에 **필수 요구사항 필드**(예시 문구는
+  `REQUIREMENT_PLACEHOLDER[category]`)를, 워크플로우에 codebase 단계가 있으면 그 뒤에 필수 `codebasePath` folder
+  질문을 붙인다(D45/D63/D95). 요구사항 필드는 첫 작업 턴의 사용자 말풍선이자 세션 제목의 원천이다(D97).
 
 ### B. 스킬(지시문)을 작성·수정·교체
 - **1차 경로(재빌드 없음)**: **Flows 설정 화면 → 스킬** 섹션에서 추가/수정/삭제 후 저장(`set_skills` —
@@ -182,10 +178,14 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
   `CanvasPanel`의 `PromptPanel`)에 표시하는 최소 복제 사례다. 스텝이 아니라 `promptSkillPendingRef`로
   첫 실제 턴에 1회 주입하고 `unwindSkills`로 되감으므로, 스텝 파서(inflightStepRef)와 독립적으로 동작한다.
 
-### E. 프롬프트 자동채움(프리필) 동작 조정
-- `src/lib/clarify.ts`의 `prefillInstruction`(지시문)과 `parsePrefill`(검증 규칙)만 수정.
-- 프리필 턴은 `ChatPanel.send(_, {prefill:true})`로 **격리 실행**된다: 세션 id/resume 미사용(실제 세션 오염
-  방지), 영속화 안 함, 스텝 커서 불변, 끝나면 프리필 메시지쌍 제거 후 `onPrefill`로 폼만 채움.
+### E. 세션 제목 요약 조정 (D97)
+- 지시문·파서·실행은 `src/lib/sessionTitle.ts`(`titleInstruction`/`parseTitle`/`summarizeTitle` — `ragRelevance.ts`
+  미러, ` ```title ` 펜스 계약, 40자 상한 `TITLE_MAX`)에, 즉시 제목 규칙은 같은 파일의 `heuristicTitle`에 있다.
+- 오케스트레이션은 ChatPanel: 폼 제출 효과가 휴리스틱 제목을 적용하고 요구사항을 `titlePendingRef`에 넣으면,
+  `send()`가 `ensure_project` 직후 `startTitleSummary`로 격리 턴을 **병렬** 실행한다(세션 id/resume·스텝 커서·영속화
+  불변). 결과는 `applySessionTitle`(헤더·`onSessionTitle`·저장 제목) + 이 대화가 만든 프로젝트면
+  `set_project_title`(`projectTitleOwnedRef`). 언마운트 시 취소되고 늦게 온 결과는 버린다(`aliveRef`).
+- 홈 프롬프트 프리필(구 D36 자동채움)과 카테고리 자동 분류(구 D81)는 홈 컴포저와 함께 폐지되었다(D95).
 
 ### F. 새 카테고리 추가(전체 절차)
 1. `src/components/workspace.ts` — `Category` 유니온에 id 추가 + `CATEGORIES`에 카드 메타(라벨/아이콘/타일).
@@ -194,10 +194,8 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
 3. `src/lib/options.ts` — `CATEGORY_OPTIONS[새id]` 선택지(없으면 `[]`).
 4. `src/lib/workflow.ts` — `DEFAULT_WORKFLOWS[새id]` 기본 단계 배열(최소 `[{kind:"chat", skillIds:[...]}]`;
    스킬이 필요하면 `DEFAULT_SKILLS`에도 추가).
-5. 프론트는 자동 반영(HomeView 카테고리 카드가 `CATEGORIES`를, Flows 편집기가 카테고리 탭을 렌더).
-6. 자동 분류(⓪/D81)는 `CATEGORIES`(id·label·desc)를 그대로 프롬프트에 나열하므로, 새 카테고리는
-   **별도 수정 없이 분류 후보에 포함**된다. 분류 판단 기준을 다듬으려면 `src/lib/categorize.ts`의
-   `categorizeInstruction`(카테고리별 한 줄 판단 기준)만 수정한다.
+5. `src/lib/options.ts` — `REQUIREMENT_PLACEHOLDER[새id]` 요구사항 입력 예시(`Record<Category, …>`라 필수).
+6. 프론트는 자동 반영(HomeView 카테고리 카드가 `CATEGORIES`를, Flows 편집기가 카테고리 탭을 렌더).
 
 ### H. 코드 분석 방법론·Learnings 인계 조정 (D86)
 - **방법론 본문**(스켈레톤 우선·허브/진입점·Callers/Callees·Blast Radius + 에이전트별 탐색 요령)은
@@ -218,14 +216,12 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
   `repoMapDocument`, 산출물 행은 `src/lib/artifacts.ts`의 `artifactsFor`(codebase 단계마다 `<id>-map`), 저장 시점은
   ChatPanel `stepPreflight`의 codebase 분기다. 지도 섹션 문구(`codemap.rs::repo_map`)를 바꾸면 `repoMapDocument`의 제거 규칙도 확인한다.
 
-### G. 카테고리 자동 분류(⓪) 동작 조정 (D81)
-- 홈 컴포저 프롬프트로 시작할 때만 실행되는 격리 분류 턴. 지시문·파서·실행은 `src/lib/categorize.ts`
-  (`categorizeInstruction`/`parseCategory`/`classifyCategory` — `ragRelevance.ts` 미러)에 있다.
-- 오케스트레이션은 `src/components/WorkspaceView.tsx`(`classifying` state + `classifyStartedRef` 가드 effect):
-  `ensureProject`로 cwd 확정 → `classifyCategory` → `setActiveCategory(best ?? "plan")` → `ChatPanel` 마운트.
-  분류 중 placeholder(중지=`classifyCancelRef`)도 여기 있다.
-- 신호 배선은 `HomeView`(`onStart`의 `autoCategory` 파라미터; 컴포저=true, 카드=false)와 `HomeArea`
-  (`autoCategory` state → `WorkspaceView` prop). 분류 실패/취소/파싱실패는 항상 `plan` 폴백.
+### G. 요구사항 폼의 RAG 단계 스위치 조정 (D96)
+- 스위치 UI는 `src/components/RequirementsForm.tsx`의 `RagSwitch`(하단 바, `role="switch"`), 표시 조건·설정 여부는
+  `WorkspaceView`의 `ragOption`(세션 고정 워크플로우에 `kind==="rag"` 단계가 있을 때만, `configured` = RAG endpoint 저장됨)이다.
+- 값은 질문 답변이 아니라 실행 옵션이라 wire에 넣지 않고 `answerSubmission.ragEnabled` → ChatPanel `ragEnabledRef`로 전달한다.
+  `stepPreflight`의 rag 분기가 미설정 검사 다음에 이 값을 보고 기존 skip 경로를 탄다(검색·관련성 판단 턴 없음). 제출 직후
+  스테퍼는 rag 단계를 '건너뜀'으로 표시한다. 다른 단계(예: knowledge)에 같은 스위치를 붙이려면 이 세 지점을 함께 확장한다.
 
 ## 주입 지점 지도 (`ChatPanel`)
 
@@ -233,11 +229,11 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
   `[내장 프롬프트 최적화(D78) → 내장 코드 분석 방법론(codebase/source-analysis 단계 — D86) →
   step.skillIds의 스킬 body들(armed, 세션형 dedupe; dir 안내 부착) → step.instruction(단계 armed) →
   경로 컨텍스트(`pathContext`, 생성형 단계 — 작업 폴더/코드베이스 절대경로 + 탐색 시작점 지시) →
-  preflight 컨텍스트(기반 단계 / 그 외 생성형 단계는 앞 단계 인계 — D86) → prompt]`. 프리필은 `prefillInstruction`. 단계/스킬은
+  preflight 컨텍스트(기반 단계 / 그 외 생성형 단계는 앞 단계 인계 — D86) → prompt]`. 단계/스킬은
   `runtimeWorkflowFor(category, settings)`/`resolveSkills(settings)`로 해석해 **마운트 시 고정**.
   매 턴 `RunArgs.extraDirs = [codebasePath, ...주입된 스킬 dir들, ...지식 artifacts 루트(D59)]`
   (claude `--add-dir`, gemini `--include-directories`; 원격 FabriX는 `cwd`와 함께 읽기 전용 도구 샌드박스 —
-  D84). 텍스트 전용 격리 턴(프리필·카테고리 분류·RAG 관련성)은 `RunArgs.tools=false`로 FabriX 도구를 끈다. `send()`는
+  D84). 텍스트 전용 격리 턴(세션 제목 요약·RAG 관련성)은 `RunArgs.tools=false`로 FabriX 도구를 끈다. `send()`는
   처리 여부를 boolean으로 반환하고 폼 제출/자동전진 nonce는 성공 시에만 소비된다(D55).
 - **preflight**: `stepPreflight(step, cwd, stepIdx)` — wire 조립 전 비동기 훅(모든 await는 busy 구간 안 — D86).
   rag/knowledge가 아닌 생성형 단계는 **앞 단계 인계**(`producedDocsBefore` → `formatHandoffContext`; CLI 산출
@@ -254,21 +250,21 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
   `knowledge/artifacts` 루트 1개가 `knowledgeDirsRef`→extraDirs로 등록되어 대화 내내 원문 읽기 접근이
   유지된다); codebase의 경로 문구는 `pathContext`로 일반화됨
   (D52). 건너뜀 시 system 안내 + 커서 전진 + 다음 생성형 단계로 재진입(실제 사용자 프롬프트는 이월).
+  rag는 폼의 RAG 스위치가 꺼져 있으면(`ragEnabledRef` — D96) 검색 없이 건너뛴다.
   preflight 중 Stop은 `preflightAbortRef`로 취소 폴백(rag 판단 턴은 `ragJudgeCancelRef`로 함께 취소 — D70).
-- **부트**: 마운트 시 옵션 있으면 즉시 `onClarify`(채팅 차단 시작) + (seed 있으면) 프리필 턴; 없으면 seed
-  자동전송.
+- **부트**: 마운트 시 즉시 `onClarify`(채팅 차단 시작 — 폼은 요구사항 필드 때문에 항상 있다). 로드 세션은 건너뜀.
 - **첫 작업 턴**: `answerSubmission` 효과(폼 제출; 차단 해제와 같은 커밋 — folder 답변은 codebasePath
-  상태로 분리) 또는 seed 자동전송이 발사. 여기서 step[0]의 스킬+지시문 주입.
+  상태로, RAG 스위치는 `ragEnabled`로 분리)가 발사. 여기서 step[0]의 스킬+지시문 주입, 세션 제목 적용·요약 예약(D97).
 - **자동전진**: `autoTurn` nonce 효과가 생성형→생성형 턴을 사용자 입력 없이 발사(system 라인 =
   `progressLabel`).
-- **분기/정지**: `end` 핸들러가 `prefill`/`isGenerative(step.kind)`/취소·실패로 분기(정지 or 전진 or 폴백).
-- **게이팅**: `formPending`(WorkspaceView의 `clarify` 유무)이 컴포저·`send()`를 차단(system/prefill 턴 예외,
+- **분기/정지**: `end` 핸들러가 `isGenerative(step.kind)`/취소·실패로 분기(정지 or 전진 or 폴백).
+- **게이팅**: `formPending`(WorkspaceView의 `clarify` 유무)이 컴포저·`send()`를 차단(system 턴 예외,
   Stop 비차단 — D41).
 
 ## 에이전트별 한계 (degrade)
 
 - **claude/codex(세션형)**: 스킬·단계 지시가 세션에 유지 → 가장 풍부(같은 스킬은 대화당 1회만 주입).
-  프리필은 격리 세션으로 실행.
+  세션 제목 요약은 격리 세션으로 실행.
 - **gemini(세션리스)**: 매 턴 transcript 재전송이라 과거 주입이 원문 그대로는 아니고 요약된 형태로만
   남는다(lossy). 단계별 주입이 반복되며 크기 증가. 코드베이스/스킬 폴더 접근은 `--include-directories`로
   부여된다(D52).
@@ -287,7 +283,7 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
 
 단조 증가 커서 + 단계당 1회 arm + 세션형 스킬 dedupe(전송 실패 시 되감기) + `succeeded`에만 자동전진 +
 종단 `chat`(저장 검증 `validate_steps` + 런타임 `coerceSteps` 이중 보장; 기반 단계 위치·순서도 동일
-이중 검증 — D44) + 프리필/파싱 실패 시 폴백 + 기반 단계 preflight 실패는 **건너뜀**(차단·크래시 없음;
+이중 검증 — D44) + 파싱 실패 시 폴백 + 기반 단계 preflight 실패는 **건너뜀**(차단·크래시 없음;
 RAG 미구현 스텁의 한글 Err 포함). 취소/실패는 자동전진 중단 후 일반 대화. 단계·스킬 **정의**는
 settings.json에 영속(D39), 실행 상태·대기 폼·검색 결과 탭은 **transient**(저장 안 함); 생성된 파일과
 프로젝트 매니페스트의 `codebasePath`만 실제로 남는다.

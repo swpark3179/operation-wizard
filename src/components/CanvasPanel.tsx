@@ -163,8 +163,7 @@ export function CanvasPanel({
   tab,
   onTabChange,
   clarify,
-  clarifyPrefill,
-  prefillNonce,
+  ragOption,
   onSubmitAnswers,
   ragResult,
   promptResult,
@@ -194,11 +193,10 @@ export function CanvasPanel({
   onTabChange: (tab: CanvasTab) => void;
   /** Pending requirements-clarification questions, or null. */
   clarify: ClarifyQuestion[] | null;
-  /** Answers pre-filled from the launcher prompt (prefill pass), or null. */
-  clarifyPrefill?: Record<string, string | string[]> | null;
-  /** Bumped when a fresh prefill arrives (re-inits the form). */
-  prefillNonce?: number;
-  onSubmitAnswers: (answers: ClarifyAnswer[]) => void;
+  /** The form's RAG step switch (D96): present when the workflow has a RAG
+   * step; `configured` = a RAG connection is saved. */
+  ragOption?: { configured: boolean } | null;
+  onSubmitAnswers: (answers: ClarifyAnswer[], opts: { ragEnabled: boolean }) => void;
   /** The latest RAG search result (in-memory HTML for the "검색 결과" tab, D46). */
   ragResult: { query: string; html: string } | null;
   /** The optimized prompt from the first work turn (D78) → "프롬프트" tab. */
@@ -418,9 +416,9 @@ export function CanvasPanel({
 
       {effectiveTab === "requirements" && clarify?.length ? (
         <RequirementsForm
-          key={clarify.map((q) => q.id).join("|") + ":" + (prefillNonce ?? 0)}
+          key={clarify.map((q) => q.id).join("|")}
           questions={clarify}
-          initialAnswers={clarifyPrefill ?? undefined}
+          rag={ragOption}
           disabled={streaming}
           onSubmit={onSubmitAnswers}
         />

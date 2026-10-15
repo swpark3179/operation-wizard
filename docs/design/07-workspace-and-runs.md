@@ -269,21 +269,17 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   Flows는 워크플로우 단계·스킬 설정 화면 — D39; 지식 뷰는 RAG 연결·Confluence 수집·지식 베이스
   CRUD — D48, [04](04-ui-and-design-system.md).)
 - **HOME**(`HomeView`): 히어로(운영 도구 프레이밍 — "운영 작업 마법사" + 진행 절차 안내, D60) +
-  프롬프트 컴포저 + 4개 업무 카테고리(개발 계획 수립/운영 가이드
+  **'시작 설정' 바** + 4개 업무 카테고리 카드(개발 계획 수립/운영 가이드
   생성/데이터 조회/데이터 변경·권한) + **최근 작업 = 프로젝트 목록**(`listProjects`, 전역·모든 프로젝트,
-  최근 활동순, **세션 0인 프로젝트는 숨김**). 각 항목은 **프로젝트 제목** + 세션 수·시각을 보여주고,
-  클릭 시 그 프로젝트의 **id + 저장된 workdir**로 워크스페이스에 진입해 **가장 마지막 세션**
+  최근 활동순, **세션 0인 프로젝트는 숨김**). 각 항목은 **프로젝트 제목**(요구사항 요약 — D97) + 세션 수·시각을
+  보여주고, 클릭 시 그 프로젝트의 **id + 저장된 workdir**로 워크스페이스에 진입해 **가장 마지막 세션**
   (`lastSessionId`→`loadSession(projectId)`)을 연다(세션이 없으면 새 대화). 행 hover의 **연필 버튼 →
-  인라인 제목 편집**(Enter 저장/Escape 취소, `set_project_title` — D60). 카테고리/전송(새 채팅) →
-  **새 프로젝트**(id mint) + 워크스페이스 진입(첫 턴 프롬프트 seed). **컴포저 전송(프롬프트로 시작)은
-  카테고리를 지정하지 않고 `autoCategory=true`로 넘겨 진입 후 자동 분류하고(D81 — 아래 "카테고리
-  워크플로우 ⓪"), 카테고리 카드 클릭은 그 카테고리로 명시 진입한다.** 컴포저 하단에 **에이전트·모델
-  셀렉트**가 있어 시작 전에 실행 조합을 고른다(선택값은 `initialAgentId`/`initialModel`로 ChatPanel에
-  시드되고 첫 턴 전까지 변경 가능; 명시 선택은 탐지 기반 자동 기본값이 덮어쓰지 않음 — D60). 컴포저
-  **바로 아래에 작업 폴더 지정
-  버튼**(`pickFolder`)이 있어, 지정 시 그 폴더가 프로젝트 폴더가 되고 **미지정 시 자동 생성**된다(프로젝트별
-  transient 선택; [05](05-decisions.md) D33 R1). Home nav 재선택 시 런처로 리셋(`resetNonce`). 프롬프트
-  컴포저는 입력에 따라 자동 확장 후 상한(≈200px)에서 스크롤(`useAutoGrow`).
+  인라인 제목 편집**(Enter 저장/Escape 취소, `set_project_title` — D60). **홈에는 채팅 컴포저가 없다 —
+  카테고리 카드 클릭이 유일한 시작점**이며(D95) → **새 프로젝트**(id mint) + 워크스페이스 진입. '시작 설정' 바의
+  **에이전트·모델 셀렉트**로 시작 전에 실행 조합을 고른다(선택값은 `initialAgentId`/`initialModel`로 ChatPanel에
+  시드되고 첫 턴 전까지 변경 가능; 명시 선택은 탐지 기반 자동 기본값이 덮어쓰지 않음 — D60). 같은 바의 **작업 폴더
+  지정 버튼**(`pickFolder`)으로 지정하면 그 폴더가 프로젝트 폴더가 되고 **미지정 시 자동 생성**된다(프로젝트별
+  transient 선택; [05](05-decisions.md) D33 R1). Home nav 재선택 시 런처로 리셋(`resetNonce`).
 - **WORKSPACE**(`WorkspaceView`): 좌 `ChatPanel`(기본 412px — **패널 경계를 드래그해 폭 조절**,
   clamp 후 localStorage `ow.chatWidth`에 기억; 드래그 중에는 전역 오버레이로 캔버스 iframe의 이벤트
   삼킴을 차단 — D49) + 우 `CanvasPanel`. `WorkspaceView`가
@@ -302,8 +298,9 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     상한(≈160px)에서 스크롤(`useAutoGrow`). 세션형(claude/codex)은
     최신 턴만 + `sessionId`/`resume`으로 이어가고, 세션리스(gemini/FabriX)는 transcript를 매 턴
     전송한다. 대화 시작 후 에이전트 select는 고정(**새 세션**에서만 변경). **요구사항 폼이 대기 중이면
-    (`formPending`) 컴포저(textarea/전송)를 비활성**하고 `send()`도 가드한다 — 숨김 프리필/자동전진
-    턴(system)은 예외, 정지 버튼은 차단하지 않음(D41). 헤더에 **홈·기록·새 세션**
+    (`formPending`) 컴포저(textarea/전송)를 비활성**하고 `send()`도 가드한다 — 자동전진
+    턴(system)은 예외, 정지 버튼은 차단하지 않음(D41; 에이전트·모델 셀렉트는 첫 턴 전까지 그대로 변경 가능).
+    헤더 제목은 **작은 카테고리 라벨 + 세션 제목**(요구사항 요약 — D97)이고, 헤더에 **홈·기록·새 세션**
     버튼: **기록**=`listSessions` 팝오버(선택 시 `loadSession`→이어보기), **새 세션**=대화 초기화 +
     에이전트 재선택(워크스페이스 유지). 첫 질문 시 `ensureProject`로 프로젝트 폴더가 만들어지고(workdir
     resolve), `saveSession(projectId)`로 세션이 기록되며 매 턴 재저장된다. 카테고리별 워크플로우 진행은
@@ -372,23 +369,20 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 여전히 도구 채널 없는 클라이언트 오케스트레이션(D30 재확인). 상세 편집 가이드는
 [08-guided-flows-and-skills.md](08-guided-flows-and-skills.md).
 
-- **⓪ 카테고리 자동 분류(옵션 이전, D81)** — 홈 컴포저로 프롬프트를 입력해 시작하면(카드 클릭 아님)
-  카테고리가 잠정 `plan` + `autoCategory=true`로 진입한다. `WorkspaceView`가 워크스페이스 진입 시
-  `ensureProject`로 cwd를 확정한 뒤 `lib/categorize.ts::classifyCategory`(격리 에이전트 턴 —
-  `judgeRagRelevance`(D70) 패턴 복제, `` ```category `` fenced JSON `{category, reason}` 파싱, 실패 시
-  `null`)로 프롬프트에 가장 맞는 카테고리를 정하고, 그 카테고리로 `ChatPanel`을 **1회 마운트**한다(리마운트
-  없음). 분류 중에는 채팅 컬럼에 "작업 유형 분석 중…+중지" placeholder를 보인다. 실패/취소/`null` →
-  `plan` 폴백. 카테고리 카드·loaded session·빈 프롬프트는 분류하지 않고 그 카테고리로 바로 마운트한다.
+- **⓪ 시작 = 카테고리 카드(D95)** — 홈에는 채팅 컴포저가 없어 카테고리는 항상 사용자가 카드로 고른다(구 자동
+  분류 턴 D81·홈 프롬프트 프리필은 폐지). 저장된 세션을 열면 세션의 카테고리로 진입한다.
 - **① 고정 선택지(옵션, 프리플로우)** — `lib/options.ts`의 `CATEGORY_OPTIONS: Record<Category,
-  ClarifyQuestion[]>` + `optionsFor(category, settings)`. 카테고리(자동 분류된 경우 포함) 진입 시
-  **즉시**(에이전트 대기 없이) `onClarify`로 캔버스 '요구사항' 폼에 렌더한다. **기반 단계가 활성인 카테고리는 폼 맨 앞에 필수
-  `codebasePath` folder 질문**(네이티브 폴더 픽커)이 프리펜드된다(D45) — 답변은 wire가 아니라
-  구조적으로(`WorkspaceView.codebasePath` 상태) 전달·영속된다. 홈 프롬프트로 시작했으면 **숨김 프리필
-  턴**을 격리 실행(세션 id/resume 미사용, 영속화·스텝커서 불변; `send(_,{prefill:true})`)해
-  `prefillInstruction`으로 아는 항목만 ` ```prefill ` JSON으로 채우고(**folder 질문은 프리필 제외**)
-  `parsePrefill`로 검증 후 `onPrefill`로 폼을 미리 채운다. 폼 제출이 **첫 작업 턴**을 발사한다. 옵션이 빈
-  카테고리는 이 단계를 건너뛰고 seed를 첫 작업 턴으로 자동 전송. **폼이 답변을 기다리는 동안 채팅 컴포저는
-  차단**되고(프리필/자동전진 턴만 실행), '요구사항' 탭은 이 대기 동안만 표시된다(D41).
+  ClarifyQuestion[]>` + `optionsFor(category, settings)`. 카테고리 진입 시
+  **즉시**(에이전트 대기 없이) `onClarify`로 캔버스 '요구사항' 폼에 렌더한다. 폼 맨 앞은 **필수 요구사항 필드**
+  (`userRequest` — 카테고리별 예시 placeholder, D78/D95)이고, **워크플로우에 codebase 단계가 있으면 그다음에 필수
+  `codebasePath` folder 질문**(네이티브 폴더 픽커)이 붙는다(D45/D63) — 답변은 wire가 아니라
+  구조적으로(`WorkspaceView.codebasePath` 상태) 전달·영속된다. 워크플로우에 rag 단계가 있으면 폼 하단 바에
+  **'사내 문서 RAG 검색' 스위치**(기본 켜짐, RAG 미설정이면 꺼진 채 비활성)가 있고, 그 값은
+  `answerSubmission.ragEnabled`로 구조적으로 전달된다 — 끄면 rag 단계의 preflight가 검색·관련성 판단 없이 그 단계를
+  건너뛴다(D96). 폼 제출이 **첫 작업 턴**을 발사하고, 요구사항 답변이 그 턴의 사용자 말풍선 + **세션 제목**이 된다
+  (즉시 `heuristicTitle`, 첫 작업 턴과 병렬로 도는 격리 요약 턴 `lib/sessionTitle.ts::summarizeTitle`의 ` ```title `
+  결과로 교체 — 새 프로젝트면 `ensure_project` 제목·`set_project_title`도 함께, D97). **폼이 답변을 기다리는
+  동안 채팅 컴포저는 차단**되고(자동전진 턴만 실행), '요구사항' 탭은 이 대기 동안만 표시된다(D41).
 - **①.5 기반 3단계(foundation, D44)** — 워크플로우 맨 앞에 고정(pinned)되는 필수 단계:
   `codebase`(코드베이스 분석 — 매 턴 `extraDirs`로 접근 부여(claude `--add-dir`, gemini
   `--include-directories` — D52; 원격 FabriX는 같은 폴더를 읽기 전용 파일 도구 샌드박스로 받음, D84) + 절대경로
@@ -406,7 +400,7 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   발췌를 wire에 첨부) → `knowledge`(preflight가 `list_knowledge` 항목을 16KB 상한으로 주입;
   **artifact 엔트리(D59)는 요약+첨부 문서 절대경로 인덱스로 주입**되고 `knowledge/artifacts` 루트가
   extraDirs에 등록되어 에이전트가 원문 전체를 직접 읽는다).
-  rag/knowledge는 미설정·0건·실패 시 **에이전트 턴 없이 건너뛴다**(system 안내 + 커서 전진 + 다음
+  rag/knowledge는 미설정·0건·실패 시(rag는 폼의 RAG 스위치가 꺼졌을 때도 — D96) **에이전트 턴 없이 건너뛴다**(system 안내 + 커서 전진 + 다음
   생성형 단계로 체인; preflight 중 Stop은 취소 폴백). `plan`은 항상 활성, 그 외 카테고리는 Flows
   토글(저장 배열에 기반 kind 존재 = 플래그). **기반 단계는 완전 트리오가 필수는 아니다** — 카테고리별
   `CATEGORY_FOUNDATION`이 pin할 종류를 정하며(`guide`는 코드베이스를 뺀 **rag+knowledge**만 — D63),
@@ -442,13 +436,15 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   뒤에 `html-render` 스킬을 단 합성 렌더 서브스텝(`<file>.html`)을 삽입한다(편집기는 미확장 뷰만 봄).
   진행 노트는 `progressLabel(i, steps)` = "N/M단계 · <name> 중…"으로 **파생**(고정 문자열 없음).
 - **커서(ChatPanel)**: `stepIndexRef`(현재 단계) + `stepArmedRef`(단계당 1회 주입) +
-  `injectedSkillIdsRef`(세션형 스킬 dedupe) + `inflightStepRef`(파싱 대상 턴) + `prefillInflightRef`(프리필
-  턴 표시) + `promptSkillPendingRef`/`promptInflightRef`(내장 프롬프트 최적화 스킬 — 첫 실제 작업 턴 1회
+  `injectedSkillIdsRef`(세션형 스킬 dedupe) + `inflightStepRef`(파싱 대상 턴) +
+  `promptSkillPendingRef`/`promptInflightRef`(내장 프롬프트 최적화 스킬 — 첫 작업 턴 1회
   주입 + `end`에서 ` ```prompt ` 파싱, D78) + `codebasePathRef`/`skillDirsRef`(extraDirs 소스) +
+  `requirementRef`(요구사항 답변 — RAG 검색어·저장소 지도 키워드) + `ragEnabledRef`(폼의 RAG 스위치, D96) +
+  `sessionTitleRef`/`titlePendingRef`/`projectTitleOwnedRef`(세션 제목 요약 — D97) +
   `preflightAbortRef`(preflight 중 Stop).
   `WF`/스킬 맵은 **마운트 시 고정**(remount가 리셋). 로드 세션은 커서를 끝으로 시작 → 일반
   대화(재주입 없음). `send()`는 **workdir 확정(`ensure_project`)을 preflight·wire 조립보다 먼저** 수행해
-  첫 턴에도 절대경로를 알 수 있다(D52). wire 조립은 `[내장 프롬프트 최적화 스킬(첫 실제 작업 턴 1회,
+  첫 턴에도 절대경로를 알 수 있다(D52; 같은 지점에서 첫 작업 턴이면 세션 제목 요약 턴을 병렬로 띄운다 — D97). wire 조립은 `[내장 프롬프트 최적화 스킬(첫 작업 턴 1회,
   최상단 — D78) → **내장 코드 분석 방법론**(armed codebase 단계=orient / (저장된 워크플로우의) source-analysis 단계=focus,
   레지스트리 밖·세션형 dedupe — D86) → step.skillIds의 스킬 body들(armed, 세션형 dedupe; dir 있으면 리소스 폴더 안내 부착) →
   step.instruction(armed) → 경로 컨텍스트(`pathContext` — 생성형 단계: 작업 폴더/코드베이스 절대경로 +
@@ -465,7 +461,6 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   `WorkflowStepper`에 표시되고, `lastTurnRef`(마지막 실전송 턴)가 실패 시 **같은 세션 재시도**의
   소스가 된다(둘 다 transient — D57).
 - **`end` 분기**:
-  - 프리필 턴: `parsePrefill` → `onPrefill`로 폼 채움 → 프리필 메시지쌍 제거. 스텝/스킬/영속화 불변.
   - 생성형(`isGenerative` — search/document/기반 3종): `file`이 있으면 `onOpenFile(join(cwd,file))`로
     캔버스에 연다(워크플로우 산출물은 '산출물' 탭에서 선택 — D58). **원격 에이전트(FabriX)는 파일을 읽기만
     하므로, 이 지점에서 앱이 현재 턴의 마지막 도구 호출 이후 텍스트(`remoteTailRef` — ```prompt 블록 제거, 비면
@@ -481,23 +476,26 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     즉시 중단. 소진 시 halt 노트 + 수동 '다시 시도'(D57). **FabriX "빈 응답" 실패는 중단하지 않고 그 단계(+HTML 렌더
     서브스텝)를 `skipped`로 표시한 뒤 다음 단계로 진행**한다(백엔드가 이미 같은 턴에서 도구 없이 재요청했으므로 단계 전체
     재시도 없음 — D93).
-- **리프트(WorkspaceView)**: `clarify`(옵션 질문)/`clarifyPrefill`(자동채움 답변)/`prefillNonce`/`canvasTab`/
-  `streaming`/`answerSubmission` + `refreshNonce`(문서 생성 후 트리 리로드) + `resolvedWorkdir` +
+- **리프트(WorkspaceView)**: `clarify`(옵션 질문)/`canvasTab`/
+  `streaming`/`answerSubmission`(`ragEnabled` 포함 — D96) + `ragOption`(rag 단계 유무 + RAG 설정 여부 → 폼 스위치,
+  세션 고정) + `refreshNonce`(문서 생성 후 트리 리로드) + `resolvedWorkdir` +
   `codebasePath`(프로젝트 스코프 — 새 세션에도 유지) + `ragResult`(검색 결과 탭 HTML) +
+  `sessionTitle`/`request`(세션 제목 미러 — ChatPanel의 `onSessionTitle` 콜백 — 와 요구사항 원문, 지식 저장 패널의
+  기본 제목·원래 요청, D97) +
   `artifacts`/`artifactSel`/`stepProgress` 미러(산출물 탭, D58 — ChatPanel의 `onStepProgress` 콜백) 소유.
-  `handleClarify`·`handlePrefill`는 캔버스 탭을 '요구사항'으로 전환, `handleOpenFile`은 산출물이면
+  `handleClarify`는 캔버스 탭을 '요구사항'으로 전환, `handleOpenFile`은 산출물이면
   '산출물' 탭 선택(D58), 아니면 '파일' 탭 전환 + 트리 리로드 + 파일 선택. 새 세션/기록 열기 시 초기화.
-- **폼(RequirementsForm)**: single/multi = **accent 카드 그리드**(D35), text=`useAutoGrow`, `required` 검증,
-  스트리밍/제출 중 비활성, `initialAnswers`로 프리필 반영(`prefillNonce`로 재초기화). 제출 →
-  `formatClarifyAnswers`가 `{wire, display}` 생성 → `answerSubmission`(nonce) → ChatPanel effect가 원 요청을
-  덧붙여 `send`로 첫 작업 턴(skill+step[0]) 발사. 채팅엔 원 요청(또는 압축 요약)만 표시.
+- **폼(RequirementsForm)**: single/multi = **accent 카드 그리드**(D35), text=`useAutoGrow`(질문별 `placeholder`),
+  `required` 검증, 스트리밍/제출 중 비활성, 하단 바의 RAG 스위치(`rag` prop이 있을 때만 — D96). 제출 →
+  `formatClarifyAnswers`가 `{wire, display}` 생성 → `answerSubmission`(nonce, `requirement`, `ragEnabled`) →
+  ChatPanel effect가 `send`로 첫 작업 턴(skill+step[0]) 발사. 채팅엔 요구사항 원문(없으면 압축 요약)만 표시.
 - **안전장치**: 단조 커서 + 1회성 arm(단계) + 스킬 dedupe(세션형) + `succeeded`에만 자동발사 + 종단 `chat`
-  (저장 검증 + `coerceSteps` 이중 보장) + 프리필/파싱 실패 폴백으로 무한진행·깨짐 방지. 일시적 실패
+  (저장 검증 + `coerceSteps` 이중 보장) + 파싱 실패 폴백으로 무한진행·깨짐 방지. 일시적 실패
   자동 재시도는 **단계당 최대 2회**로 상한(치명적 오류·취소 제외)이라 무한 재시도가 되지 않는다(D68).
 - **영속화**: 단계·스킬의 **정의**는 `settings.json`(D39), 옵션 카탈로그는 코드 정적. 실행 상태(단계 커서/
   주입 이력/대기 폼)는 **transient**(저장 안 함). 생성된 파일만 실제로 남는다. 저장 세션 재오픈 시 폼·커서
   없이 일반 대화로 이어간다.
-- **에이전트별**: claude/codex는 동일 세션 resume로 스킬·모든 단계 연속(프리필은 격리 세션). gemini/FabriX
+- **에이전트별**: claude/codex는 동일 세션 resume로 스킬·모든 단계 연속(세션 제목 요약은 격리 세션). gemini/FabriX
   (세션리스)는 transcript 재전송이라 스킬/지시문 lossy·크기 증가(FabriX는 코드베이스를 읽기 전용 도구로 조회). opencode/antigravity(plain)는 도구/파일쓰기
   보장이 약해 degrade.
 

@@ -18,7 +18,7 @@
 | [05-decisions.md](05-decisions.md) | 주요 결정 로그 (결정·근거·대안) |
 | [06-build-and-environment.md](06-build-and-environment.md) | 빌드/실행 환경 제약 (MSVC, 사내망) |
 | [07-workspace-and-runs.md](07-workspace-and-runs.md) | 에이전트 실행(run) 엔진 + 대화/캔버스 워크스페이스 |
-| [08-guided-flows-and-skills.md](08-guided-flows-and-skills.md) | 가이드 플로우(옵션 우선 시작·프리필) + 시스템 스킬 + 결과형식 강제 가이드 |
+| [08-guided-flows-and-skills.md](08-guided-flows-and-skills.md) | 가이드 플로우(카테고리 카드 시작·요구사항 폼·RAG 스위치·세션 제목) + 시스템 스킬 + 결과형식 강제 가이드 |
 
 ## 유지보수 규칙 (중요)
 

@@ -1,19 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ShieldCheck,
-  ArrowUp,
   AlertTriangle,
+  Bot,
   Check,
   FolderOpen,
   Loader2,
   Pencil,
-  Wand2,
   X,
 } from "lucide-react";
 import { defaultAgentId } from "./ChatPanel";
 import { CATEGORIES, sessionTime, type Category } from "./workspace";
 import { listProjects, loadSession, pickFolder, setProjectTitle } from "../lib/api";
-import { useAutoGrow } from "../lib/useAutoGrow";
 import type { AgentInfo, DetectedAgent, ProjectSummary, StoredSession } from "../lib/types";
 
 /** Last path segment of a Windows/Unix path, for the folder chip. */
@@ -34,19 +32,11 @@ export function HomeView({
   detected: Record<string, DetectedAgent>;
   /** Navigate to the Agents view (undetected-agent onboarding, D57). */
   onOpenAgents?: () => void;
-  /** Start a new project. `workdir` = a folder chosen on Home, or undefined →
-   * auto. `agentId`/`model` = the composer's picks, seeding the workspace
-   * ChatPanel (still changeable there before the first turn). `autoCategory` =
-   * true when the category should be auto-classified from the prompt (composer
-   * send, D81); category cards pass their explicit id with it false. */
-  onStart: (
-    category: Category,
-    prompt: string,
-    workdir?: string,
-    agentId?: string,
-    model?: string,
-    autoCategory?: boolean,
-  ) => void;
+  /** Start a new project in a category (work always starts from a category
+   * card — D95). `workdir` = a folder chosen on Home, or undefined → auto.
+   * `agentId`/`model` = the start-settings picks, seeding the workspace
+   * ChatPanel (still changeable there before the first turn). */
+  onStart: (category: Category, workdir?: string, agentId?: string, model?: string) => void;
   /** Open a recent project's latest session (adopts its id + resolved workdir
    * + stored codebase path). */
   onOpenSession: (
@@ -56,8 +46,6 @@ export function HomeView({
     codebasePath?: string | null,
   ) => void;
 }) {
-  const [prompt, setPrompt] = useState("");
-  const promptRef = useAutoGrow(prompt, 200);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   // Optional folder for the project about to start (transient; reset each Home
   // visit). Unset → the new project runs in its own auto-created folder.
@@ -66,8 +54,8 @@ export function HomeView({
   // now surface here (D57).
   const [uiError, setUiError] = useState<string | null>(null);
 
-  // Agent + model picked in the composer (start-anywhere with a chosen model).
-  // The default agent tracks detection results until the user picks one.
+  // Agent + model picked in the start-settings bar (D60/D95). The default agent
+  // tracks detection results until the user picks one.
   const [agentId, setAgentId] = useState(() => defaultAgentId(agents, detected));
   const [model, setModel] = useState("default");
   const agentTouchedRef = useRef(false);
@@ -93,12 +81,8 @@ export function HomeView({
     setModel("default"); // the previous agent's model id means nothing here
   };
 
-  // `auto` = classify the category from the prompt (composer send — D81); a
-  // category card passes its explicit id with auto=false.
-  const start = (category: Category, auto = false) =>
-    onStart(category, prompt.trim(), chosenFolder ?? undefined, agentId, model, auto);
-
-  const send = () => start("plan", true);
+  const start = (category: Category) =>
+    onStart(category, chosenFolder ?? undefined, agentId, model);
 
   const chooseFolder = async () => {
     try {
@@ -127,7 +111,7 @@ export function HomeView({
       if (p.lastSessionId) {
         onOpenSession(await loadSession(p.id, p.lastSessionId), p.id, p.workdir, p.codebasePath);
       } else {
-        onStart("plan", "");
+        onStart("plan");
       }
     } catch (e) {
       setUiError(`프로젝트를 열지 못했습니다 — ${String(e)}`);
@@ -171,9 +155,9 @@ export function HomeView({
             운영 작업 마법사
           </h1>
           <p className="text-[14px] leading-[1.6] text-ink-muted">
-            로컬 CLI 에이전트로 운영 업무를 정해진 절차에 따라 진행합니다.
+            업무 카테고리를 고르면 정해진 절차에 따라 로컬 CLI 에이전트가 작업을 진행합니다.
             <br />
-            요구사항 확인 → 코드베이스 분석 → 사내 지식 반영 → 산출물 생성 순으로 진행되며, 모든
+            요구사항 입력 → 코드베이스 분석 → 사내 지식 반영 → 산출물 생성 순으로 진행되며, 모든
             작업은 프로젝트로 기록됩니다.
           </p>
         </div>
@@ -220,100 +204,72 @@ export function HomeView({
           </div>
         )}
 
-        {/* prompt composer */}
-        <div className="mb-3 rounded-[16px] border border-line-strong bg-panel px-4 pb-3 pt-3.5 shadow-md">
-          <textarea
-            ref={promptRef}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={(e) => {
-              // Enter = 전송, Shift+Enter / Ctrl+Enter = 줄바꿈(기본 동작 허용)
-              if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
-                e.preventDefault();
-                send();
-              }
-            }}
-            rows={2}
-            placeholder="예: 주문 목록 화면에 배송상태 필터를 추가하고, 행 클릭 시 배송 상세 팝업을 띄우고 싶어요…"
-            className="max-h-[200px] min-h-[52px] w-full resize-none overflow-y-auto bg-transparent text-[14.5px] leading-[1.55] text-ink outline-none placeholder:text-ink-faint"
-          />
-          <div className="mt-1.5 flex items-center gap-2">
-            <span
-              className="inline-flex shrink-0 items-center gap-1.5 text-[12px] text-ink-soft"
-              title="입력한 요청을 분석해 가장 알맞은 업무 카테고리로 시작합니다"
-            >
-              <Wand2 size={14} />
-              작업 유형 자동 선택
-            </span>
-            {/* agent + model picked before starting (mirrors the ChatPanel
-                composer; the workspace opens with these — D60) */}
-            <select
-              value={agentId}
-              onChange={(e) => pickAgent(e.target.value)}
-              title="실행할 에이전트"
-              className="max-w-[150px] rounded-md border border-line bg-panel px-1.5 py-1 text-[11.5px] text-ink-muted outline-none"
-            >
-              {(availableAgents.length ? availableAgents : agents).map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                  {detected[a.id] ? (detected[a.id].available ? "" : " (미탐지)") : " (탐지 중…)"}
-                </option>
-              ))}
-            </select>
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              title="사용할 모델"
-              className="min-w-0 max-w-[190px] truncate rounded-md border border-line bg-panel px-1.5 py-1 text-[11.5px] text-ink-muted outline-none"
-            >
-              {models.length === 0 && <option value="default">Default</option>}
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-            <div className="flex-1" />
-            <button
-              type="button"
-              onClick={send}
-              title="전송"
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] bg-accent text-white shadow-xs transition-colors hover:bg-accent-strong"
-            >
-              <ArrowUp size={18} />
-            </button>
-          </div>
-        </div>
-
-        {/* working folder (per new project; unset → auto-created) */}
-        <div className="mb-9 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void chooseFolder()}
-            title={chosenFolder ?? "작업 폴더 지정"}
-            className="inline-flex max-w-[420px] items-center gap-1.5 rounded-lg border border-line bg-panel px-3 py-1.5 text-[12.5px] text-ink-muted transition-colors hover:bg-subtle"
-          >
-            <FolderOpen size={14} className="shrink-0 text-accent" />
-            <span className="truncate">{chosenFolder ? basename(chosenFolder) : "작업 폴더 지정"}</span>
-          </button>
-          {chosenFolder ? (
-            <button
-              type="button"
-              onClick={() => setChosenFolder(null)}
-              title="폴더 지정 해제"
-              className="grid h-6 w-6 place-items-center rounded-md text-ink-soft transition-colors hover:bg-subtle hover:text-ink"
-            >
-              <X size={13} />
-            </button>
-          ) : (
-            <span className="text-[12px] text-ink-soft">미지정 시 새 프로젝트 폴더가 자동 생성됩니다</span>
-          )}
-        </div>
-
-        {/* categories */}
+        {/* categories — the only way to start (D95): pick one, then state the
+            request in the workspace's requirements form */}
         <div className="mb-3 text-[11px] font-bold uppercase tracking-[0.08em] text-ink-soft">
           업무 카테고리
         </div>
+
+        {/* start settings: agent + model (the workspace opens with these, still
+            changeable before the first turn — D60) and the working folder (per
+            new project; unset → auto-created) */}
+        <div className="mb-3.5 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[12px] border border-line bg-panel px-3.5 py-2.5 shadow-xs">
+          <span className="inline-flex shrink-0 items-center gap-1.5 text-[12px] text-ink-soft">
+            <Bot size={14} />
+            실행 에이전트
+          </span>
+          <select
+            value={agentId}
+            onChange={(e) => pickAgent(e.target.value)}
+            title="실행할 에이전트"
+            className="max-w-[150px] rounded-md border border-line bg-panel px-1.5 py-1 text-[11.5px] text-ink-muted outline-none"
+          >
+            {(availableAgents.length ? availableAgents : agents).map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+                {detected[a.id] ? (detected[a.id].available ? "" : " (미탐지)") : " (탐지 중…)"}
+              </option>
+            ))}
+          </select>
+          <select
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            title="사용할 모델"
+            className="min-w-0 max-w-[190px] truncate rounded-md border border-line bg-panel px-1.5 py-1 text-[11.5px] text-ink-muted outline-none"
+          >
+            {models.length === 0 && <option value="default">Default</option>}
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+          <div className="flex-1" />
+          <span className="flex min-w-0 items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => void chooseFolder()}
+              title={chosenFolder ?? "작업 폴더 지정 (미지정 시 새 프로젝트 폴더가 자동 생성됩니다)"}
+              className="inline-flex min-w-0 max-w-[260px] items-center gap-1.5 rounded-lg border border-line bg-panel px-2.5 py-1 text-[12px] text-ink-muted transition-colors hover:bg-subtle"
+            >
+              <FolderOpen size={14} className="shrink-0 text-accent" />
+              <span className="truncate">
+                {chosenFolder ? basename(chosenFolder) : "작업 폴더 지정 (선택)"}
+              </span>
+            </button>
+            {chosenFolder && (
+              <button
+                type="button"
+                onClick={() => setChosenFolder(null)}
+                title="폴더 지정 해제 — 새 프로젝트 폴더 자동 생성"
+                className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-ink-soft transition-colors hover:bg-subtle hover:text-ink"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </span>
+        </div>
+
         <div className="mb-9 grid grid-cols-2 gap-3.5">
           {CATEGORIES.map(({ id, label, desc, icon: Icon, tile }) => (
             <button

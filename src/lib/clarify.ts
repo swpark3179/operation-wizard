@@ -1,33 +1,31 @@
 // Requirements form protocol (frontend-only — not a Rust serde mirror).
 //
-// The option catalog itself is now static per category (see `options.ts`) and
-// shown on entry; this module hosts the shared pieces: the `ClarifyQuestion`/
+// The option catalog itself is static per category (see `options.ts`) and shown
+// on entry; this module hosts the shared pieces: the `ClarifyQuestion`/
 // `ClarifyAnswer` shapes the form renders, `formatClarifyAnswers` (answers →
-// wire + display), and the **prefill** protocol (`prefillInstruction` /
-// `parsePrefill`) that auto-fills known options from the launcher prompt via a
-// hidden agent turn (design D36). `parseClarify`/`stripClarifyBlock`/
-// `CLARIFY_INSTRUCTION` remain as a reference implementation of the fenced-block
-// pattern (agent GENERATES the questions) — the template to copy when forcing a
-// new agent-emitted result format. There is no custom tool-call channel for
-// local CLI agents, so every such protocol rides in fenced text blocks and any
-// parse failure falls back to plain chat so the conversation never breaks.
+// wire + display), and `fencedBlocks`, the parser every fenced-output contract
+// shares. `parseClarify`/`stripClarifyBlock`/`CLARIFY_INSTRUCTION` remain as a
+// reference implementation of the fenced-block pattern (agent GENERATES the
+// questions) — the template to copy when forcing a new agent-emitted result
+// format. There is no custom tool-call channel for local CLI agents, so every
+// such protocol rides in fenced text blocks and any parse failure falls back to
+// plain chat so the conversation never breaks. (The Home-prompt prefill pass
+// that used to live here was removed with the Home composer — D95.)
 
 export type ClarifyType = "single" | "multi" | "text" | "folder";
 
 export interface ClarifyQuestion {
   id: string;
   label: string;
-  /** "folder" renders a native folder-picker button (value = absolute path);
-   * folder questions are excluded from the prefill protocol — an agent cannot
-   * know local paths (D45). */
+  /** "folder" renders a native folder-picker button (value = absolute path),
+   * delivered structurally instead of as wire prose (D45). */
   type: ClarifyType;
   /** Choices for single/multi (required for those types). */
   options?: string[];
   required?: boolean;
-  /** Excluded from the prefill protocol — filled deterministically on the client
-   * (e.g. the requirement field from the launcher seed), so an agent re-wording
-   * it would only lose fidelity (D78). Folder questions are always excluded. */
-  noPrefill?: boolean;
+  /** Text/folder input placeholder (e.g. a category-specific requirement
+   * example — D95); the form's generic placeholder otherwise. */
+  placeholder?: string;
 }
 
 export interface ClarifyAnswer {
@@ -77,8 +75,8 @@ export const CLARIFY_NOTE =
   "요구사항 확인 질문을 오른쪽 캔버스 '요구사항' 탭에 표시했습니다. 항목을 작성해 제출해 주세요.";
 
 /** All fenced code blocks in a string, with their tag and inner body. Shared
- * by every fenced-output contract (clarify/prefill here, summary in
- * knowledgeSave.ts — D59). */
+ * by every fenced-output contract (clarify here, summary in knowledgeSave.ts —
+ * D59, title in sessionTitle.ts — D97). */
 export function fencedBlocks(content: string): { tag: string; body: string }[] {
   const out: { tag: string; body: string }[] = [];
   const re = /```([^\n`]*)\n?([\s\S]*?)```/g;
@@ -155,86 +153,4 @@ export function formatClarifyAnswers(answers: ClarifyAnswer[]): { wire: string; 
   const display = "요구사항 답변을 제출했습니다.\n" + displayLines.join("\n");
 
   return { wire, display };
-}
-
-// ── Prefill (auto-fill) — the inverse of clarify: the agent ANSWERS a fixed
-// option catalog from the user's launcher prompt, filling only what it can
-// confidently infer (design D36). A hidden turn runs this; parsePrefill lifts
-// the answers into the form. Anything uncertain is left for the user. ──────────
-
-/** One line describing a question for the prefill instruction. */
-function serializeQuestion(q: ClarifyQuestion): string {
-  const req = q.required ? ", 필수" : "";
-  const opts =
-    (q.type === "single" || q.type === "multi") && q.options?.length
-      ? ` | 옵션: ${q.options.join(" / ")}`
-      : "";
-  return `- id "${q.id}" (${q.type}${req}): ${q.label}${opts}`;
-}
-
-/** Build the instruction that asks the agent to prefill known option answers
- * from the user's request. Prepended (invisibly) to a hidden prefill turn.
- * Folder questions are excluded — an agent cannot know local paths. */
-export function prefillInstruction(questions: ClarifyQuestion[], userPrompt: string): string {
-  questions = questions.filter((q) => q.type !== "folder" && !q.noPrefill);
-  return `[시스템 지시: 요청 자동 분석 단계]
-아래는 사용자가 답해야 할 선택 항목 목록입니다. 사용자의 요청을 읽고, 요청에서 "확실하게" 알 수 있는 항목만 골라 답을 채우세요.
-
-반드시 아래 규칙을 지키세요:
-1. 확신할 수 없는 항목은 절대 추측하지 말고 생략하세요(그 항목은 사용자가 직접 고릅니다).
-2. 응답의 가장 처음에 아래 형식의 \`\`\`prefill 코드 블록 하나만 출력하고, 그 앞뒤에 다른 텍스트를 쓰지 마세요.
-3. 블록 안은 유효한 JSON이며 스키마는 { "answers": { "<질문id>": <답> } } 입니다.
-   - "single" 항목의 답은 옵션 중 정확히 하나의 문자열입니다.
-   - "multi" 항목의 답은 옵션들의 부분집합 배열입니다.
-   - "text" 항목의 답은 문자열입니다.
-4. 채울 항목이 하나도 없으면 { "answers": {} } 를 출력하세요. 이 턴에서는 계획/코드/설명을 작성하지 마세요.
-
-선택 항목:
-${questions.map(serializeQuestion).join("\n")}
-
-사용자의 요청:
----
-${userPrompt}
-`;
-}
-
-/** Parse a ```prefill block into validated per-question answers (values coerced
- * to each question's type/options; unknown ids and invalid values dropped).
- * Returns {} on any failure → an empty form (never breaks the flow). */
-export function parsePrefill(
-  content: string,
-  questions: ClarifyQuestion[],
-): Record<string, string | string[]> {
-  const byId = new Map(questions.map((q) => [q.id, q]));
-  const blocks = fencedBlocks(content);
-  const ordered = [...blocks.filter((b) => b.tag === "prefill"), ...blocks];
-  for (const b of ordered) {
-    let answers: unknown;
-    try {
-      answers = (JSON.parse(b.body.trim()) as { answers?: unknown })?.answers;
-    } catch {
-      continue;
-    }
-    if (!answers || typeof answers !== "object") continue;
-    const out: Record<string, string | string[]> = {};
-    for (const [id, raw] of Object.entries(answers as Record<string, unknown>)) {
-      const q = byId.get(id);
-      if (!q) continue;
-      if (q.type === "folder") continue; // never agent-fillable (defensive)
-      if (q.noPrefill) continue; // client-filled only (e.g. requirement — D78)
-      if (q.type === "text") {
-        if (typeof raw === "string" && raw.trim()) out[id] = raw;
-      } else if (q.type === "single") {
-        if (typeof raw === "string" && q.options?.includes(raw)) out[id] = raw;
-      } else {
-        // multi
-        if (Array.isArray(raw)) {
-          const vals = raw.filter((x): x is string => typeof x === "string" && !!q.options?.includes(x));
-          if (vals.length) out[id] = vals;
-        }
-      }
-    }
-    return out; // first block that parsed wins (even if empty answers)
-  }
-  return {};
 }
