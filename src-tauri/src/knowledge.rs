@@ -265,88 +265,6 @@ fn save_knowledge_files_at(
     save_knowledge_at(root, entry)
 }
 
-/// Sanitize a caller-provided document name into a safe single-segment file
-/// name (strip path separators + Windows-illegal chars). Empty → `page`.
-fn safe_doc_name(raw: &str) -> String {
-    let base = raw.rsplit(['/', '\\']).next().unwrap_or("").trim();
-    let cleaned: String = base
-        .chars()
-        .map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '_' } else { c })
-        .collect();
-    let cleaned = cleaned.trim_matches(['.', ' ']).to_string();
-    if cleaned.is_empty() {
-        "page".to_string()
-    } else {
-        cleaned
-    }
-}
-
-/// Write **in-memory** documents (`(name, contents)`) as one artifact entry —
-/// the sibling of `save_knowledge_files_at` for backend callers that produce
-/// content directly instead of copying disk files (Confluence MCP ingest, D82).
-/// Same staged-swap through `artifacts/<id>.tmp` for atomicity: a mid-write
-/// failure never destroys the previous file set, and the entry JSON is written
-/// only after the new set is fully in place.
-pub(crate) fn save_knowledge_docs_at(
-    root: &Path,
-    mut entry: KnowledgeEntry,
-    docs: Vec<(String, String)>,
-) -> Result<KnowledgeEntry, String> {
-    entry.id = entry.id.trim().to_string();
-    if !is_safe_id(&entry.id) {
-        return Err(format!("invalid knowledge id: {:?}", entry.id));
-    }
-    if entry.title.trim().is_empty() {
-        return Err("knowledge entry needs a title".to_string());
-    }
-
-    // Plan names up front: sanitize + collision-free, guard per-file size.
-    let mut plan: Vec<(String, &String)> = Vec::new();
-    let mut taken: HashSet<String> = HashSet::new();
-    for (raw_name, contents) in &docs {
-        if contents.len() as u64 > MAX_ARTIFACT_FILE {
-            return Err(format!("수집 문서가 너무 큽니다(최대 10 MiB): {raw_name}"));
-        }
-        let name = unique_name(&safe_doc_name(raw_name), &taken);
-        taken.insert(name.to_lowercase());
-        plan.push((name, contents));
-    }
-
-    let dir = artifacts_dir(root, &entry.id);
-    let tmp = artifacts_tmp_dir(root, &entry.id);
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-    let mut written: Vec<String> = Vec::new();
-    for (name, contents) in &plan {
-        if let Err(e) = fs::write(tmp.join(name), contents) {
-            let _ = fs::remove_dir_all(&tmp);
-            return Err(format!("수집 문서 저장 실패: {name} — {e}"));
-        }
-        written.push(name.clone());
-    }
-    if let Err(e) = remove_dir_if_exists(&dir) {
-        let _ = fs::remove_dir_all(&tmp);
-        return Err(e);
-    }
-    if let Err(e) = fs::rename(&tmp, &dir) {
-        let _ = fs::remove_dir_all(&tmp);
-        return Err(format!("산출물 폴더 교체 실패 — {e}"));
-    }
-
-    entry.kind = "artifact".to_string();
-    entry.files = written;
-    save_knowledge_at(root, entry)
-}
-
-/// Convenience wrapper resolving the real knowledge root (backend callers like
-/// the Confluence MCP ingest — D82). Not a Tauri command.
-pub(crate) fn save_knowledge_docs(
-    entry: KnowledgeEntry,
-    docs: Vec<(String, String)>,
-) -> Result<KnowledgeEntry, String> {
-    save_knowledge_docs_at(&knowledge_root()?, entry, docs)
-}
-
 /// Delete one entry; deleting a missing entry is Ok (idempotent). An artifact
 /// entry's copied-files folder (and any stray staging dir) goes with it.
 fn delete_knowledge_at(root: &Path, id: &str) -> Result<(), String> {
@@ -644,33 +562,5 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&src);
-    }
-
-    #[test]
-    fn docs_save_writes_in_memory_files_as_artifact() {
-        let root = temp_root("docs-save");
-        let _ = fs::remove_dir_all(&root);
-
-        let docs = vec![
-            ("설계.html".to_string(), "<h1>설계</h1>".to_string()),
-            // Colliding sanitized name → deduped; path separators stripped.
-            ("설계.html".to_string(), "<h1>둘</h1>".to_string()),
-            ("sub/../weird:name.html".to_string(), "<p>x</p>".to_string()),
-        ];
-        let saved = save_knowledge_docs_at(&root, entry("conf", "Confluence 수집"), docs).unwrap();
-        assert_eq!(saved.kind, "artifact");
-        assert_eq!(saved.files, vec!["설계.html", "설계-2.html", "weird_name.html"]);
-
-        let dir = artifacts_dir(&root, "conf");
-        assert_eq!(fs::read_to_string(dir.join("설계.html")).unwrap(), "<h1>설계</h1>");
-        assert_eq!(fs::read_to_string(dir.join("설계-2.html")).unwrap(), "<h1>둘</h1>");
-        assert!(dir.join("weird_name.html").exists());
-
-        // Round-trips through the store as one artifact entry.
-        let list = list_knowledge_at(&root).unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].files.len(), 3);
-
-        let _ = fs::remove_dir_all(&root);
     }
 }

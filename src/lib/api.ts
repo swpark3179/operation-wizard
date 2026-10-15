@@ -4,11 +4,9 @@ import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AgentInfo,
   CodebaseLearnings,
-  ConfluenceConfig,
   DetectedAgent,
   FabrixConfig,
   FileEntry,
-  IngestEvent,
   KnowledgeEntry,
   ProjectMeta,
   ProjectSummary,
@@ -51,11 +49,6 @@ export function setWorkflow(category: string, steps: StepDef[] | null): Promise<
   return invoke<Settings>("set_workflow", { category, steps });
 }
 
-/** Set (or clear, with null/empty URL) the Confluence MCP connection (D82). */
-export function setConfluenceConfig(config: ConfluenceConfig | null): Promise<Settings> {
-  return invoke<Settings>("set_confluence_config", { config });
-}
-
 /** Set (or clear, with null/empty endpoint) the RAG service config. */
 export function setRagConfig(config: RagConfig | null): Promise<Settings> {
   return invoke<Settings>("set_rag_config", { config });
@@ -73,10 +66,10 @@ export function probeFabrix(): Promise<string> {
   return invoke<string>("probe_fabrix");
 }
 
-// ── RAG / Confluence ingestion / knowledge ───────────────────────────────────
+// ── RAG / knowledge ─────────────────────────────────────────────────────────
 
-/** Search the user's RAG service (rag workflow step). Rejects with a Korean
- * guidance message while the rag.rs stubs are unimplemented/unconfigured. */
+/** Search the in-house RAG service (rag workflow step — Fabrix rag-chat, D65).
+ * Rejects with a Korean message when unconfigured/unreachable. */
 export function ragSearch(query: string, topK?: number): Promise<RagHit[]> {
   return invoke<RagHit[]>("rag_search", { query, topK: topK ?? null });
 }
@@ -85,33 +78,6 @@ export function ragSearch(query: string, topK?: number): Promise<RagHit[]> {
  * ("연결됨 (N개 모델)"). Rejects with a Korean message if unconfigured/unreachable. */
 export function probeRag(): Promise<string> {
   return invoke<string>("probe_rag");
-}
-
-/** What to collect via the Confluence MCP server (D82): a root page (getChild
- * recursion) and/or a search query (searchContent). Passed per-run, not stored. */
-export interface ConfluenceTarget {
-  rootPageId?: string | null;
-  searchQuery?: string | null;
-}
-
-/** Start a Confluence MCP crawl; pages become one knowledge-base artifact entry.
- * Progress streams over `onEvent` until a terminal `end` event. Returns the
- * ingest id (pass to {@link cancelIngest}). */
-export function startConfluenceIngest(
-  target: ConfluenceTarget,
-  onEvent: Channel<IngestEvent>,
-): Promise<string> {
-  return invoke<string>("start_confluence_ingest", { target, onEvent });
-}
-
-export function cancelIngest(ingestId: string): Promise<void> {
-  return invoke("cancel_ingest", { ingestId });
-}
-
-/** Settings-screen connection test (D82): handshakes with the MCP server and
- * returns a tool summary ("연결됨 — N개 도구 (…)"). */
-export function probeConfluence(): Promise<string> {
-  return invoke<string>("probe_confluence");
 }
 
 /** All knowledge entries (full bodies), newest-updated first. */

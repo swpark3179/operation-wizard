@@ -111,7 +111,7 @@ Open Design의 `RuntimeAgentDef.buildArgs`/`streamFormat`/`promptViaStdin`에 �
    명시 `timeout(180s)`(reqwest blocking 기본 30초가 헤더 대기·매 read에 걸리던 것을 대체).
 
 > **취소 지연(원격)**: 취소 플래그는 SSE `data:` 라인 사이에서 확인되므로 서버가 조용하면 다음 바이트까지
-> 지연될 수 있다(confluence 취소와 동형). 토큰 스트림은 자주 방출되어 실사용상 문제 없다.
+> 지연될 수 있다. 토큰 스트림은 자주 방출되어 실사용상 문제 없다.
 
 ## 이벤트 모델(`RunEvent`) — 직렬화 `camelCase`, `type` 태그
 
@@ -256,18 +256,16 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 | `probe_rag` | — | `string` | RAG 연결 테스트(지식 뷰): rag-chat `/models` 조회(프록시 우회) 후 `rag.models`에 캐시 저장 + "연결됨 (N개 모델)". assetId 불필요 — D65/D66 |
 | `list_knowledge` / `save_knowledge` / `delete_knowledge` | — / `entry` / `id` | `KnowledgeEntry[]` / `KnowledgeEntry` / — | 지식 베이스 CRUD(`~/.operation-wizard/knowledge/<id>.json`; knowledge 단계 주입용. 삭제는 artifact 폴더 동반 제거 — D59) |
 | `save_knowledge_files` / `get_knowledge_root` | `entry`, `sources: string[]` / — | `KnowledgeEntry` / `string` | 산출물 지식 저장(D59): 산출물 파일을 `knowledge/artifacts/<id>/`로 staged-swap 복사 + artifact 엔트리 upsert / 지식 루트 절대경로(주입 인덱스·extraDirs용) |
-| `set_confluence_config` / `set_rag_config` | `config \| null` | `Settings` | 지식 뷰의 수집/검색 설정 저장·해제 |
+| `set_rag_config` | `config \| null` | `Settings` | 지식 뷰의 RAG 검색 설정 저장·해제 |
 | `set_fabrix_config` / `probe_fabrix` | `config \| null` / — | `Settings` / `string` | Agents 뷰 FabriX 카드: 연결 설정 저장·해제(빈 endpointUrl=해제; endpoint 정규화·`defaultModelId`·`callsPerMinute`(분당 호출 한도, D91); `models` 캐시 이월/무효화) / 연결 테스트(`GET /openapi/llm/v1/models`, 프록시 우회 → `fabrix.models` 캐시 저장 + "연결됨 — N개 모델 (기본: …)", 실패는 한글 힌트) — D64/D66/D84 |
-| `start_confluence_ingest` | `target: ConfluenceTarget`, `onEvent: Channel<IngestEvent>` | `ingestId: string` | Confluence **MCP** BFS 크롤(워커 스레드) → 페이지들을 지식 베이스 artifact 1개로 저장(`IngestEvent` 스트리밍: `started`/`pageFetched`/`pageIngested`/`pageFailed`/`error`/`end`; D82) |
-| `cancel_ingest` / `probe_confluence` | `ingestId` / — | — / `string` | 수집 취소(`IngestRegistry` 플래그) / MCP 연결 테스트(initialize+tools/list → 도구 요약, D82) |
 
 ## UI (Home / Workspace)
 
 - **NavRail**: **Home** / **Agents** / **Flows** / **지식** 4개 항목.
   `View = "home"|"agents"|"flows"|"knowledge"`.
   (별도 Settings 뷰는 폐지되고 경로 설정이 Agents 카드로 통합됨 — [05](05-decisions.md) D38.
-  Flows는 워크플로우 단계·스킬 설정 화면 — D39; 지식 뷰는 RAG 연결·Confluence 수집·지식 베이스
-  CRUD — D48, [04](04-ui-and-design-system.md).)
+  Flows는 워크플로우 단계·스킬 설정 화면 — D39; 지식 뷰는 RAG 연결·지식 베이스 CRUD — D48,
+  [04](04-ui-and-design-system.md). 앱 자체의 Confluence 수집은 D98에서 제거.)
 - **HOME**(`HomeView`): 히어로(운영 도구 프레이밍 — "운영 작업 마법사" + 진행 절차 안내, D60) +
   **'시작 설정' 바** + 4개 업무 카테고리 카드(개발 계획 수립/운영 가이드
   생성/데이터 조회/데이터 변경·권한) + **최근 작업 = 프로젝트 목록**(`listProjects`, 전역·모든 프로젝트,

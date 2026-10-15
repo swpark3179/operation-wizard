@@ -23,8 +23,7 @@
   `main`은 `overflow-hidden`이고, 각 뷰가 자체 스크롤을 소유한다(워크스페이스의 2패널 전체 높이용).
 - `NavRail`: 폭 56px 고정, 아이콘 버튼 4개 — **Home**(`Home`), **Agents**(`Boxes`), **Flows**(`Workflow`),
   **지식**(`Library`). 활성 항목은 accent-tint 배경 + accent 색. (별도 Settings 뷰는 폐지 — 경로 설정은
-  Agents 카드로 통합, D38.) Confluence 수집이 백그라운드로 진행 중이면 '지식' 아이콘에 accent pulse 점을
-  표시한다(D51).
+  Agents 카드로 통합, D38.)
 - 뷰 전환 상태는 `App.tsx`의 `view`(`"home" | "agents" | "flows" | "knowledge"`)가 보유. Home 재선택은
   `HomeArea`를 런처로 리셋한다.
 
@@ -85,16 +84,17 @@
   - 기본값 복원은 **확인 다이얼로그**로 게이트, 미저장 편집은 **'저장되지 않은 변경' 배지** + 단계
     편집기의 카테고리 탭 전환 확인(키 리마운트로 인한 무음 폐기 방지)으로 보호한다(D57).
 
-### 지식 뷰 (RAG·Confluence·지식 베이스)
+### 지식 뷰 (RAG·지식 베이스)
 - `KnowledgeView`(D48): ① **RAG 검색 설정** — ENDPOINT_URL / x-fabrix-client / x-openapi-token(요청 헤더 값,
   D50/D65) / Knowledge Asset ID(비우면 샘플 자산) / Top K + 연결 테스트(`probe_rag` = rag-chat `/models`
   조회, 프록시 우회) + **캐시된 모델 목록(접이식, `cached` 배지)** — 저장·연결 테스트가 조회해
-  `rag.models`에 저장하고 이후 무네트워크 표시(캐시 우선, D66; 실제 검색은 GLM 5.2 고정), ② **Confluence 수집(MCP)** — 연결 설정(MCP URL(프리필)+x-auth 키) + 연결 테스트(`probe_confluence`=initialize+tools/list) + 수집 대상(루트 페이지 ID/검색어) + 수집 시작·중지 + 진행 표시(수집/저장/실패 카운트·티커); 수집 문서는 지식 베이스 artifact로 저장(D82), ③ **지식 베이스** CRUD 카드
+  `rag.models`에 저장하고 이후 무네트워크 표시(캐시 우선, D66; 실제 검색은 GLM 5.2 고정; 설명에 "Confluence 등
+  사내 문서는 이 지식 자산에서 검색, 출처 링크로 원문" 안내), ② **지식 베이스** CRUD 카드
   (저장된 항목 삭제는 확인 다이얼로그 — D57; RAG 오류는 사용자용 문구로 표시).
   **산출물 지식(D59)**은 카드에 accent '산출물' 배지 + 출처 라인(카테고리·원요청) + 읽기 전용 첨부
   문서 목록을 표시한다(body=요약은 편집 가능; 삭제 확인 문구에 첨부 문서 동반 삭제 안내).
-- 수집 진행 상태는 화면 밖 **모듈 싱글턴 스토어**(`lib/ingest.ts`)가 소유해 다른 뷰로 이동해도 유지되고,
-  돌아오면 실시간 현황·완료 요약이 그대로 보인다(D51). 수집 중에는 Confluence 설정 저장이 비활성.
+- 예전의 ② Confluence 수집(MCP) 카드와 그 진행 스토어(`lib/ingest.ts`, NavRail pulse 점 — D51/D82)는 D98에서
+  제거되었다.
 
 ### Agents 뷰
 - 제목 + 설명 + **에이전트당 카드 1개**(`AgentCard`)를 레지스트리 순서로 세로 나열.

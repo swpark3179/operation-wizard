@@ -150,12 +150,12 @@ resolve  →  version probe  →  models probe(있으면)  →  DetectedAgent
 
 ## 설정 영구화 (`settings.rs`)
 
-- `Settings { agents: { [agentId]: { customBin } }, skills?, workflows?, confluence?, rag?, fabrix? }` —
+- `Settings { agents: { [agentId]: { customBin } }, skills?, workflows?, rag?, fabrix? }` —
   에이전트별 경로 맵 + **워크플로우 단계/스킬 override**(탐지와 무관, [07](07-workspace-and-runs.md)·
   [05](05-decisions.md) D39) + **`fabrix: FabrixConfig?`**(endpointUrl/client/openapiToken/**defaultModelId**/
   **callsPerMinute**(라이선스 분당 호출 한도 — 없으면 10, 0 = 페이싱 없음, D91)
   (+레거시 allowInvalidCerts — 항상 false) — FabriX 원격 에이전트 연결, D64/D84. `set_fabrix_config`로 저장/해제 —
-  저장 시 endpoint 정규화·callsPerMinute ≤1000 상한). 구 settings.json의 `aipro` 섹션은 로드 시 무시되고 다음 저장에서 사라진다(D83).
+  저장 시 endpoint 정규화·callsPerMinute ≤1000 상한). 구 settings.json의 `aipro`(D83)·`confluence`(D98) 섹션은 로드 시 무시되고 다음 저장에서 사라진다.
 - **모델 목록 캐시(D66)**: `FabrixConfig`/`RagConfig`에 `models: Vec<ModelOption>`
   (`#[serde(default, skip_serializing_if=Vec::is_empty)]`)를 둔다. 저장/새로고침/연결 테스트에서 라이브로
   조회한 목록을 여기에 저장하고, 이후 탐지는 **캐시 우선**(`detect_fabrix(cfg, force, persist)` —
@@ -200,7 +200,7 @@ resolve  →  version probe  →  models probe(있으면)  →  DetectedAgent
 - 잘못된 custom-path가 검색으로 fall-through 하는지 확인.
 - **settings 단위 테스트**: skills/workflows 라운드트립(+`FabrixConfig`(defaultModelId·callsPerMinute·context/tools 메타)/
   `RagConfig`의 `models` 캐시 영속 — D66/D84), 구파일 하위호환(+레거시 마이그레이션 유지·`models` 없는 구 JSON→빈
-  벡터·**구 `aipro` 섹션 무시 + 다음 저장에서 소멸** — D83), `validate_steps`/`validate_skills` 규칙, reset(`None`) 의미론.
+  벡터·**구 `aipro`(D83)·`confluence`(D98) 섹션 무시 + 다음 저장에서 소멸**), `validate_steps`/`validate_skills` 규칙, reset(`None`) 의미론.
 
 ## 확장 포인트 (새 에이전트 추가)
 

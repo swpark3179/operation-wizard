@@ -381,6 +381,6 @@ open-design의 세 기법(①시작 시 구조화된 선택지 + 자동채움, �
 | [07-workspace-and-runs.md](design/07-workspace-and-runs.md) | 실행 엔진 + 대화/캔버스 워크스페이스 |
 | [08-guided-flows-and-skills.md](design/08-guided-flows-and-skills.md) | 가이드 플로우 + 스킬 + 결과형식 강제 가이드 |
 
-- RAG·Confluence 연동 how-to: [`rag-confluence-guide.md`](rag-confluence-guide.md)
+- 사내 문서 RAG 검색 how-to: [`rag-guide.md`](rag-guide.md)
 - 개발자용 빌드/실행 요약: 루트 [`README.md`](../README.md)
 - 프로젝트 규칙·설계문서 자동 로드: 루트 [`CLAUDE.md`](../CLAUDE.md)

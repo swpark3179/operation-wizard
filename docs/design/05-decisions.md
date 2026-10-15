@@ -521,6 +521,9 @@
   스킬로". 한 턴에 md+html을 모두 시키면 지시 과부하 — 별도 턴이 품질·단순성 모두 우수.
 
 ### D48. 지식 뷰 + reqwest(blocking/native-tls) + Confluence 수집 Channel + RAG 어댑터 스텁
+> ⛔ **D98**: Confluence 수집(이후 D82의 MCP 전환 포함)·`IngestEvent`/`IngestRegistry`·`ingest_page` 스텁은
+> **D98에서 제거**되었다. 지식 뷰(RAG 설정 + 지식 베이스)·`reqwest`·`knowledge.rs`·`RagConfig`는 유지된다.
+>
 > ⚠️ **부분 대체(D82)**: Confluence **REST 크롤**과 `ingest_page`→RAG sink는 **D82로 대체**되었다
 > (공식 MCP 서버로 수집 → 로컬 지식 베이스 artifact). 지식 뷰·`reqwest`(blocking/native-tls) 도입·
 > `knowledge.rs`·`IngestEvent`/`IngestRegistry`/Channel 진행·`RagConfig`는 유지된다. 아래는 최초 결정.
@@ -582,6 +585,8 @@
   평문 저장 주의는 D48과 동일(읽기 전용 키 권장).
 
 ### D51. Confluence 수집 관찰성 = 프론트 모듈 싱글턴 스토어 (백엔드 무변경)
+> ⛔ **D98에서 제거**: Confluence 수집 기능과 함께 `lib/ingest.ts` 스토어와 NavRail '지식' pulse 점이 삭제되었다.
+> 아래는 역사 기록이다.
 - **결정**: 수집을 시작한 뒤 **다른 화면으로 이동해도 진행현황이 유지·재표시**되게 한다. 백엔드 크롤
   워커는 이미 detached 스레드라 뷰 전환과 무관하게 돌지만, 수신 `Channel`과 진행 집계가
   `ConfluenceSection` 지역 state에 있어 언마운트 시 유실되던 것이 문제였다. 해결은 **React 트리 밖 모듈
@@ -1086,6 +1091,8 @@
 ---
 
 ### D65. RAG 검색 = Fabrix rag-chat API 실연동 (rag.rs search 구현 + knowledgeAssetId 설정 + /models 연결 테스트)
+> ⚠️ **D98**: 호출부가 없던 `ingest_page` 스텁과 `IngestPage`는 D98에서 삭제되었다. RAG 검색 실연동은 그대로 유효.
+>
 > ⚠️ **참고(D82)**: `RagClient::ingest_page`는 여전히 스텁이나, **Confluence가 더 이상 이 sink를 타지 않는다**
 > (D82에서 Confluence 수집을 공식 MCP → 로컬 지식 베이스로 전환). RAG **검색**(search) 실연동은 그대로 유효.
 - **배경**: `rag.rs`의 `RagClient::search`가 `TODO(user)` 스텁이라 rag 기반 단계(D44/D48)가 항상 "미구현 —
@@ -1452,6 +1459,8 @@
 ---
 
 ### D75. Confluence 수집 403의 원인 = 누락된 `User-Agent` — 브라우저 UA 부착 + 오류 본문 노출 + TLS-skip 체크박스 제거 (D66/D73/D74 연장)
+> ⛔ Confluence 연동 전체가 **D98에서 제거**되었다(아래 D82 노트 참조).
+>
 > ⚠️ **대체(D82)**: REST 크롤(`HttpConfluence`)과 `CONFLUENCE_UA`는 **D82로 제거**되었다(Confluence를 공식 MCP
 > 서버로 전환). UA가 사내 `sdsdev.co.kr` 게이트웨이 통과의 열쇠라는 교훈은 유효하며, MCP 클라이언트도
 > `User-Agent: opencode/*`를 부착한다(D82). TLS 검증 상시 on 방침도 유지. 아래는 최초 결정.
@@ -1512,6 +1521,8 @@
 ---
 
 ### D77. Confluence 수집 = 내장 WebView 내부 fetch로 WAF 우회 (스파이크; fetch/미리보기 MVP — D48/D65/D67 연장)
+> ⛔ Confluence 연동 전체가 **D98에서 제거**되었다(아래 D82 노트 참조).
+>
 > ⚠️ **대체(D82)**: 이 WebView 스파이크(`confluence_open_login`/`confluence_fetch_page`/`WebviewBridge`/
 > `INIT_SCRIPT`/`on_navigation` sentinel)는 **D82에서 전면 제거**되었다 — 공식 Confluence **MCP 서버**가
 > WAF 게이팅과 무관하게 동작해 브라우저-내-fetch 우회가 불필요해졌다. 아래는 최초 결정의 기록이다.
@@ -1690,6 +1701,8 @@
 ---
 
 ### D82. Confluence 연결 = 공식 MCP(streamable HTTP, JSON-RPC 2.0) 클라이언트 + 로컬 지식 베이스 수집 (D48/D65/D75/D77 대체)
+> ⛔ **D98에서 제거되었다** — MCP 클라이언트(`mcp.rs`)·수집(`confluence.rs`)·`ConfluenceConfig`·지식 화면 수집 카드를
+> 삭제했다. 아래는 역사 기록이다(재도입하려면 이 결정 시점의 git 이력을 참조).
 - **배경**: 기존 Confluence 연결(REST 크롤 + WebView 스파이크)은 **실제로 값을 전달한 적이 없다** — REST가
   사내 WAF에 403으로 막히고(D75), WebView 우회(D77)는 실험 단계였으며, 최종 sink `RagClient::ingest_page`가
   **항상 "미구현" 에러를 반환하는 스텁**(rag-chat에 ingest 엔드포인트 없음 — D65)이라 모든 페이지가
@@ -2205,3 +2218,35 @@
   턴 앞에 직렬 실행(시작이 수 초 늦어짐) / 기존 프로젝트 제목도 매번 덮어쓰기(사용자가 바꾼 이름(D60)을 잃음).
 - **하위호환**: 백엔드·serde 무변경(`set_project_title`·`SessionMeta.title` 재사용). 예전 세션의 제목(첫 사용자 메시지
   60자)은 그대로 보이며, 열어서 이어가도 저장된 제목을 유지한다.
+
+### D98. Confluence 연동(MCP 수집) 제거 — 사내 문서는 RAG 검색으로 일원화 (D48/D51/D82 종료)
+- **배경**: 지식 화면의 Confluence 수집(D82 — 공식 MCP 서버 → 로컬 지식 베이스 artifact)은 설정할 수 있지만 실제
+  작업에 쓰이지 못했다. 검토 결과 세 가지가 겹쳐 있었다. ① **찾기 문제** — 수집하려면 루트 페이지 ID나 검색어를
+  미리 알아야 하는데, 사용자는 "어떤 내용이 어떤 페이지에 있는지"를 모른다(MCP는 pageId를 알면 읽을 수 있을 뿐).
+  ② **주입 품질** — 수집 결과는 artifact 항목 1개(제목 목록 + 페이지별 HTML 파일 절대경로 목록)였다. knowledge 단계의
+  `formatKnowledgeContext`는 항목 단위로 16KB 상한을 적용하므로 페이지가 수백 개면 경로 목록만으로 상한을 넘어 **항목
+  전체가 주입에서 빠지고**, 적게 수집해도 "[과거 작업 산출물]"로 표기되며 작업 관련성과 무관하게 모든 워크플로우에
+  주입됐다. ③ **역할 중복** — rag 단계(Fabrix rag-chat, D65)가 이미 사전 임베딩된 사내 문서를 의미 검색해 요약 +
+  출처 링크를 주고, 관련성 판단 턴(D70)이 걸러낸다. "어디에 있는지 찾기"는 RAG가 이미 담당한다.
+- **결정**: Confluence 연동을 **전부 제거**한다(사용자 선택). 백엔드 `confluence.rs`·`mcp.rs` 삭제, 커맨드
+  `set_confluence_config`/`start_confluence_ingest`/`cancel_ingest`/`probe_confluence`·`IngestRegistry` managed state
+  제거, `Settings.confluence`/`ConfluenceConfig` 삭제, Confluence 전용이던 `knowledge::save_knowledge_docs`(in-memory
+  문서 writer)와 호출부 없던 `rag::ingest_page`/`IngestPage` 스텁 삭제. 프론트 `KnowledgeView`의 수집 카드·
+  `lib/ingest.ts`·NavRail pulse 점·`api.ts` 래퍼·`types.ts` 미러(`ConfluenceConfig`/`IngestEvent`) 삭제. 지식 화면은
+  **RAG 검색 설정 + 지식 베이스**만 남고, RAG 카드 설명에 "Confluence 등 사내 문서는 이 지식 자산에서 검색, 출처
+  링크로 원문" 안내를 넣었다. how-to 문서는 `docs/rag-guide.md`(구 `rag-confluence-guide.md`)로 정리했다.
+- **유지**: 프롬프트·옵션의 "사내 문서(Confluence)" 문구는 RAG 지식 자산의 내용을 설명하므로 그대로 둔다.
+  `confluence-search` 스킬(에이전트 자신의 도구로 위키를 찾으라는 지시, D40)은 저장된 워크플로우용 레거시라 유지(D94 선례).
+  `reqwest`는 RAG·FabriX가 계속 쓴다.
+- **하위호환**: `Settings`에 `deny_unknown_fields`가 없어 구 settings.json의 `confluence` 섹션은 로드 시 무시되고 다음
+  저장에서 사라진다(다른 설정 무손실 — 단위 테스트, D83 선례). 예전 수집으로 만든 지식 항목(`confluence-*`, 제목
+  "Confluence 수집 — …")은 일반 artifact 항목으로 남아 계속 주입되며, 필요 없으면 지식 화면에서 삭제한다(자동 정리하지
+  않음 — 사용자 데이터).
+- **대안 기각**: **RAG가 찾고 MCP가 원문을 읽는 보강**(rag 단계가 관련 판정된 출처 링크에서 pageId를 뽑아 상위 몇 페이지
+  원문을 MCP로 가져와 작업 폴더에 저장·인계) — RAG 출처 링크에 pageId가 들어 있는지 확인되지 않았고, 연결 설정·추가
+  호출·HTML→텍스트 변환이 늘어난다. **에이전트에 MCP 도구 직접 제공**(FabriX 도구 루프 + claude `--mcp-config`/codex/
+  gemini 설정 주입) — 에이전트별 설정 방식이 달라 범위가 크고, "찾기"는 여전히 MCP 검색 품질에 좌우되며 FabriX는
+  호출 한도(D91)를 더 쓴다. **수집 유지 + 주입 개선**(관련성 필터·요약) — 시작점(pageId) 문제가 그대로 남는다.
+- **재검토 조건**: RAG 출처 링크가 Confluence pageId를 포함함이 확인되고 발췌(청크)만으로 산출물 품질이 부족하다는
+  보고가 쌓이면, 위 "RAG가 찾고 MCP가 원문을 읽는 보강"을 별도 결정으로 도입한다(MCP 클라이언트는 이 결정 직전 git
+  이력의 `mcp.rs`에서 복원 가능 — D82/D74의 `User-Agent: opencode/*` 게이트웨이 교훈 포함).

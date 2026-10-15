@@ -1,13 +1,11 @@
-//! RAG API adapter (D48/D50). The rag workflow step queries the user's RAG
-//! service; this app also hands over raw crawled Confluence pages for ingestion.
-//!
-//! `search` is implemented against the Samsung SDS Fabrix `rag-chat` API
-//! (`/openapi/rag-chat/v1/{models,messages}`); the two auth header values
+//! RAG API adapter (D48/D50). The rag workflow step queries the in-house RAG
+//! service — the Samsung SDS Fabrix `rag-chat` API
+//! (`/openapi/rag-chat/v1/{models,messages}`), D65. The two auth header values
 //! (`x-fabrix-client` / `x-openapi-token`) come from `RagConfig.secret_key` /
-//! `pass_key`, mirroring `fabrix.rs` (D64). `ingest_page` remains a `TODO(user)`
-//! stub — the rag-chat API has no ingestion endpoint (knowledge assets are
-//! managed on the Fabrix platform), so Confluence ingestion reports per-page
-//! failures (never a crash) until a real ingestion backend is wired.
+//! `pass_key`, mirroring `fabrix.rs` (D64). Search only: the knowledge asset
+//! (in-house documents, e.g. Confluence) is indexed on the Fabrix platform —
+//! rag-chat has no ingestion endpoint, and the app's own Confluence collection
+//! was removed (D98).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,22 +21,6 @@ const GLM_5_2_MODEL_ID: &str = "019f23a1-46aa-7fa5-a6ab-391127fea7e6";
 /// Knowledge asset used when `RagConfig.knowledge_asset_id` is unset — lets the
 /// rag step work out of the box (the user can override it in the 지식 screen).
 const SAMPLE_KNOWLEDGE_ASSET_ID: &str = "019f5a11-e701-7315-b5b5-91912381b4f7";
-
-/// One page handed to the RAG API verbatim (this app does NOT summarize — the
-/// RAG service would own summarization + embedding). Retained as the RAG-ingest
-/// extension point; it has no caller since Confluence moved to MCP → local
-/// knowledge base (D82), and rag-chat has no ingest endpoint (D65).
-#[allow(dead_code)]
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct IngestPage {
-    pub id: String,
-    pub title: String,
-    /// Absolute webui link (source attribution for later search hits).
-    pub url: String,
-    /// Raw `body.storage` HTML.
-    pub content_html: String,
-}
 
 /// One search hit: rendered in the canvas "검색 결과" HTML tab and injected
 /// into the agent prompt by the rag workflow step.
@@ -85,18 +67,6 @@ impl RagClient {
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self { cfg: cfg.clone(), http })
-    }
-
-    /// TODO(user): the Fabrix rag-chat API has no ingestion endpoint — knowledge
-    /// assets are indexed on the Fabrix platform — so Confluence ingestion is a
-    /// separate concern. If a real ingestion backend is added, POST `page` here
-    /// (attach the `x-fabrix-client` / `x-openapi-token` headers via
-    /// [`attach_headers`]). Until then this returns an actionable Korean `Err`,
-    /// surfaced by the frontend as a per-page failure (never a crash).
-    #[allow(dead_code)] // retained extension point; no caller since D82 (see IngestPage)
-    pub fn ingest_page(&self, page: &IngestPage) -> Result<(), String> {
-        let _ = page;
-        Err("RAG ingest 미구현 — src-tauri/src/rag.rs의 RagClient::ingest_page를 채워 주세요".into())
     }
 
     /// Query the Fabrix rag-chat `/messages` endpoint (non-stream) and map the
@@ -342,31 +312,6 @@ pub async fn probe_rag() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn cfg() -> RagConfig {
-        RagConfig {
-            endpoint: "https://rag.example.com".into(),
-            secret_key: None,
-            pass_key: None,
-            top_k: None,
-            knowledge_asset_id: None,
-            models: vec![],
-        }
-    }
-
-    // The ingest stub's Korean "미구현" message is load-bearing: the Confluence
-    // ingest path surfaces it as a per-page failure.
-    #[test]
-    fn ingest_stub_returns_actionable_unimplemented_error() {
-        let client = RagClient::new(&cfg(), false).unwrap();
-        let page = IngestPage {
-            id: "1".into(),
-            title: "t".into(),
-            url: "https://w/1".into(),
-            content_html: "<p>x</p>".into(),
-        };
-        assert!(client.ingest_page(&page).unwrap_err().contains("미구현"));
-    }
 
     #[test]
     fn empty_endpoint_is_rejected() {

@@ -75,18 +75,9 @@ export interface StepDef {
   output?: string | null;
 }
 
-/** Confluence connection via the official MCP server (mirrors settings.rs — D82).
- * The `authKey` (x-auth header) is plain text in settings.json — use a
- * read-only-scope key. The collection target is passed per-run, not stored. */
-export interface ConfluenceConfig {
-  /** MCP endpoint, e.g. "https://sdsdev.co.kr/mcp-confluence/mcp". */
-  url: string;
-  /** `x-auth` request header value. */
-  authKey?: string | null;
-}
-
-/** The user's RAG service endpoint (mirrors settings.rs). The two keys are
- * auth header values for the user's rag.rs implementation (D50). */
+/** The in-house RAG service endpoint (mirrors settings.rs — Fabrix rag-chat,
+ * D65). The two keys are auth header values (`x-fabrix-client` /
+ * `x-openapi-token` — D50/D65), stored plain text — use read-only keys. */
 export interface RagConfig {
   endpoint: string;
   secretKey?: string | null;
@@ -102,7 +93,7 @@ export interface RagConfig {
 
 /** Connection config for the FabriX remote HTTP agent — FabriX LLM Serving API,
  * OpenAI-compatible (mirrors settings.rs, D64/D84). The keys are stored plain
- * text in settings.json — same caveat as `RagConfig`/`ConfluenceConfig`. */
+ * text in settings.json — same caveat as `RagConfig`. */
 export interface FabrixConfig {
   /** Issued endpoint, e.g. "https://nsds-api.fabrix-s.samsungsds.com/sds/trial/api-llm"
    * (the backend appends `/openapi/llm`; a pasted full base is normalized). */
@@ -133,8 +124,6 @@ export interface Settings {
   skills?: SkillDef[] | null;
   /** Per-category workflow overrides; absent key → built-in default flow. */
   workflows?: Record<string, StepDef[]>;
-  /** Confluence crawl source; absent/null → not configured. */
-  confluence?: ConfluenceConfig | null;
   /** RAG service endpoint; absent/null → the rag workflow step skips. */
   rag?: RagConfig | null;
   /** FabriX remote HTTP agent connection; absent/null → not configured (D64/D84). */
@@ -178,8 +167,7 @@ export interface RunArgs {
   tools?: boolean;
 }
 
-// ── RAG / Confluence ingestion / knowledge (mirrors rag.rs, confluence.rs,
-//    knowledge.rs) ─────────────────────────────────────────────────────────────
+// ── RAG / knowledge (mirrors rag.rs, knowledge.rs) ──────────────────────────────
 
 /** One RAG search hit — rendered in the canvas "검색 결과" tab and injected
  * into the rag step's agent turn. */
@@ -189,15 +177,6 @@ export interface RagHit {
   snippet: string;
   score?: number | null;
 }
-
-/** Progress events streamed while a Confluence crawl+ingest runs. */
-export type IngestEvent =
-  | { type: "started"; rootId: string }
-  | { type: "pageFetched"; pageId: string; title: string; fetched: number }
-  | { type: "pageIngested"; pageId: string; title: string; ingested: number }
-  | { type: "pageFailed"; pageId: string; title: string; message: string }
-  | { type: "error"; message: string }
-  | { type: "end"; status: string; ingested: number; failed: number };
 
 /** One knowledge entry (title + how-it-was-done body), injected into the
  * foundation phase's knowledge step. Artifact entries (D59) additionally own
