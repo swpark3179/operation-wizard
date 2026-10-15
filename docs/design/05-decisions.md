@@ -2029,3 +2029,24 @@
   유효해 같은 키를 쓰는 다른 프로그램·사용자의 호출은 모르며(그때 429 대기 경로가 흡수), RAG(rag-chat)는 별도 API라 페이싱하지
   않는다(워크플로우당 1회). 묶음·동시 호출은 모델이 지시를 따를 때 효과가 있고, 라운드마다 앞선 도구 출력이 재전송되는 토큰 비용
   구조(D84)는 그대로다. 지도 첨부로 프롬프트 토큰은 늘어난다(매 라운드 재전송).
+
+---
+
+### D92. `Cargo.lock` 커밋 유지 + Tauri crate를 npm 패키지 minor에 정렬 (D43 연장)
+- **배경**: Release 워크플로우가 `npm run tauri build -- --no-bundle`에서 `Found version mismatched Tauri packages`
+  (tauri 2.12.4 : @tauri-apps/api 2.11.1, tauri-plugin-opener 2.7.2 : 2.5.4, tauri-plugin-dialog 2.8.3 : 2.7.1)로 실패했다.
+  `src-tauri/Cargo.lock`은 `a36c5e4`(migration-0718)에서 삭제된 상태였는데, D91 작업 중 로컬 `cargo test`가 새로 만든
+  lockfile(그 시점 최신 crate로 해석)이 함께 커밋되었다. Tauri CLI는 `Cargo.lock`이 있을 때만 crate 버전을 읽어 npm 패키지와
+  major/minor를 비교하므로, lockfile이 없던 이전 빌드는 검사를 건너뛰어 통과했던 것이다(그때도 Cargo.toml `"2"`가 최신
+  minor로 해석되어 실제로는 불일치 상태였다).
+- **결정**: lockfile은 **유지**하고(앱은 재현 가능한 빌드가 원칙 — CI가 매번 다른 crate를 받지 않게) Rust 쪽을 npm이 고정한
+  minor에 맞춘다: `tauri` 2.11.6, `tauri-plugin-dialog` 2.7.3, `tauri-plugin-opener` 2.5.5. 2.11 코어에 2.12 런타임이
+  섞이지 않도록 `tauri-runtime` 2.11.3·`tauri-runtime-wry` 2.11.4·`tauri-utils` 2.9.3·`tauri-build`/`tauri-macros`/
+  `tauri-codegen`/`tauri-plugin` 2.6.3·`tauri-plugin-fs` 2.5.2(dialog 전이 의존성)까지 한 세대로 정렬했다 — 삭제 전
+  lockfile(tauri 2.11.3)과 같은 세대이며 패치만 최신. Cargo.toml·package.json·package-lock.json은 무변경.
+  정렬·갱신 절차는 [06-build-and-environment.md](06-build-and-environment.md) "Lockfile과 Tauri 버전 정렬".
+- **대안 기각**: lockfile 다시 삭제(검사만 피할 뿐 불일치는 그대로이고 빌드가 비결정적) / npm 패키지를 2.12·2.8·2.7로 올리기
+  (프론트 의존성까지 바뀌어 변경 범위가 커짐 — 업그레이드는 별도 작업에서 양쪽을 함께) / Cargo.toml에 `"~2.11"` 고정
+  (lockfile이 있으면 불필요하고, 향후 정렬 업그레이드 때 수정 지점만 늘어남).
+- **재검토 조건**: Tauri를 2.12 이상으로 올릴 때 npm 3종과 crate 계열을 같은 작업에서 함께 갱신한다.
+
