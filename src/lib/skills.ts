@@ -45,7 +45,7 @@ const PLAN_SKILL = `[시스템 스킬: 개발 계획 수립]
 
 const IMPACT_SKILL = `[시스템 스킬: 변경영향분석]
 당신은 변경영향분석 전문가입니다. 이 단계에서 아래를 지키세요.
-- 앞선 소스 분석·계획을 근거로, 이번 변경이 미치는 영향을 체계적으로 정리합니다.
+- 앞선 코드베이스 분석(변경 대상·영향 범위)과 계획을 근거로, 이번 변경이 미치는 영향을 체계적으로 정리합니다.
 - 분석서에는 다음을 포함합니다:
   - **영향 파일 표**(마크다운 표: 파일 경로 / 변경 유형(수정·추가·삭제) / 영향 내용 / 위험도),
   - 변경 지점에서 출발하는 **호출 경로·데이터 흐름**(어디까지 전파되는지),
@@ -72,10 +72,12 @@ const CODEBASE_EXPLORE_SKILL = `[시스템 스킬: 코드베이스 탐색]
   탐색·검색·읽기의 시작점은 항상 그 폴더의 **절대경로**입니다 — 현재 작업 디렉터리에서 소스를 찾지 마세요.
   그 폴더의 파일을 수정·생성·삭제하지 않습니다(산출물은 작업 폴더에만 씁니다).
 - 다음 순서로 파악합니다: 빌드/설정 파일로 기술 스택 확인 → 진입점 → 폴더/모듈 구조 →
-  이번 요청과 관련된 영역 좁히기 → 그 영역의 의존 관계와 호출 흐름. (선언부 우선 읽기·허브 식별 등 읽는 방법은
-  앱의 내장 코드 분석 방법론이 함께 주입됩니다.)
-- 구조와 흐름은 \`\`\`mermaid\`\`\` 다이어그램으로 표현합니다.
+  이번 요청과 관련된 영역 좁히기 → 변경 대상의 시그니처·호출 관계(Callers/Callees)·영향 범위. (선언부 우선 읽기·
+  허브 식별 등 읽는 방법은 앱의 내장 코드 분석 방법론이 함께 주입됩니다.)
+- 구조와 흐름은 \`\`\`mermaid\`\`\` 다이어그램으로 표현합니다 — 모듈/의존 구조는 flowchart로, 변경 대상 중심의
+  호출/처리 흐름은 sequenceDiagram 또는 flowchart로 그립니다.
 - 언급하는 모든 모듈·함수에 실제 파일 경로를 표기하고, 추측한 내용은 "추정"으로 구분합니다.
+- 확인하지 못한 부분은 "미확인"으로 명시하고, 필요한 추가 정보를 사용자에게 질문 목록으로 남깁니다.
 - 코드베이스가 크면 요청과 무관한 영역은 개요 수준으로만 다룹니다.`;
 
 const HTML_RENDER_SKILL = `[시스템 스킬: HTML 문서 렌더링]
@@ -221,8 +223,9 @@ const DC_MANAGER_FORM_SKILL = `[시스템 스킬: DC Manager 신청양식 생성
 - 지정된 경로에 파일 쓰기 도구로 저장하고, 저장 후 어떤 종류의 신청서를 만들었는지 한 문장으로만 보고하세요.`;
 
 /** Built-in default skill registry (also the sample content in the Flows view).
- * `confluence-search` predates the rag foundation step and stays for workflows
- * saved before the change. */
+ * `confluence-search` predates the rag foundation step, and `source-analysis`
+ * the folding of plan's 소스코드 분석 step into the codebase step (D94); both
+ * stay for workflows saved before those changes. */
 export const DEFAULT_SKILLS: SkillDef[] = [
   { id: "codebase-explore", name: "코드베이스 탐색", body: CODEBASE_EXPLORE_SKILL },
   { id: "html-render", name: "HTML 문서 렌더링", body: HTML_RENDER_SKILL },

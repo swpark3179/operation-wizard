@@ -1,10 +1,11 @@
 // Workflow artifact helpers (design D58). The canvas 산출물/다이어그램 tabs
 // derive their content from the category's runtime workflow: every step that
-// writes a `file` is one artifact. Pure functions only (no React) — consumed by
-// WorkspaceView (routing), ArtifactsPanel (list + existence probe) and
-// DiagramGallery (mermaid extraction).
+// writes a `file` is one artifact (+ the codebase step's repository map — D94).
+// Pure functions only (no React) — consumed by WorkspaceView (routing),
+// ArtifactsPanel (list + existence probe) and DiagramGallery (mermaid extraction).
 
 import type { Category } from "../components/workspace";
+import { REPO_MAP_FILE, REPO_MAP_NAME, repoMapArtifactId } from "./repoMap";
 import type { Settings } from "./types";
 import { runtimeWorkflowFor } from "./workflow";
 
@@ -26,11 +27,18 @@ export function joinWorkdirPath(dir: string, rel: string): string {
   return `${dir.replace(/[\\/]+$/, "")}\\${rel.replace(/\//g, "\\")}`;
 }
 
-/** The category's artifacts: runtime steps that write a file, in step order. */
+/** The category's artifacts: runtime steps that write a file, in step order.
+ * A codebase step also yields the app's non-AI repository map, saved by its
+ * preflight (D94) — listed right after the step's own document. */
 export function artifactsFor(category: Category, settings: Settings | null): ArtifactDef[] {
-  return runtimeWorkflowFor(category, settings)
-    .filter((s) => !!s.file?.trim())
-    .map((s) => ({ stepId: s.id, name: s.name?.trim() || s.id, file: s.file!.trim() }));
+  const out: ArtifactDef[] = [];
+  for (const s of runtimeWorkflowFor(category, settings)) {
+    if (s.file?.trim()) out.push({ stepId: s.id, name: s.name?.trim() || s.id, file: s.file.trim() });
+    if (s.kind === "codebase") {
+      out.push({ stepId: repoMapArtifactId(s.id), name: REPO_MAP_NAME, file: REPO_MAP_FILE });
+    }
+  }
+  return out;
 }
 
 /** Normalize a path for identity comparison on Windows: one separator style,

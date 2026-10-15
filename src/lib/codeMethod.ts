@@ -20,9 +20,10 @@ export type CodeAnalysisMode = "orient" | "focus";
 export const LEARNINGS_HEADING = "Learnings for Next Steps";
 
 /** Which code-analysis role a step plays: a foundation `codebase` step orients
- * (broad map of the repository); the plan `source-analysis` step (by id or by
- * carrying the `source-analysis` skill) focuses on the change targets. Other
- * steps get no method (they receive the hand-off context instead). */
+ * (repository map + the request's change targets); a `source-analysis` step (by
+ * id or by carrying the `source-analysis` skill — no longer in the default plan
+ * since D94, kept for saved / user-added steps) focuses on the change targets.
+ * Other steps get no method (they receive the hand-off context instead). */
 export function codeAnalysisMode(step: StepDef | null | undefined): CodeAnalysisMode | null {
   if (!step) return null;
   if (step.kind === "codebase") return "orient";

@@ -30,7 +30,7 @@
 ```
 wire = [ (첫 실제 작업 턴 1회) 내장 프롬프트 최적화 스킬(PROMPT_OPTIMIZER_SKILL — 레지스트리 밖,
            스텝 arming과 독립; 스킵 재귀·실패 시 unwindSkills로 되감김 — D78),
-         (codebase / source-analysis 단계 armed면) 내장 코드 분석 방법론(codeMethodBody — 레지스트리 밖,
+         (codebase / (저장된) source-analysis 단계 armed면) 내장 코드 분석 방법론(codeMethodBody — 레지스트리 밖,
            orient/focus, 에이전트별 탐색 요령 + Learnings 계약; 세션형은 모드당 1회 — D86),
          (단계 armed면) step.skillIds의 스킬 body들(세션형은 대화당 1회;
            스킬에 dir가 있으면 "[스킬 리소스 폴더] <dir>" 안내 부착 + extraDirs 등록),
@@ -39,8 +39,9 @@ wire = [ (첫 실제 작업 턴 1회) 내장 프롬프트 최적화 스킬(PROMP
            탐색 시작점 지시; codebase 단계는 "이 폴더에서 탐색 시작" 강제 — D52),
          (기반 단계면) preflight 컨텍스트(RAG 발췌 / 지식 본문),
          (codebase 단계면) 이전 프로젝트의 Learnings 캐시(+변경 파일 — D90) → 사전 계산된 저장소 지도(codebase_map — 비AI 정적 분석, D88;
-           FabriX는 extended, FabriX 소스 분석 단계는 focus 지도 — D91),
-         (그 외 생성형 단계면) 앞 단계 인계(산출물 절대경로 인덱스 + 코드 분석 Learnings 발췌 — D86),
+           FabriX는 extended, 저장된 워크플로우의 FabriX 소스 분석 단계는 focus 지도 — D91; 같은 지도를
+           docs/repo-map.md 산출물로도 저장하고 머리말에 그 경로 — D94),
+         (그 외 생성형 단계면) 앞 단계 인계(산출물 절대경로 인덱스(+저장소 지도 경로 — D94) + 코드 분석 Learnings 발췌 — D86),
          prompt ].join("\n\n")
 ```
 프리필 턴만 예외로 wire = `prefillInstruction(...)`이고, **스텝 커서/스킬 주입 이력/세션/영속화를 건드리지
@@ -66,11 +67,13 @@ wire = [ (첫 실제 작업 턴 1회) 내장 프롬프트 최적화 스킬(PROMP
        │                  └─ 첫 작업 턴: 내장 프롬프트 최적화 스킬(D78) + WF[0].skills + WF[0].instruction + preflight + 답변(요구사항 포함)
        │                       ├─ end: ```prompt → '프롬프트' 탭(캔버스), 나머지 텍스트는 작업 계속
        │                       └─ (plan 기본, 기반 3단계 — D44)
-       │                          코드베이스 분석(codebase, extraDirs=--add-dir/--include-directories)
+       │                          코드베이스 분석(codebase, extraDirs=--add-dir/--include-directories;
+       │                                     preflight가 비AI 저장소 지도 → docs/repo-map.md 산출물 — D94;
+       │                                     변경 대상·영향 범위까지 이 단계에서 분석 — 소스코드 분석 단계 통합)
        │                          → (auto) RAG 검색(rag: rag_search → '검색 결과' 탭 + 발췌 주입,
        │                                     미설정/0건/실패 = 건너뜀)
        │                          → (auto) 지식 주입(knowledge: list_knowledge, 비면 건너뜀)
-       │                          → (auto) 소스코드 분석(document) → (auto) 계획 생성(document)
+       │                          → (auto) 계획 생성(document)
        │                          → (auto) 변경영향분석서(document) → (auto) 테스트 계획서(document)
        │                          → chat(정지)     * folder 질문은 기반 단계 활성 카테고리에만
        └─ 예 → seedPrompt를 첫 작업 턴으로 자동 전송(기존 동작)
@@ -200,15 +203,20 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
 - **방법론 본문**(스켈레톤 우선·허브/진입점·Callers/Callees·Blast Radius + 에이전트별 탐색 요령)은
   `src/lib/codeMethod.ts`의 `codeMethodBody(mode, agentId)`에 있다(코드 상수 — Flows에서 편집 불가, 저장된
   override 사용자에게도 적용). 어떤 단계에 붙는지는 `codeAnalysisMode(step)`이 정한다: `kind==="codebase"` →
-  orient(저장소 오리엔테이션), id `source-analysis` 또는 `source-analysis` 스킬을 가진 생성형 단계 → focus
-  (변경 대상 심층). 사용자 정의 단계에 focus를 붙이려면 그 단계에 `source-analysis` 스킬을 연결한다.
+  orient(저장소 오리엔테이션 + 요청의 변경 대상), id `source-analysis` 또는 `source-analysis` 스킬을 가진 생성형 단계 →
+  focus(변경 대상 심층). 기본 plan에는 더 이상 focus 단계가 없다(코드베이스 분석 단계로 통합 — D94); 별도 심층 단계를
+  두고 싶으면 사용자 정의 단계에 `source-analysis` 스킬을 연결한다.
 - **Learnings 계약**: 방법론이 산출 문서 맨 끝에 `## Learnings for Next Steps`(+ `[Architecture Pattern]`/
   `[Core Flow]`/`[Key Invariants/Decisions]`)를 강제하고, `src/lib/learnings.ts`의 `extractLearnings`가 펜스 밖
   헤딩(Learnings/학습)부터 같은/상위 레벨 다음 헤딩까지를 3000자 상한으로 뽑는다(헤딩이 없으면
   `[Architecture Pattern]` 라벨부터 폴백). 헤딩 문구를 바꾸면 두 파일을 함께 고친다.
 - **인계 주입**: `formatHandoffContext`가 `[앞 단계 산출물 — 절대경로]` + Learnings 발췌를 만들고, ChatPanel의
-  preflight가 rag/knowledge를 제외한 이후 생성형 단계에 붙인다. 문서 구성(Repository Map 등 4섹션)은 편집 가능한
-  단계 지시문(`CODEBASE_STEP`/`SOURCE_ANALYSIS_STEP`)에 있다.
+  preflight가 rag/knowledge를 제외한 이후 생성형 단계에 붙인다(codebase 단계가 저장한 저장소 지도 경로도 인덱스에 들어간다 —
+  D94). 분석서 구성(Repository Map / Key Interfaces / Dependency Graph / 변경 대상 분석 / 영향 범위 / 미확인 사항 / Learnings)은
+  편집 가능한 단계 지시문(`CODEBASE_STEP`)에 있다.
+- **저장소 지도 산출물(D94)**: 지도를 문서로 바꾸는 규칙(머리말·섹션 본문 고정폭 블록·도구 안내 제거)은 `src/lib/repoMap.ts`의
+  `repoMapDocument`, 산출물 행은 `src/lib/artifacts.ts`의 `artifactsFor`(codebase 단계마다 `<id>-map`), 저장 시점은
+  ChatPanel `stepPreflight`의 codebase 분기다. 지도 섹션 문구(`codemap.rs::repo_map`)를 바꾸면 `repoMapDocument`의 제거 규칙도 확인한다.
 
 ### G. 카테고리 자동 분류(⓪) 동작 조정 (D81)
 - 홈 컴포저 프롬프트로 시작할 때만 실행되는 격리 분류 턴. 지시문·파서·실행은 `src/lib/categorize.ts`
@@ -235,7 +243,7 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
   rag/knowledge가 아닌 생성형 단계는 **앞 단계 인계**(`producedDocsBefore` → `formatHandoffContext`; CLI 산출
   문서는 첫 사용 시 `readFile`로 Learnings 추출·캐시, 실패해도 skip 없음)를 받는다. `codebase` 단계는 여기에 더해
   **저장소 지도**(`codebaseMap(codebasePath, focusTermsFrom(요청+답변))` — 앱의 비AI 정적 분석, D88)가 맨 앞에 붙는다
-  (plain 에이전트는 2k자로 축약, 실패 시 생략). 같은 코드베이스로 이전 프로젝트가 분석한 적이 있으면 그 Learnings
+  (plain 에이전트는 2k자로 축약, 실패 시 생략). 같은 지도는 `docs/repo-map.md`로 저장되어 산출물 탭에 열린다(D94). 같은 코드베이스로 이전 프로젝트가 분석한 적이 있으면 그 Learnings
   캐시(`getCodebaseLearnings` — 저장 이후 변경 파일 수·샘플 포함)가 지도보다 앞에 붙고 채팅에 재활용 노트가 남는다. orient
   단계의 Learnings는 추출 즉시 `saveCodebaseLearnings`로 카테고리별 캐시를 갱신한다(D90). `rag`=`rag_search` 후
   **관련성 판단 턴**(D70, `judgeRagRelevance` — 격리 실행): 검색 결과가 이번 작업과 관련 없다고 판단되면
@@ -268,8 +276,8 @@ docs/operation-guide.md, output:html)` → chat. 이 카테고리의 강점은 *
   앱이 제공하는 **읽기 전용 파일 도구**(`list_dir`/`find_files`/`search_text`/`outline_file`/`find_references`/`read_file` — 샌드박스 = 작업 폴더 +
   extraDirs; 소스는 `outline_file` 스켈레톤을 먼저 보고 범위만 읽으며, 호출자·영향 범위는 `find_references`로 — D87/D89)로 코드베이스·스킬 리소스 폴더·지식 산출물을 직접 읽는다(도구 행이 채팅 타임라인에 표시).
   **라운드 1회 = 라이선스 분당 한도에 걸리는 호출 1회**(D91)라 도구는 묶음 인자(`files`·`paths`·`queries`·`symbols`)와
-  `read_file(symbol)`로 한 라운드에 여러 조회를 하고, 앱이 codebase 단계에 `extended` 저장소 지도·소스 분석 단계에 `focus`
-  지도를 미리 첨부하며, 전역 게이트가 한도에 맞춰 호출을 페이싱(대기 행 표시, 429는 대기 후 재전송)한다. 쓰기는 못 하므로
+  `read_file(symbol)`로 한 라운드에 여러 조회를 하고, 앱이 codebase 단계에 `extended` 저장소 지도(저장된 워크플로우의 소스 분석 단계에는
+  `focus` 지도)를 미리 첨부하며, 전역 게이트가 한도에 맞춰 호출을 페이싱(대기 행 표시, 429는 대기 후 재전송)한다. 쓰기는 못 하므로
   문서 단계 산출물은 앱이 최종 답변(마지막 도구 호출 이후 텍스트)을 `write_file`로 저장한다(D67). 도구 미지원 모델
   (예: 4·7)을 고르면 텍스트 스트림만. 본문 없는 응답은 백엔드가 도구 없이 1회 재요청하고, 그래도 비면 그 단계만
   건너뛰고(산출물 없음) 다음 단계로 진행한다(D93).

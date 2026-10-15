@@ -243,7 +243,7 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 | `list_dir` | `path: string` | `FileEntry[]` | 캔버스 파일 트리 |
 | `read_file` | `path: string` | `string` | 파일 내용(상한 2 MiB) |
 | `write_file` | `path: string`, `contents: string` | — | 파일 쓰기(부모 dir 생성, 상한 5 MiB). 원격 에이전트(FabriX) 문서 산출물(최종 답변)을 `<workdir>/<step.file>`로 저장 — D67/D84 |
-| `codebase_map` | `root: string`, `focusTerms?: string[]`, `detail?: "extended" \| "focus"` | `string` | 비AI 저장소 지도(기술 스택·트리·라우트·의존 체인⇢테이블·허브·핵심 아웃라인) — codebase 단계 preflight 주입(D88). FabriX는 `extended`(아웃라인 6개 + 요청 SQL 문장 본문)·소스 분석 단계 `focus`(요청 발췌) — D91 |
+| `codebase_map` | `root: string`, `focusTerms?: string[]`, `detail?: "extended" \| "focus"` | `string` | 비AI 저장소 지도(기술 스택·트리·라우트·의존 체인⇢테이블·허브·핵심 아웃라인) — codebase 단계 preflight 주입(D88) + 프론트가 `docs/repo-map.md` 산출물로도 저장(D94). FabriX는 `extended`(아웃라인 6개 + 요청 SQL 문장 본문)·(저장된 워크플로우의) 소스 분석 단계 `focus`(요청 발췌) — D91 |
 | `get_codebase_learnings` / `save_codebase_learnings` | `codebasePath`, `category` / + `text`, `projectId?` | `CodebaseLearnings \| null` / — | 코드베이스별 Learnings 캐시(`~/.operation-wizard/codebases/` — D90) |
 | `ensure_project` | `projectId: string`, `workdir: string`(빈값 허용), `title: string`, `category: string`, `codebasePath?: string` | `Project` | 프로젝트 폴더+매니페스트 생성(idempotent). workdir 빈값→`workspace/` 하위폴더 resolve해 반환. 홈에서 지정한 폴더면 그 경로 |
 | `set_project_codebase` | `projectId: string`, `codebasePath: string \| null` | `Project` | 기존 매니페스트의 코드베이스 경로 갱신/해제(D45) |
@@ -334,7 +334,8 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
     `effectiveTab`이 '파일'로 폴백하고, 새 세션/기록 열기 시 `openFiles`가 초기화된다.
     **'산출물' 탭**(`ArtifactsPanel`, D58)은 런타임 워크플로우의 문서 산출물을 좌측 목록(단계 상태 칩:
     대기/생성 중/완료/건너뜀/중단, 로드 세션은 생성됨/미생성) + 우측 미리보기(`FileViewer` 재사용)로
-    집계하고, **'다이어그램' 탭**(`DiagramGallery`, D58)은 산출물 md의 ` ```mermaid ` 펜스를 lazy 스캔해
+    집계하고(codebase 단계의 **비AI 저장소 지도** `docs/repo-map.md`도 그 단계 문서 바로 뒤 행으로 나온다 — 상태 칩은
+    파일 존재 기준, D94), **'다이어그램' 탭**(`DiagramGallery`, D58)은 산출물 md의 ` ```mermaid ` 펜스를 lazy 스캔해
     카드 갤러리로 렌더한다 — 카드 클릭 시 **창 전체를 덮는 확대 모달**(확대/축소 컨트롤 0.25×~4×,
     CSS `zoom` 배율 + 스크롤, D60)이 열린다. 두 pill은 workdir 확정 + 산출물 ≥1일 때만 표시된다.
     산출물 탭 행에는 **hover '지식으로 저장' 액션**(존재하는 산출물만)이 있고, **'지식 저장' 탭**
@@ -394,8 +395,10 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   컨텍스트(`pathContext`)가 "이 폴더에서 탐색 시작"을 지시 + **preflight가 `codebase_map`으로 비AI 저장소 지도를
   계산해 wire에 첨부**("코드베이스 구조 사전 분석 중…" 노트·Stop 가능, 실패 시 지도 없이 진행; plain 에이전트는
   argv 길이 한계로 2k자로 축약 — D88; **FabriX는 `extended` 지도**(핵심 아웃라인 6개 + 요청 키워드와 일치하는 SQL 문장 본문) —
-  탐색 라운드(=과금 호출)를 줄이기 위해, 그리고 세션리스 transcript가 이 wire를 이후 단계에 넘기지 않으므로 **소스 분석(focus)
-  단계에는 `focus` 지도**(요청 관련·의존 체인·문장 본문·아웃라인)를 다시 첨부 — D91) + **같은 코드베이스의 이전 프로젝트가 남긴 Learnings 캐시**(`get_codebase_learnings` —
+  탐색 라운드(=과금 호출)를 줄이기 위해, 그리고 세션리스 transcript가 이 wire를 이후 단계에 넘기지 않으므로 저장된 워크플로우의
+  **소스 분석(focus) 단계에는 `focus` 지도**(요청 관련·의존 체인·문장 본문·아웃라인)를 다시 첨부 — D91) + **같은 지도를
+  `repoMapDocument`로 읽기 좋게 바꿔 작업 폴더 `docs/repo-map.md`에 저장**하고 산출물 탭에 연다(에이전트 턴 전 —
+  주입 머리말에 저장 경로와 "산출 문서에 그대로 옮겨 적지 말 것"을 붙이고, 이후 단계 인계 인덱스에도 경로가 들어간다 — D94) + **같은 코드베이스의 이전 프로젝트가 남긴 Learnings 캐시**(`get_codebase_learnings` —
   저장 이후 변경 파일 수·샘플과 함께 "출발점으로 삼고 변경분만 확인·갱신" 지시 + 채팅 안내 노트; orient 단계가 끝나면
   추출한 Learnings를 `save_codebase_learnings`로 갱신 — D90) + 내장 코드 분석 방법론(orient — D86)) →
   `rag`(preflight가 `rag_search`로 사내 문서 발췌를 조회한 뒤 **관련성 판단 턴**(D70)이 이번 작업과의
@@ -417,10 +420,10 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   `workflowFor(category, settings)`(사용자 override ?? `DEFAULT_WORKFLOWS`, `coerceSteps(steps,
   {foundationKinds})`로 방어 — 잘못된 항목 드롭 + **기반 단계 pinned 프리펜드**(`mandatoryFoundation`이
   준 종류를 canonical 순서로, 사용자 편집 병합·누락 보충) + 종단 `chat` 자동 보강). 기본 `plan` = `[코드베이스 분석(codebase, docs/codebase-analysis.md) →
-  사내 문서 RAG 검색(rag) → 지식 베이스 반영(knowledge) → 소스코드 분석(document,
-  docs/source-analysis.md) → 계획 생성(document, docs/plan.md) → 변경영향분석서 생성(document,
-  docs/impact-analysis.md) → 테스트 계획서 생성(document, docs/test-plan.md) → 마무리 대화(chat)]`
-  (기존 컨플루언스 search 단계는 rag 기반 단계로 대체). 기본 `query`(데이터 조회, D61) = `[참조 SQL·
+  사내 문서 RAG 검색(rag) → 지식 베이스 반영(knowledge) → 계획 생성(document, docs/plan.md) → 변경영향분석서
+  생성(document, docs/impact-analysis.md) → 테스트 계획서 생성(document, docs/test-plan.md) → 마무리 대화(chat)]`
+  (기존 컨플루언스 search 단계는 rag 기반 단계로 대체; 별도 소스코드 분석 단계는 코드베이스 분석 단계와 중복이라
+  그 단계로 통합 — 변경 대상 분석·영향 범위까지 한 분석서에서 다룬다, D94). 기본 `query`(데이터 조회, D61) = `[참조 SQL·
   테이블 사용처 탐색(codebase, output:file, docs/query-references.md) → 사내 문서 RAG 검색(rag) →
   지식 베이스 반영(knowledge) → 테이블 정보·ERD 정리(document, docs/table-info.md — mermaid erDiagram)
   → 참고 SQL 작성(document, docs/query-sql.md) → 마무리 대화(chat)]`(기반 3단계 기본 활성). 기본
@@ -446,14 +449,15 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   `WF`/스킬 맵은 **마운트 시 고정**(remount가 리셋). 로드 세션은 커서를 끝으로 시작 → 일반
   대화(재주입 없음). `send()`는 **workdir 확정(`ensure_project`)을 preflight·wire 조립보다 먼저** 수행해
   첫 턴에도 절대경로를 알 수 있다(D52). wire 조립은 `[내장 프롬프트 최적화 스킬(첫 실제 작업 턴 1회,
-  최상단 — D78) → **내장 코드 분석 방법론**(armed codebase 단계=orient / source-analysis 단계=focus, 레지스트리
-  밖·세션형 dedupe — D86) → step.skillIds의 스킬 body들(armed, 세션형 dedupe; dir 있으면 리소스 폴더 안내 부착) →
+  최상단 — D78) → **내장 코드 분석 방법론**(armed codebase 단계=orient / (저장된 워크플로우의) source-analysis 단계=focus,
+  레지스트리 밖·세션형 dedupe — D86) → step.skillIds의 스킬 body들(armed, 세션형 dedupe; dir 있으면 리소스 폴더 안내 부착) →
   step.instruction(armed) → 경로 컨텍스트(`pathContext` — 생성형 단계: 작업 폴더/코드베이스 절대경로 +
   탐색 시작점 지시, D52) → preflight 컨텍스트(기반 단계 / 그 외 생성형 단계는 **앞 단계 산출물 인계** — D86) →
   prompt]`. **단계 인계(D86)**: `producedDocsRef`(런타임 단계 index → 생성 파일 절대경로 + 코드 분석 단계의
   `## Learnings for Next Steps` 발췌)를 end 분기가 채우고(원격은 메모리 본문에서 즉시 추출, CLI는 다음 단계
   preflight가 파일을 지연 `readFile`), rag/knowledge가 아닌 이후 생성형 단계의 preflight가 `[앞 단계 산출물 —
-  절대경로]` 인덱스 + Learnings를 주입한다(실패 시 fail-open, 단계 skip 없음; html 렌더 서브스텝 제외).
+  절대경로]` 인덱스(codebase 단계가 저장한 저장소 지도 경로 포함 — D94) + Learnings를 주입한다(실패 시 fail-open,
+  단계 skip 없음; html 렌더 서브스텝 제외).
   preflight 중의 모든 await는 busy 구간(`setStreaming(true)` — Stop 동작·동시 전송 차단) 안에서 실행된다.
   메시지 상태 변경은 전부 **동기 커밋 헬퍼(`mutateMessages`)** 경유(stale ref로 인한 응답 소실 방지,
   D55); 폼 제출/자동전진 nonce는 `send()`가 턴을 실제로 처리했을 때만 소비된다(스트리밍 중 제출은

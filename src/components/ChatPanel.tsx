@@ -40,6 +40,7 @@ import {
   type ClarifyQuestion,
 } from "../lib/clarify";
 import { joinWorkdirPath } from "../lib/artifacts";
+import { REPO_MAP_FILE, REPO_MAP_NAME, repoMapDocument } from "../lib/repoMap";
 import { buildRagQuery, formatKnowledgeContext, formatRagContext, ragUserError } from "../lib/foundation";
 import { judgeRagRelevance, type RagVerdict } from "../lib/ragRelevance";
 import { optionsFor, REQUIREMENT_QUESTION } from "../lib/options";
@@ -362,6 +363,9 @@ export function ChatPanel({
   // steps get this index + the Learnings injected, so they reuse the analysis
   // instead of re-exploring (sessionless transcripts drop the step wires).
   const producedDocsRef = useRef(new Map<number, { path: string; learnings?: string | null }>());
+  // The codebase step's non-AI repository map, saved as an artifact by its
+  // preflight (D94): later steps get its path in the hand-off index.
+  const repoMapRef = useRef<{ stepIdx: number; path: string } | null>(null);
   const [kbProposal, setKbProposal] = useState(false);
   // Auto-advance: a generative step queues the next step's turn here; a
   // nonce-guarded effect fires it once (never call send() from the stream
@@ -419,6 +423,14 @@ export function ChatPanel({
   useEffect(() => {
     codebasePathRef.current = codebasePath;
   }, [codebasePath]);
+
+  // The latest onOpenFile: the parent routes workflow files to the 산출물 hub
+  // by its resolved workdir, which a send() closure from before the first
+  // turn's ensure_project does not see yet (→ a plain file tab instead).
+  const onOpenFileRef = useRef(onOpenFile);
+  useEffect(() => {
+    onOpenFileRef.current = onOpenFile;
+  }, [onOpenFile]);
 
   useEffect(() => {
     onStreamingChange(streaming);
@@ -690,7 +702,7 @@ export function ChatPanel({
                   producedDocsRef.current.set(stepIdx, { path: abs, learnings });
                   if (codeAnalysisMode(step) === "orient") rememberCodebaseLearnings(learnings);
                   void writeFile(abs, body)
-                    .then(() => onOpenFile(abs))
+                    .then(() => onOpenFileRef.current(abs))
                     .catch((e) =>
                       mutateMessages((prev) => [...prev, note(`산출물 파일 저장 실패 — ${String(e)}`)]),
                     );
@@ -715,7 +727,7 @@ export function ChatPanel({
                     })
                     .catch(() => {});
                 }
-                onOpenFile(abs);
+                onOpenFileRef.current(abs);
               }
             }
             advanceTo(stepIdx + 1);
@@ -949,12 +961,31 @@ export function ChatPanel({
         ]);
         if (preflightAbortRef.current) return {};
         if (map) {
+          // Keep the map as an artifact too (D94) — users read it alongside the
+          // AI's analysis. A write failure only loses the file, not the prompt.
+          const mapAbs = joinWorkdirPath(cwd, REPO_MAP_FILE);
+          const saved = await writeFile(
+            mapAbs,
+            repoMapDocument(map, { codebase: cb, terms, extended: isRemote, generatedAt: new Date() }),
+          ).then(
+            () => true,
+            () => false,
+          );
+          if (preflightAbortRef.current) return {};
+          if (saved) {
+            repoMapRef.current = { stepIdx, path: mapAbs };
+            producedFileRef.current = true;
+            onOpenFileRef.current(mapAbs);
+          }
           const shown =
             PLAIN_AGENTS.includes(agentId) && map.length > PLAIN_MAP_MAX
-              ? `${map.slice(0, PLAIN_MAP_MAX)}\n…(프롬프트 길이 제한으로 저장소 지도 일부만 첨부)`
+              ? `${map.slice(0, PLAIN_MAP_MAX)}\n…(프롬프트 길이 제한으로 저장소 지도 일부만 첨부${saved ? ` — 전체: ${mapAbs}` : ""})`
               : map;
+          const savedNote = saved
+            ? ` 이 지도는 ${mapAbs}에 별도 산출물로 저장되므로, 산출 문서에 그대로 옮겨 적지 말고 검증·해석한 결과만 쓰세요.`
+            : "";
           parts.unshift(
-            `[사전 계산된 저장소 지도 — 앱의 비AI 정적 분석 결과(근사치). 탐색 출발점으로 쓰고, 이번 요청의 핵심 경로는 실제 파일로 검증하세요]\n${shown}`,
+            `[사전 계산된 저장소 지도 — 앱의 비AI 정적 분석 결과(근사치). 탐색 출발점으로 쓰고, 이번 요청의 핵심 경로는 실제 파일로 검증하세요.${savedNote}]\n${shown}`,
           );
         }
         if (cached) {
@@ -988,23 +1019,29 @@ export function ChatPanel({
     if (learnings && cb) void saveCodebaseLearnings(cb, category, learnings, projectId).catch(() => {});
   };
 
-  /** Documents produced by the steps before `stepIdx`, in step order. Reads a
+  /** Documents produced by the steps before `stepIdx`, in step order (the
+   * repository map right after its codebase step's document — D94). Reads a
    * CLI-written code-analysis doc on first use to extract its Learnings
    * (cached; a read failure caches "none"). */
   const producedDocsBefore = async (stepIdx: number): Promise<ProducedDoc[]> => {
-    const out: ProducedDoc[] = [];
-    const entries = [...producedDocsRef.current.entries()]
-      .filter(([i]) => i < stepIdx)
-      .sort(([a], [b]) => a - b);
+    const out: { order: number; doc: ProducedDoc }[] = [];
+    const entries = [...producedDocsRef.current.entries()].filter(([i]) => i < stepIdx);
     for (const [i, doc] of entries) {
       if (doc.learnings === undefined) {
         doc.learnings = await readFile(doc.path)
           .then((md) => extractLearnings(md))
           .catch(() => null);
       }
-      out.push({ step: WF[i], path: doc.path, learnings: doc.learnings });
+      out.push({ order: i, doc: { step: WF[i], path: doc.path, learnings: doc.learnings } });
     }
-    return out;
+    const map = repoMapRef.current;
+    if (map && map.stepIdx < stepIdx) {
+      out.push({
+        order: map.stepIdx + 0.5,
+        doc: { step: WF[map.stepIdx], path: map.path, learnings: null, label: REPO_MAP_NAME },
+      });
+    }
+    return out.sort((a, b) => a.order - b.order).map((e) => e.doc);
   };
 
   /** Whether the hand-off preflight for `stepIdx` must read a file (→ the
@@ -1253,7 +1290,7 @@ export function ChatPanel({
       !isPrefill && isRemote && stepInject && step && isGenerative(step.kind) && step.file
         ? "이 단계의 최종 답변 전체가 그대로 문서 파일로 저장됩니다(저장은 앱이 처리). 필요하면 먼저 읽기 전용 파일 도구(list_dir·find_files·search_text·outline_file·find_references·read_file)로 근거 파일을 읽은 뒤, 최종 답변에는 파일 저장 도구 사용·저장 여부 언급·인사말·메타설명 없이 문서 본문(마크다운/HTML)만 출력하세요. 도구 호출은 분당 한도가 있으니 필요한 조회는 한 응답에 묶어(files·paths·queries·symbols 배열) 요청하세요." +
           (priorDocs
-            ? " 앞 단계 산출 문서의 본문은 위 대화에 이미 포함되어 있으므로 read_file로 다시 읽지 말고, 필요한 소스코드만 확인하세요."
+            ? " 앞 단계 산출 문서의 본문은 위 대화에 이미 포함되어 있으므로 read_file로 다시 읽지 말고(앱이 만든 저장소 지도는 필요할 때만 참고), 필요한 소스코드만 확인하세요."
             : "")
         : "";
 
