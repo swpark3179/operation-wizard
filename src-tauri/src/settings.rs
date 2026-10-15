@@ -75,37 +75,17 @@ pub struct StepDef {
     pub output: Option<String>,
 }
 
-/// Confluence connection via the official MCP server (D82). Reached over the
-/// streamable-HTTP MCP transport (`mcp.rs`); the crawl target (root page id /
-/// search query) is passed per-collection from the UI, not stored here. The
-/// `auth_key` is stored as plain text in settings.json — acceptable for a local
-/// single-user desktop app; recommend a read-only-scope key.
-///
-/// The old REST-crawl fields (`baseUrl`/`token`/`rootPageId`/`spaceKey`/
-/// `allowInvalidCerts`) were dropped; serde ignores them in an old settings.json
-/// (no `deny_unknown_fields`), so a stale file simply loads with an empty `url`
-/// (treated unconfigured) and the user re-saves (the URL is prefilled).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfluenceConfig {
-    /// MCP endpoint, e.g. "https://sdsdev.co.kr/mcp-confluence/mcp".
-    #[serde(default)]
-    pub url: String,
-    /// `x-auth` request header value (MCP server auth).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_key: Option<String>,
-}
-
-/// The user's own RAG service (summarization + embedding happen there; this app
-/// only passes raw content and queries — see `rag.rs` for the fill-in stubs).
+/// The in-house RAG service (Fabrix rag-chat — D65): the rag workflow step
+/// searches its pre-embedded knowledge asset (in-house documents, e.g. Confluence).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RagConfig {
     #[serde(default)]
     pub endpoint: String,
-    /// Auth header values the user's rag.rs implementation sends with each
-    /// request (D50; how they are attached is the user's TODO stub). Plain-text
-    /// secrets — same caveat as `ConfluenceConfig.auth_key`.
+    /// Auth header values sent with each request (D50: `secret_key` →
+    /// `x-fabrix-client`, `pass_key` → `x-openapi-token` — D65). Plain text in
+    /// settings.json — acceptable for a local single-user desktop app; recommend
+    /// read-only keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,8 +109,8 @@ pub struct RagConfig {
 /// API (OpenAI-compatible; D64 → D84). Unlike the local CLI agents (a
 /// `customBin` path), FabriX needs an endpoint + two auth headers; the model is
 /// chosen per request with the `x-llm-model-id` header. Stored here — same root
-/// as `rag`/`confluence` — so it persists across runs. The keys are plain text:
-/// same caveat as `RagConfig`/`ConfluenceConfig` (local single-user app).
+/// as `rag` — so it persists across runs. The keys are plain text: same caveat
+/// as `RagConfig` (local single-user app).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FabrixConfig {
@@ -181,10 +161,9 @@ pub struct Settings {
     /// Per-category workflow overrides. Absent key → built-in default flow.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub workflows: HashMap<String, Vec<StepDef>>,
-    /// Confluence crawl source for RAG ingestion. `None` → not configured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confluence: Option<ConfluenceConfig>,
-    /// The user's RAG service endpoint. `None` → the rag workflow step skips.
+    /// The RAG service endpoint. `None` → the rag workflow step skips. (The
+    /// former `confluence` MCP-collection section was removed in D98; serde
+    /// ignores it in an old file and the next save drops it.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rag: Option<RagConfig>,
     /// The FabriX remote HTTP agent connection. `None` → not configured (the
@@ -231,11 +210,6 @@ impl Settings {
                 self.workflows.remove(category);
             }
         }
-    }
-
-    /// Set (`Some`) or clear (`None`) the Confluence crawl config.
-    pub fn set_confluence(&mut self, config: Option<ConfluenceConfig>) {
-        self.confluence = config;
     }
 
     /// Set (`Some`) or clear (`None`) the RAG endpoint config.
@@ -353,7 +327,7 @@ pub fn load(config_dir: &Path) -> Settings {
             Err(_) => {
                 // Falling back to defaults means the next `save` rewrites the
                 // file — without a backup that silently destroys every agent
-                // path, skill, workflow and RAG/Confluence config (D56).
+                // path, skill, workflow and RAG/FabriX config (D56).
                 backup_corrupt(config_dir, &raw);
                 Settings::default()
             }
@@ -450,10 +424,6 @@ mod tests {
                 step("chat", "chat"),
             ]),
         );
-        s.set_confluence(Some(ConfluenceConfig {
-            url: "https://sdsdev.co.kr/mcp-confluence/mcp".into(),
-            auth_key: Some("x-auth-key".into()),
-        }));
         s.set_rag(Some(RagConfig {
             endpoint: "https://rag.example.com".into(),
             secret_key: Some("secret".into()),
@@ -504,7 +474,6 @@ mod tests {
         assert!(s.skills.is_none());
         assert!(s.workflows.is_empty());
         // New sections absent from an old file → None.
-        assert!(s.confluence.is_none());
         assert!(s.rag.is_none());
         assert!(s.fabrix.is_none());
 
@@ -513,7 +482,7 @@ mod tests {
 
     #[test]
     fn old_skill_and_step_json_load_without_new_fields() {
-        // Raw pre-extension JSON: no `dir`, no `output`, no confluence/rag.
+        // Raw pre-extension JSON: no `dir`, no `output`, no rag/fabrix.
         let raw = r#"{
             "skills": [{ "id": "a", "name": "A", "body": "b" }],
             "workflows": { "plan": [
@@ -524,7 +493,7 @@ mod tests {
         let s: Settings = serde_json::from_str(raw).unwrap();
         assert_eq!(s.skills.as_ref().unwrap()[0].dir, None);
         assert_eq!(s.workflows["plan"][0].output, None);
-        assert!(s.confluence.is_none() && s.rag.is_none() && s.fabrix.is_none());
+        assert!(s.rag.is_none() && s.fabrix.is_none());
 
         // A pre-D50 rag section (apiKey) still parses: the unknown field is
         // ignored, the new header fields default to None.
@@ -572,6 +541,37 @@ mod tests {
         let raw = fs::read_to_string(root.join("settings.json")).unwrap();
         assert!(!raw.contains("\"aipro\""), "the removed section is dropped on save");
         assert!(raw.contains("\"fabrix\""));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn removed_confluence_section_is_ignored_and_dropped_on_save() {
+        // D98: the Confluence MCP collection was removed. An old file that still
+        // carries the `confluence` section (MCP or the older REST shape) must
+        // load without losing the rest, and the next save drops it.
+        let root = temp_root("confluence-removed");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("settings.json"),
+            r#"{
+                "agents": { "claude": { "customBin": "C:/c.cmd" } },
+                "rag": { "endpoint": "https://r", "topK": 4 },
+                "confluence": { "url": "https://sdsdev.co.kr/mcp-confluence/mcp",
+                                "authKey": "k", "baseUrl": "https://wiki", "rootPageId": "1" }
+            }"#,
+        )
+        .unwrap();
+
+        let s = load(&root);
+        assert_eq!(s.agent_custom_bin("claude").as_deref(), Some("C:/c.cmd"));
+        assert_eq!(s.rag.as_ref().map(|r| r.top_k), Some(Some(4)));
+
+        save(&root, &s).unwrap();
+        let raw = fs::read_to_string(root.join("settings.json")).unwrap();
+        assert!(!raw.contains("\"confluence\""), "the removed section is dropped on save");
+        assert!(raw.contains("\"rag\""));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -638,7 +638,6 @@ mod tests {
         let mut s = Settings::default();
         s.set_skills(Some(vec![skill("a")]));
         s.set_workflow("plan", Some(vec![step("chat", "chat")]));
-        s.set_confluence(Some(ConfluenceConfig { url: "https://w".into(), ..Default::default() }));
         s.set_rag(Some(RagConfig { endpoint: "https://r".into(), ..Default::default() }));
         s.set_fabrix(Some(FabrixConfig { endpoint_url: "https://f".into(), ..Default::default() }));
         save(&root, &s).unwrap();
@@ -646,7 +645,6 @@ mod tests {
         let mut loaded = load(&root);
         loaded.set_skills(None);
         loaded.set_workflow("plan", None);
-        loaded.set_confluence(None);
         loaded.set_rag(None);
         loaded.set_fabrix(None);
         save(&root, &loaded).unwrap();
@@ -654,14 +652,12 @@ mod tests {
         let reloaded = load(&root);
         assert!(reloaded.skills.is_none());
         assert!(reloaded.workflows.is_empty());
-        assert!(reloaded.confluence.is_none());
         assert!(reloaded.rag.is_none());
         assert!(reloaded.fabrix.is_none());
         // The serialized file should not even contain the cleared fields.
         let raw = fs::read_to_string(root.join("settings.json")).unwrap();
         assert!(!raw.contains("\"skills\""));
         assert!(!raw.contains("\"workflows\""));
-        assert!(!raw.contains("\"confluence\""));
         assert!(!raw.contains("\"rag\""));
         assert!(!raw.contains("\"fabrix\""));
 

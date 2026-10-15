@@ -106,8 +106,6 @@ Operation Wizard는 운영 담당자가 **AI 에이전트를 활용해 실제 �
 
 추가로:
 
-- **Confluence 수집(MCP)** — 공식 Confluence MCP 서버에 연결해 페이지 트리를 수집하고 로컬 지식
-  베이스 자산으로 저장합니다(백그라운드 진행 · 취소 지원).
 - **산출물 지식 저장** — 워크플로우가 완료되면 산출물 문서를 요약과 함께 지식 베이스에 저장해,
   이후 작업이 과거 산출물을 자동으로 참고합니다.
 
@@ -158,7 +156,7 @@ flowchart LR
         DETECT["에이전트 탐지<br/>agents · resolve · exec · detect"]
         RUN["실행 엔진<br/>run — RunEvent 스트리밍 · 취소"]
         REMOTE["원격 커넥터<br/>fabrix (HTTP + SSE + 읽기 전용 도구 루프)"]
-        KNOW["지식 인프라<br/>rag · mcp · confluence · knowledge"]
+        KNOW["지식 인프라<br/>rag · knowledge"]
         STORE["영속화<br/>settings · projects · files"]
     end
 
@@ -166,13 +164,13 @@ flowchart LR
         direction TB
         CLI["로컬 CLI 에이전트<br/>Claude Code · Codex · Gemini CLI<br/>OpenCode · Antigravity"]
         API["원격 에이전트 API<br/>FabriX LLM Serving API"]
-        SVC["사내 RAG 서비스<br/>Confluence MCP 서버"]
+        SVC["사내 RAG 서비스<br/>Fabrix rag-chat"]
     end
 
     FE <-->|"Tauri IPC<br/>커맨드 + Channel"| BE
     RUN -->|"프로세스 실행<br/>stdout 스트림 파싱"| CLI
     REMOTE -->|"HTTPS POST + SSE"| API
-    KNOW -->|"HTTPS (JSON-RPC / REST)"| SVC
+    KNOW -->|"HTTPS (REST)"| SVC
 ```
 
 ### 백엔드 모듈 (src-tauri/src)
@@ -183,7 +181,7 @@ flowchart LR
 | `resolve.rs` / `exec.rs` / `detect.rs` | 실행 파일 해석 → 버전 · 모델 프로브 → 탐지 결과 조립 |
 | `run.rs` | 실행 엔진: 프로세스 spawn + 스트림 파싱 → `RunEvent` Channel 스트리밍, 프로세스 트리 취소 |
 | `fabrix.rs` / `fabrix_tools.rs` | FabriX 원격 에이전트 커넥터 (OpenAI 호환 HTTP + SSE, tool-calling 루프, 모델 캐시·기본 모델, 연결 테스트) · 읽기 전용 파일 도구 샌드박스 |
-| `rag.rs` / `mcp.rs` / `confluence.rs` | 사내 RAG 검색 · MCP 클라이언트 · Confluence 수집 |
+| `rag.rs` | 사내 문서 RAG 검색 (Fabrix rag-chat) · 연결 테스트 |
 | `knowledge.rs` | 지식 베이스 CRUD + 산출물 파일 보관 |
 | `projects.rs` / `settings.rs` / `files.rs` | 프로젝트 · 세션 영속화, 설정 저장, 캔버스 파일 입출력 |
 
@@ -243,7 +241,7 @@ npm run tauri build
 cargo test --manifest-path src-tauri\Cargo.toml
 ```
 
-모델 파서 · 설정 라운드트립 · 세션 영속화 · SSE/MCP 파서 단위 테스트와 스텁 CLI를 이용한
+모델 파서 · 설정 라운드트립 · 세션 영속화 · SSE 파서 단위 테스트와 스텁 CLI를 이용한
 E2E 탐지 테스트를 포함합니다.
 
 ### 릴리즈 (CI)
@@ -304,7 +302,7 @@ WebView2 런타임 부재/손상입니다.
 |---|---|
 | [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md) | 프로젝트 전반 이해 가이드 (개념 · 구조 · 동작 · 확장) |
 | [docs/design/](docs/design/README.md) | **설계 기준 문서** — 개요 · 아키텍처 · 탐지 · UI · 결정 로그 · 빌드 · 실행 엔진 · 가이드 플로우 |
-| [docs/rag-confluence-guide.md](docs/rag-confluence-guide.md) | RAG 검색 · Confluence 수집 설정 가이드 (how-to) |
+| [docs/rag-guide.md](docs/rag-guide.md) | 사내 문서 RAG 검색 설정 가이드 (how-to) |
 
 ---
 

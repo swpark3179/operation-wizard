@@ -563,9 +563,9 @@ pub fn run_agent(
         let reg = app2.state::<RunRegistry>();
         // Poison tolerance (D56): recover the guard with `into_inner` instead
         // of panicking. A mutex stays poisoned forever after one panic —
-        // erroring out here (IngestRegistry-style) would permanently break
-        // Stop and worker bookkeeping, and the map/child hold no invariant a
-        // mid-panic interruption can corrupt. Same at every lock site below.
+        // returning an Err here would permanently break Stop and worker
+        // bookkeeping, and the map/child hold no invariant a mid-panic
+        // interruption can corrupt. Same at every lock site below.
         reg.runs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

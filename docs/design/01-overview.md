@@ -79,8 +79,8 @@
   D87/D88)가 함께 주입되고(지도는 `docs/repo-map.md` 산출물로도 저장 — D94), 분석서의 Learnings는 이후 단계로 인계된다.
   plan에서는 이 단계가 변경 대상·영향 범위까지 다루는 유일한 코드 분석 단계다 — 별도 소스코드 분석 단계는 D94에서 통합) → ② **사내 문서 RAG 검색**(실행 시점에는
   `rag_search`가 **Fabrix rag-chat API**를 호출해(D65) 요약 답변+출처 청크를 캔버스 '검색 결과' 탭(HTML)으로
-  보여주고 에이전트에 주입; 지식 화면에서 **공식 Confluence MCP 서버**(url+x-auth)에 연결해 페이지 트리를
-  수집하면 로컬 지식 베이스 artifact로 저장돼 knowledge 단계가 참고한다 — D82) → ③ **지식 베이스
+  보여주고 에이전트에 주입 — Confluence 등 사내 문서는 이 RAG 지식 자산으로만 찾는다; 앱 자체의 Confluence MCP
+  수집(D82)은 D98에서 제거) → ③ **지식 베이스
   반영**(지식 화면에서 제목+본문 CRUD, 단순 저장 후 프롬프트 주입). 이후 기존 설정 단계들이 이어진다.
   `plan`·`query`(D61)·`change`(D62)는 기본값에 완전 기반 3단계 포함, `guide`(D63)는 **코드베이스를 뺀 부분
   foundation(rag+knowledge)** 기본 포함(사내 문서 시각화가 강점 — 코드베이스 폴더 선택 강제 없음).
@@ -103,9 +103,9 @@
 - 대화는 파일(JSON)로 영속화된다([07](07-workspace-and-runs.md)). SQLite/전문 검색/여러 프로젝트
   목록 화면은 후속 증분. opencode/antigravity의 1급 실행 파서(현재 plain; claude·codex·gemini은
   1급 지원, FabriX는 원격 HTTP+SSE + 읽기 전용 도구 루프).
-- RAG 검색(`search`)은 **Fabrix rag-chat API 실연동됨**(D65). **Confluence 수집은 공식 MCP 서버로 전환됨**
-  (D82) — 페이지 트리를 가져와 로컬 지식 베이스 artifact로 저장하고 knowledge 단계가 참고한다(구 REST 크롤·
-  WebView 스파이크·RAG `ingest_page` sink는 폐기; `ingest_page`는 호출부 없는 스텁으로만 남음).
+- RAG 검색(`search`)은 **Fabrix rag-chat API 실연동됨**(D65). 문서 수집(인제스트)은 하지 않는다 — 지식 자산은
+  Fabrix 콘솔에서 관리한다. **앱 자체의 Confluence 수집(REST → WebView → MCP, D48/D77/D82)은 D98에서 제거**되었다
+  (페이지 ID를 미리 알아야 해 실사용이 어려웠고, 사내 문서 찾기는 RAG가 담당).
 - 인증/로그인 상태 프로브(Open Design의 claude/codex `authProbe`는 후속 작업).
 - Claude의 라이브 모델 목록(Open Design의 MMS 라우트 fetch는 자체 프록시 인프라
   의존이라 제외 — 정적 fallback만 사용).

@@ -1,7 +1,6 @@
 mod agents;
 mod codebase_cache;
 mod codemap;
-mod confluence;
 mod detect;
 mod exec;
 mod fabrix;
@@ -9,7 +8,6 @@ mod fabrix_rate;
 mod fabrix_tools;
 mod files;
 mod knowledge;
-mod mcp;
 mod projects;
 mod rag;
 mod resolve;
@@ -22,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Serialize;
 
 use detect::DetectedAgent;
-use settings::{ConfluenceConfig, FabrixConfig, RagConfig, Settings, SkillDef, StepDef};
+use settings::{FabrixConfig, RagConfig, Settings, SkillDef, StepDef};
 
 // ---------------------------------------------------------------------------
 // Boot diagnostics (D56). In release builds `windows_subsystem = "windows"`
@@ -269,24 +267,6 @@ fn set_workflow(category: String, steps: Option<Vec<StepDef>>) -> Result<Setting
     Ok(s)
 }
 
-/// Set (or clear, with `None`/empty URL) the Confluence MCP connection (D82):
-/// the MCP endpoint URL + `x-auth` key. An empty URL clears the config.
-#[tauri::command]
-fn set_confluence_config(config: Option<ConfluenceConfig>) -> Result<Settings, String> {
-    let normalized = config
-        .map(|mut c| {
-            c.url = c.url.trim().to_string();
-            c.auth_key = c.auth_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
-            c
-        })
-        .filter(|c| !c.url.is_empty());
-    let config_dir = ow_home()?;
-    let mut s = settings::load(&config_dir);
-    s.set_confluence(normalized);
-    settings::save(&config_dir, &s)?;
-    Ok(s)
-}
-
 /// Set (or clear, with `None`/empty endpoint) the RAG service config. The model
 /// cache (`models`) is backend-owned: preserved across an unchanged-connection
 /// re-save, cleared when the endpoint/credentials change (D66).
@@ -383,7 +363,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(run::RunRegistry::default())
-        .manage(confluence::IngestRegistry::default())
         .invoke_handler(tauri::generate_handler![
             list_agents,
             detect_agent,
@@ -391,7 +370,6 @@ pub fn run() {
             set_agent_bin,
             set_skills,
             set_workflow,
-            set_confluence_config,
             set_rag_config,
             set_fabrix_config,
             run::run_agent,
@@ -414,9 +392,6 @@ pub fn run() {
             knowledge::save_knowledge_files,
             knowledge::get_knowledge_root,
             knowledge::delete_knowledge,
-            confluence::start_confluence_ingest,
-            confluence::cancel_ingest,
-            confluence::probe_confluence,
             rag::rag_search,
             rag::probe_rag,
             fabrix::probe_fabrix
