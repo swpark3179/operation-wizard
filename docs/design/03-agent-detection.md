@@ -180,7 +180,9 @@ resolve  →  version probe  →  models probe(있으면)  →  DetectedAgent
   `[Context]`/`[Tools]`·nbsp), endpoint 정규화·`Bearer` 자동 부착, `resolve_model`/기본 모델 정렬/구 UUID 캐시 무효,
   `error_message`(WSO2/OIDC/litellm 오류 3종 + 429/405 힌트), `StreamAccumulator`(captured 도구 호출 스트림의
   조각 병합·usage 청크·reasoning), `chat_body`(헤더 모델·`/mnt/models`·`max_tokens` 없음·`tool_choice`),
-  도구 예산, 시스템 프롬프트의 호출 비용·묶음 원칙·라운드 꼬리표(D91). `fabrix_rate`(D91): 슬라이딩 창 `next_slot`
+  도구 예산, 시스템 프롬프트의 호출 비용·묶음 원칙·라운드 꼬리표(D91), 빈 응답 복구(D93 — 스크립트된 로컬 SSE 서버로
+  `drive()`를 돌려 도구 라운드 → 빈 응답 → forced final → 도구 없는 복구 요청(평탄화된 도구 결과·`tools` 없음)·끝까지
+  비면 "빈 응답" 오류·텍스트 전용 턴 1회 재요청을 검증). `fabrix_rate`(D91): 슬라이딩 창 `next_slot`
   (한도 미만 통과·한도 도달 시 대기·429 차단·0 = 무제한)·429 대기 계산(`Retry-After`·창 기준 추정·60초·90초 초과 포기)·
   취소 가능 sleep. `fabrix_tools`: 와일드카드·샌드박스(`..`/외부 경로/`.env` 거부, 상대경로 다중 루트 해석)·6종 도구
   (`outline_file`·`find_references` 포함 — D87/D89)·**묶음 인자**(`read_file.files`·`symbol`, `outline_file.paths`,

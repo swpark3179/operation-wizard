@@ -145,6 +145,13 @@ function isTransientFailure(msg: string): boolean {
   );
 }
 
+/** FabriX's final "empty reply" error — sent only after the backend already
+ * re-asked within the turn (forced final + a tool-free recovery request). The
+ * workflow skips the step on it instead of halting or re-running it (D93). */
+function isEmptyReplyFailure(msg: string): boolean {
+  return msg.includes("FabriX가 빈 응답");
+}
+
 /** Turn a remote agent's document reply into the file body (D67): if the whole
  * reply is one fenced code block (```md … ```), unwrap it; else trim as-is.
  * The caller passes only the text after the turn's last tool call (D84). */
@@ -711,22 +718,36 @@ export function ChatPanel({
                 onOpenFile(abs);
               }
             }
-            const nextIdx = stepIdx + 1;
-            stepIndexRef.current = nextIdx;
-            const nextStep = WF[nextIdx];
-            if (nextStep && isGenerative(nextStep.kind)) {
-              stepArmedRef.current = true;
-              setAutoTurn((s) => ({
-                display: progressLabel(nextIdx, WF),
-                nonce: (s?.nonce ?? 0) + 1,
-              }));
-            } else {
-              stepArmedRef.current = false; // terminal chat → wait for the user
-              if (nextStep) setStepStatusAt(nextIdx, "active");
-              maybeProposeKnowledgeSave();
-            }
+            advanceTo(stepIdx + 1);
           }
           // chat kind: terminal — nothing to advance.
+        } else if (
+          stepIdx != null &&
+          ev.status === "failed" &&
+          isGenerative(WF[stepIdx].kind) &&
+          isEmptyReplyFailure(lastAssistantError(messagesRef.current))
+        ) {
+          // FabriX came back empty even after its in-turn re-asks (D93). A
+          // whole-step retry would redo the exploration against the per-minute
+          // call quota into the same wall — skip this step softly (no artifact)
+          // and keep the workflow going. Its HTML render sub-step (D47) has
+          // nothing to render, so it is skipped with it.
+          stepRetryRef.current = { step: -1, count: 0 };
+          const skipped = WF[stepIdx];
+          setStepStatusAt(stepIdx, "skipped");
+          let nextIdx = stepIdx + 1;
+          while (WF[nextIdx]?.id === `${skipped.id}-html`) setStepStatusAt(nextIdx++, "skipped");
+          // The workflow did not stop: the skip note replaces the red error box.
+          updateLastAssistant((m) => ({ ...m, error: undefined }));
+          mutateMessages((prev) => [
+            ...prev,
+            note(
+              `'${skipped.name}' 단계의 FabriX 응답이 비어 있어 이 단계는 건너뛰고 다음 단계로 진행합니다${
+                skipped.file ? " (산출물 없음)" : ""
+              }.`,
+            ),
+          ]);
+          advanceTo(nextIdx);
         } else if (stepIdx != null) {
           // A generative step's turn failed mid-workflow. If the failure looks
           // transient (stream/timeout/network — D68) and the per-step retry
@@ -792,6 +813,25 @@ export function ChatPanel({
       stepArmedRef.current = true;
       setStepStatusAt(inflightStepRef.current, "pending");
       inflightStepRef.current = null;
+    }
+  };
+
+  /** Move the workflow cursor to `nextIdx` after a step ended (done or softly
+   * skipped): auto-fire it when it is generative, else stop at the terminal
+   * chat and wait for the user. */
+  const advanceTo = (nextIdx: number) => {
+    stepIndexRef.current = nextIdx;
+    const nextStep = WF[nextIdx];
+    if (nextStep && isGenerative(nextStep.kind)) {
+      stepArmedRef.current = true;
+      setAutoTurn((s) => ({
+        display: progressLabel(nextIdx, WF),
+        nonce: (s?.nonce ?? 0) + 1,
+      }));
+    } else {
+      stepArmedRef.current = false; // terminal chat → wait for the user
+      if (nextStep) setStepStatusAt(nextIdx, "active");
+      maybeProposeKnowledgeSave();
     }
   };
 
