@@ -7,6 +7,7 @@ import {
   CheckSquare,
   Send,
   FolderOpen,
+  Search,
   X,
 } from "lucide-react";
 import type { ClarifyAnswer, ClarifyQuestion } from "../lib/clarify";
@@ -73,10 +74,12 @@ function TextAnswer({
   value,
   onChange,
   disabled,
+  placeholder,
 }: {
   value: string;
   onChange: (v: string) => void;
   disabled?: boolean;
+  placeholder?: string;
 }) {
   const ref = useAutoGrow(value, 160);
   return (
@@ -86,7 +89,7 @@ function TextAnswer({
       disabled={disabled}
       onChange={(e) => onChange(e.target.value)}
       rows={2}
-      placeholder="답변을 입력하세요…"
+      placeholder={placeholder ?? "답변을 입력하세요…"}
       className="max-h-[160px] min-h-[44px] w-full resize-none overflow-y-auto rounded-lg border border-line bg-panel px-2.5 py-2 text-[13px] leading-[1.5] text-ink outline-none placeholder:text-ink-faint focus:border-line-strong disabled:opacity-60"
     />
   );
@@ -132,31 +135,80 @@ function OptionCard({
   );
 }
 
+/** The RAG step's on/off switch (D96). Off → the workflow's rag step is skipped.
+ * Unconfigured RAG shows it off + disabled (the step would skip anyway). */
+function RagSwitch({
+  on,
+  configured,
+  disabled,
+  onToggle,
+}: {
+  on: boolean;
+  configured: boolean;
+  disabled?: boolean;
+  onToggle: () => void;
+}) {
+  const state = !configured ? "미설정" : on ? "켜짐" : "꺼짐 · 건너뜀";
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      disabled={disabled || !configured}
+      onClick={onToggle}
+      title={
+        configured
+          ? "사내 문서(Confluence) RAG 검색 단계를 실행할지 정합니다. 끄면 이 단계를 건너뛰고 진행합니다."
+          : "RAG 연결이 설정되지 않아 이 단계는 건너뜁니다. (지식 화면에서 등록)"
+      }
+      className="inline-flex min-w-0 items-center gap-2 rounded-lg px-1 py-1 text-left text-[12.5px] text-ink-muted transition-opacity disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      <span
+        className={
+          "relative h-[18px] w-8 shrink-0 rounded-full transition-colors " +
+          (on ? "bg-accent" : "bg-line-strong")
+        }
+      >
+        <span
+          className={
+            "absolute top-[2px] h-[14px] w-[14px] rounded-full bg-white shadow-xs transition-[left] duration-[120ms] " +
+            (on ? "left-[16px]" : "left-[2px]")
+          }
+        />
+      </span>
+      <Search size={13} className="shrink-0 text-ink-soft" />
+      <span className="font-medium text-ink">사내 문서 RAG 검색</span>
+      <span className="truncate text-ink-soft">{state}</span>
+    </button>
+  );
+}
+
 /** Interactive requirements-clarification form rendered in the canvas. */
 export function RequirementsForm({
   questions,
-  initialAnswers,
+  rag,
   disabled,
   onSubmit,
 }: {
   questions: ClarifyQuestion[];
-  /** Pre-filled answers (e.g. from the prefill pass); missing ids start empty. */
-  initialAnswers?: Record<string, string | string[]>;
+  /** Present when the workflow has a RAG step: renders its on/off switch
+   * (D96). `configured` = a RAG connection is saved (else the switch is off
+   * and disabled). Null → no switch. */
+  rag?: { configured: boolean } | null;
   /** True while a run is streaming (blocks submit). */
   disabled?: boolean;
-  onSubmit: (answers: ClarifyAnswer[]) => void;
+  /** `ragEnabled` is false only when the user switched the RAG step off (or RAG
+   * is unconfigured); true when the workflow has no RAG step. */
+  onSubmit: (answers: ClarifyAnswer[], opts: { ragEnabled: boolean }) => void;
 }) {
   const [answers, setAnswers] = useState<Record<string, string | string[]>>(() => {
     const init: Record<string, string | string[]> = {};
-    for (const q of questions) {
-      const pre = initialAnswers?.[q.id];
-      if (q.type === "multi") init[q.id] = Array.isArray(pre) ? pre : [];
-      else init[q.id] = typeof pre === "string" ? pre : "";
-    }
+    for (const q of questions) init[q.id] = q.type === "multi" ? [] : "";
     return init;
   });
   const [attempted, setAttempted] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [ragOn, setRagOn] = useState(() => !!rag?.configured);
 
   const missing = (q: ClarifyQuestion): boolean => {
     if (!q.required) return false;
@@ -179,6 +231,7 @@ export function RequirementsForm({
     setSubmitted(true);
     onSubmit(
       questions.map((q) => ({ id: q.id, label: q.label, type: q.type, value: answers[q.id] })),
+      { ragEnabled: rag ? ragOn : true },
     );
   };
 
@@ -208,6 +261,7 @@ export function RequirementsForm({
                     value={(answers[q.id] as string) ?? ""}
                     onChange={(v) => setText(q.id, v)}
                     disabled={disabled || submitted}
+                    placeholder={q.placeholder}
                   />
                 )}
 
@@ -252,7 +306,16 @@ export function RequirementsForm({
       </div>
 
       <div className="shrink-0 border-t border-line bg-panel px-5 py-3">
-        <div className="mx-auto flex max-w-[560px] items-center justify-end gap-2">
+        <div className="mx-auto flex max-w-[560px] flex-wrap items-center justify-end gap-2">
+          {rag && (
+            <RagSwitch
+              on={ragOn}
+              configured={rag.configured}
+              disabled={disabled || submitted}
+              onToggle={() => setRagOn((v) => !v)}
+            />
+          )}
+          <div className="flex-1" />
           {submitted && <span className="text-[12px] text-ink-soft">제출됨</span>}
           <button
             type="button"

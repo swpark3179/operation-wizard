@@ -2,7 +2,7 @@
 // artifact-kind knowledge entry — an agent-generated summary (body) plus the
 // document files copied into the knowledge store (save_knowledge_files).
 //
-// The summary turn runs ISOLATED (prefill pattern, D30 family): a one-shot
+// The summary turn runs ISOLATED (D30 family, like ragRelevance.ts): a one-shot
 // runAgent call with no session id / resume, its own Channel, and no touch of
 // ChatPanel's step cursor or persisted transcript. That makes it work
 // identically for the completion banner, the manual 산출물-tab save, and
@@ -56,7 +56,7 @@ export function generateKnowledgeSummary(args: {
   cwd: string;
   /** Absolute paths of the documents to summarize. */
   files: string[];
-  /** The original request (seed prompt / project title) for context. */
+  /** The original request (the requirement / session title) for context. */
   request: string;
   onText?: (accumulated: string) => void;
 }): { promise: Promise<string | null>; cancel: () => void } {

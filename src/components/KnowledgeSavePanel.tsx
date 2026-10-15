@@ -25,7 +25,7 @@ export interface KnowledgeSaveRequest {
   /** StepIds to pre-check (manual save), or null → every existing artifact. */
   preselect: string[] | null;
   defaultTitle: string;
-  /** The original request (seed prompt / project title) for the summary turn. */
+  /** The original request (the requirement / session title) for the summary turn. */
   request: string;
   source: { projectId: string; category: string; title: string };
 }

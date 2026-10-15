@@ -23,9 +23,10 @@ export function ragUserError(msg: string): string {
     : msg;
 }
 
-/** Build the RAG search query from the launcher prompt + option answers. */
-export function buildRagQuery(seed: string, answersWire: string): string {
-  const combined = [seed.trim(), answersWire.trim()].filter(Boolean).join("\n");
+/** Build the RAG search query from the requirement (first, so the cap keeps
+ * it) + the option answers. */
+export function buildRagQuery(requirement: string, answersWire: string): string {
+  const combined = [requirement.trim(), answersWire.trim()].filter(Boolean).join("\n");
   return combined.length > RAG_QUERY_CAP ? combined.slice(0, RAG_QUERY_CAP) : combined;
 }
 

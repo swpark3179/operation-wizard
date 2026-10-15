@@ -1,12 +1,10 @@
-// Static per-category option catalogs (frontend-only). When a category is
-// started, its catalog is shown IMMEDIATELY as a canvas form (no agent turn) so
-// the user decides the key setup options first; if the launcher carried a
-// prompt, an agent "prefill" pass (see clarify.ts) pre-fills the options it can
-// confidently infer and leaves the rest for the user (design D36).
+// Static per-category option catalogs (frontend-only). Work always starts from a
+// category card (D95): its catalog is shown IMMEDIATELY as a canvas form (no
+// agent turn), led by the mandatory requirement field, so the user states the
+// request and decides the key setup options before anything runs (design D36).
 //
-// We reuse the ClarifyQuestion shape (single/multi/text) so the existing
-// RequirementsForm renders these unchanged. An empty catalog for a category
-// means "no options phase" → the flow falls back to the seed-first behavior.
+// We reuse the ClarifyQuestion shape (single/multi/text/folder) so the existing
+// RequirementsForm renders these unchanged.
 
 import type { ClarifyQuestion } from "./clarify";
 import type { Category } from "../components/workspace";
@@ -14,9 +12,8 @@ import type { Settings } from "./types";
 import { workflowFor } from "./workflow";
 
 /** The mandatory codebase-folder question, prepended when the category's
- * foundation phase applies (D45). Excluded from prefill (folder type); its
- * answer is delivered structurally (WorkspaceView state → ChatPanel prop), not
- * as wire prose. */
+ * foundation phase applies (D45). Its answer is delivered structurally
+ * (WorkspaceView state → ChatPanel prop), not as wire prose. */
 export const CODEBASE_QUESTION: ClarifyQuestion = {
   id: "codebasePath",
   label: "분석할 코드베이스 폴더를 선택하세요.",
@@ -25,14 +22,23 @@ export const CODEBASE_QUESTION: ClarifyQuestion = {
 };
 
 /** The requirement field, prepended to the FRONT of every category's form so
- * "what do you want to do" comes first (D78). Required + client-filled from the
- * launcher seed (noPrefill → the agent never re-words it). */
+ * "what do you want to do" comes first (D78). Required — it is the request
+ * itself (the Home screen has no prompt composer — D95) and the source of the
+ * session title (D97). */
 export const REQUIREMENT_QUESTION: ClarifyQuestion = {
   id: "userRequest",
   label: "무엇을 하고 싶으신가요? 원하는 작업을 자유롭게 설명해 주세요.",
   type: "text",
   required: true,
-  noPrefill: true,
+};
+
+/** Category-specific example for the requirement field (D95 — it replaced the
+ * Home composer's example prompt). */
+const REQUIREMENT_PLACEHOLDER: Record<Category, string> = {
+  plan: "예: 주문 목록 화면에 배송상태 필터를 추가하고, 행 클릭 시 배송 상세 팝업을 띄우고 싶어요.",
+  guide: "예: 월말 정산 배치가 실패했을 때 원인 확인부터 재처리까지의 조치 절차를 정리하고 싶어요.",
+  query: "예: 지난달 지역별 신규 가입 회원 수를 일자별로 확인하고 싶어요.",
+  change: "예: 탈퇴 처리된 회원 30건의 마케팅 수신 동의 값을 N으로 변경하고 싶어요.",
 };
 
 export const CATEGORY_OPTIONS: Record<Category, ClarifyQuestion[]> = {
@@ -153,7 +159,8 @@ export const CATEGORY_OPTIONS: Record<Category, ClarifyQuestion[]> = {
   ],
 };
 
-/** The static option catalog for a category (may be empty → no options phase). */
+/** The form questions for a category: the requirement field (always), the
+ * codebase folder (when the workflow has a codebase step), then the catalog. */
 export function optionsFor(category: Category, settings: Settings | null): ClarifyQuestion[] {
   const base = CATEGORY_OPTIONS[category] ?? [];
   // The codebase-analysis step needs its target folder up front, so the folder
@@ -163,7 +170,6 @@ export function optionsFor(category: Category, settings: Settings | null): Clari
   const needsCodebase = workflowFor(category, settings).some((s) => s.kind === "codebase");
   // The requirement field always comes first ("뭘 하고 싶은지 우선" — D78); the
   // codebase folder question follows it when the workflow has a codebase step.
-  return needsCodebase
-    ? [REQUIREMENT_QUESTION, CODEBASE_QUESTION, ...base]
-    : [REQUIREMENT_QUESTION, ...base];
+  const requirement = { ...REQUIREMENT_QUESTION, placeholder: REQUIREMENT_PLACEHOLDER[category] };
+  return needsCodebase ? [requirement, CODEBASE_QUESTION, ...base] : [requirement, ...base];
 }

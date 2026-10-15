@@ -29,7 +29,6 @@ export function HomeArea({
 }) {
   const [screen, setScreen] = useState<"home" | "workspace">("home");
   const [category, setCategory] = useState<Category | null>(null);
-  const [seedPrompt, setSeedPrompt] = useState("");
   // A saved session opened from the Home "recent" list (null = fresh chat).
   const [loadedSession, setLoadedSession] = useState<StoredSession | null>(null);
   // The active project: a fresh chat mints a new id; opening a recent project
@@ -39,27 +38,21 @@ export function HomeArea({
   // The reopened project's stored codebase path (fresh chats pick one in the
   // requirements form instead — D45).
   const [initialCodebasePath, setInitialCodebasePath] = useState<string | null>(null);
-  // The agent/model picked in the Home composer (fresh chats only — a loaded
-  // session carries its own; D60).
+  // The agent/model picked on Home (fresh chats only — a loaded session
+  // carries its own; D60).
   const [initialAgentId, setInitialAgentId] = useState<string | null>(null);
   const [initialModel, setInitialModel] = useState<string | null>(null);
-  // True when the workspace should auto-classify the category from the launcher
-  // prompt (composer start — D81); false for an explicit category card / a
-  // reopened session.
-  const [autoCategory, setAutoCategory] = useState(false);
 
   // Reset to the launcher whenever Home is (re)selected in the nav rail.
   useEffect(() => {
     setScreen("home");
     setCategory(null);
-    setSeedPrompt("");
     setLoadedSession(null);
     setProjectId(null);
     setInitialWorkdir(null);
     setInitialCodebasePath(null);
     setInitialAgentId(null);
     setInitialModel(null);
-    setAutoCategory(false);
   }, [resetNonce]);
 
   if (screen === "workspace" && category && projectId) {
@@ -71,8 +64,6 @@ export function HomeArea({
         initialAgentId={initialAgentId}
         initialModel={initialModel}
         category={category}
-        autoCategory={autoCategory}
-        seedPrompt={seedPrompt}
         agents={agents}
         detected={detected}
         settings={settings}
@@ -82,12 +73,10 @@ export function HomeArea({
         onHome={() => {
           setScreen("home");
           setCategory(null);
-          setSeedPrompt("");
           setLoadedSession(null);
           setProjectId(null);
           setInitialWorkdir(null);
           setInitialCodebasePath(null);
-          setAutoCategory(false);
         }}
       />
     );
@@ -98,10 +87,10 @@ export function HomeArea({
       agents={agents}
       detected={detected}
       onOpenAgents={onOpenAgents}
-      // New chat / category → a brand-new project. `workdir` is the folder the
+      // Category card → a brand-new project (D95). `workdir` is the folder the
       // user optionally picked on Home; null → auto (own workspace/ subfolder).
-      // `agentId`/`model` seed the ChatPanel composer (D60).
-      onStart={(cat, prompt, workdir, agentId, model, auto) => {
+      // `agentId`/`model` (Home start settings) seed the ChatPanel composer (D60).
+      onStart={(cat, workdir, agentId, model) => {
         setProjectId(crypto.randomUUID());
         setInitialWorkdir(workdir ?? null);
         setInitialCodebasePath(null);
@@ -109,8 +98,6 @@ export function HomeArea({
         setInitialModel(model ?? null);
         setLoadedSession(null);
         setCategory(cat);
-        setAutoCategory(!!auto);
-        setSeedPrompt(prompt);
         setScreen("workspace");
       }}
       // Recent project → adopt its id + resolved workdir/codebase, open the
@@ -123,8 +110,6 @@ export function HomeArea({
         setInitialModel(null);
         setLoadedSession(session);
         setCategory((session.category as Category) ?? "plan");
-        setAutoCategory(false); // a reopened session keeps its stored category
-        setSeedPrompt("");
         setScreen("workspace");
       }}
     />
