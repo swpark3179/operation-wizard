@@ -51,6 +51,22 @@
 - `reqwest`(D48)는 `native-tls`로 빌드되어 Windows에서 **schannel**을 쓴다 — OpenSSL 설치 불필요,
   OS 인증서 저장소(사내 프록시 CA 포함)를 그대로 신뢰한다.
 
+## Lockfile과 Tauri 버전 정렬 (D92)
+
+- `package-lock.json`과 `src-tauri/Cargo.lock`을 **둘 다 커밋**한다(재현 가능한 빌드, CI `npm ci`).
+- `tauri build`는 `Cargo.lock`이 있으면 **Rust crate와 npm 패키지의 major/minor가 같은지 검사**하고 다르면 실패한다
+  (`Found version mismatched Tauri packages`). 짝: `tauri` ↔ `@tauri-apps/api`, `tauri-plugin-opener` ↔
+  `@tauri-apps/plugin-opener`, `tauri-plugin-dialog` ↔ `@tauri-apps/plugin-dialog`.
+- 현재 정렬: tauri **2.11**.x · plugin-dialog **2.7**.x · plugin-opener **2.5**.x (npm api 2.11.1 / dialog 2.7.1 /
+  opener 2.5.4). Cargo.toml은 `"2"`라 lockfile 없이 해석하면 최신 minor(2.12 등)로 올라가 검사에 걸린다.
+- **올릴 때는 양쪽을 같은 작업에서 함께**: 예) `npm install @tauri-apps/api@~2.12 @tauri-apps/plugin-dialog@~2.8
+  @tauri-apps/plugin-opener@~2.7` + `cargo update -p tauri -p tauri-plugin-dialog -p tauri-plugin-opener`.
+  내릴 때는 `cargo update -p <crate> --precise <ver>`로 플러그인 → `tauri` → 코어 계열(`tauri-runtime(-wry)`·
+  `tauri-utils`·`tauri-build`·`tauri-macros`·`tauri-codegen`·`tauri-plugin`)을 **한 세대로** 맞춘다(2.11 코어에
+  2.12 런타임이 섞이지 않게 — 2.12부터 코어가 런타임을 `~`로 고정).
+- 로컬에서 `cargo test`·`cargo build`가 lockfile을 갱신했다면 tauri 계열 버전이 바뀌지 않았는지 확인하고 커밋한다
+  (`cargo test --locked`로 갱신 자체를 막을 수 있다).
+
 ## 테스트 실행
 
 ```powershell
