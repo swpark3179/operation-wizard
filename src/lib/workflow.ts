@@ -59,11 +59,12 @@ export function isGenerative(kind: string): boolean {
   return kind !== "chat";
 }
 
-// ── plan(프로그램 변경 계획) 기본 플로우: 소스코드 분석 → 컨플루언스 탐색 →
+// ── plan(프로그램 변경 계획) 기본 플로우: 기반 3단계(코드베이스 분석 → RAG → 지식) →
 //    계획 생성 → 변경영향분석서 → 테스트 계획서 → 마무리 대화 ─────────────────────
 // The requirements options are a pre-workflow phase (options.ts); the steps
 // below start on the options-submit turn and auto-advance through the
-// generative (search/document) steps.
+// generative (search/document) steps. The codebase step is the only code-
+// analysis step (the separate 소스코드 분석 step was folded into it — D94).
 
 // ── 기반 3단계 (foundation) 기본 지시문 ─────────────────────────────────────────
 // 모든 카테고리 워크플로우 앞에 고정(pinned)으로 프리펜드되는 필수 단계들.
@@ -77,15 +78,19 @@ const CODEBASE_STEP = `[시스템 지시: 코드베이스 분석 단계]
 - 코드베이스 폴더의 파일은 절대 수정·생성·삭제하지 마세요. 읽기와 검색만 합니다.
 - 분석서는 코드베이스가 아니라 **작업 폴더**에 \`docs/codebase-analysis.md\`로 저장하세요
   (프롬프트에 명시된 작업 폴더 절대경로 기준으로 쓰고, 없으면 docs 폴더도 생성).
-- 이 단계는 저장소 전체의 **오리엔테이션**입니다(이번 요청과 관련된 영역은 위치까지만 표시하고, 상세 분석은
-  이후 소스코드 분석 단계가 이 문서를 근거로 수행합니다).
-- 분석서는 다음 4개 섹션으로 구성하세요:
+- 이 단계가 워크플로우의 **유일한 코드 분석 단계**입니다. 저장소 구조를 파악한 뒤, 확정된 요구사항이 건드리는
+  **변경 대상**은 시그니처·호출 관계·영향 범위까지 실제 소스로 확인하세요. 이후 계획·변경영향·테스트 단계는
+  코드베이스를 다시 탐색하지 않고 이 분석서를 근거로 작성됩니다.
+- 분석서는 다음 섹션으로 구성하세요:
   1. **Repository Map** — 디렉터리·주요 모듈의 역할 요약(트리 형태, 요청 관련 영역 표시).
-  2. **Key Interfaces** — 진입점·허브 모듈의 핵심 클래스/메서드 시그니처와 입출력 규격(본문 아님).
-  3. **Dependency Graph** — 진입점부터 데이터 종단(SQL·테이블)까지의 호출 흐름(\`\`\`mermaid 다이어그램).
-  4. **Learnings for Next Steps** — 다음 단계가 재탐색 없이 재활용할 아키텍처 규칙·핵심 흐름·제약.
-- 아직 계획을 세우지 마세요. 이번 턴은 "코드베이스 파악과 기록"만 합니다.
-- 파일 저장 후, 핵심 구조를 한두 문장으로만 보고하세요.`;
+  2. **Key Interfaces** — 진입점·허브 모듈과 변경 대상 심볼의 시그니처·입출력 규격(본문 아님).
+  3. **Dependency Graph** — 진입점부터 데이터 종단(SQL·테이블)까지의 호출 흐름(\`\`\`mermaid 다이어그램, 변경 대상 강조).
+  4. **변경 대상 분석** — 대상 심볼별 Callers·Callees 표(실제 호출 지점의 파일 경로 포함).
+  5. **영향 범위(Blast Radius)** — 변경이 전파되는 핵심 파일 목록과 위험도.
+  6. **미확인 사항** — 확인하지 못한 부분과 사용자에게 확인할 질문 목록.
+  7. **Learnings for Next Steps** — 다음 단계가 재탐색 없이 재활용할 아키텍처 규칙·핵심 흐름·제약(문서 맨 끝).
+- 아직 코드를 수정하거나 계획을 세우지 마세요. 이번 턴은 "분석과 기록"만 합니다.
+- 파일 저장 후, 핵심 구조와 변경 대상을 한두 문장으로만 보고하세요.`;
 
 const RAG_STEP = `[시스템 지시: 사내 문서 RAG 검색 단계]
 아래에 첨부된 사내 문서(Confluence) 발췌는 사전 임베딩된 지식베이스에서 검색된 결과입니다.
@@ -99,28 +104,15 @@ const KNOWLEDGE_STEP = `[시스템 지시: 지식 베이스 반영 단계]
 - 이후 계획 수립 단계에서 이 지식을 제약·관례로 준수하세요.
 - 적용할 항목이 없으면 없다고 보고하세요.`;
 
-const SOURCE_ANALYSIS_STEP = `[시스템 지시: 소스코드 분석 단계]
-확정된 요구사항을 바탕으로 소스코드를 분석하고, 결과를 **분석서 파일로 작성**하세요.
-- 분석 대상은 프롬프트에 "분석 대상 코드베이스 폴더"가 명시되어 있으면 **그 폴더**(읽기 전용),
-  없으면 작업 폴더의 소스입니다.
-- 앞 단계의 \`docs/codebase-analysis.md\`(작업 폴더)와 그 Learnings를 출발점으로 삼으세요. 저장소 구조를 다시
-  탐색하지 말고, 요구사항이 건드리는 **변경 대상**에 집중해 관련 소스를 실제로 확인합니다.
-- 결과는 **작업 폴더**에 \`docs/source-analysis.md\` 파일로(없으면 docs 폴더도 생성) 파일 쓰기 도구로 저장하세요.
-- 분석서에는 다음을 포함하세요: 변경 대상 심볼과 시그니처·입출력(Key Interfaces) / 대상별 Callers·Callees 표 /
-  변경 대상 중심의 호출 흐름(mermaid 다이어그램) / **영향 범위(Blast Radius) — 핵심 파일 목록과 위험도** /
-  미확인 사항·추가로 필요한 정보.
-- 아직 코드를 수정하거나 계획을 세우지 마세요. 이번 턴은 "분석과 기록"만 합니다.
-- 파일 저장 후, 핵심 발견 사항을 한두 문장으로만 보고하세요.`;
-
 const PLAN_STEP = `[시스템 지시: 계획서 작성 단계]
-지금까지의 요구사항·소스 분석·문서 조사 결과를 종합해 **개발 계획서를 파일로 작성**하세요.
+지금까지의 요구사항·코드베이스 분석(\`docs/codebase-analysis.md\`)·문서 조사 결과를 종합해 **개발 계획서를 파일로 작성**하세요.
 - 작업 폴더에 \`docs/plan.md\` 파일을 만들어(없으면 docs 폴더도 생성) 파일 쓰기 도구로 저장하세요.
 - 계획서에는 다음을 포함하세요: 개요 / 요구사항 요약 / 영향받는 소스 / 구현 단계(순서) /
   일정·선행 조건 / 리스크·확인 필요 사항.
 - 파일을 저장한 뒤에는, 무엇을 어디에 작성했는지 한두 문장으로만 보고하세요.`;
 
 const IMPACT_STEP = `[시스템 지시: 변경영향분석서 작성 단계]
-계획서를 근거로 **변경영향분석서를 파일로 작성**하세요.
+코드베이스 분석서의 변경 대상·영향 범위(Blast Radius)와 계획서를 근거로 **변경영향분석서를 파일로 작성**하세요.
 - 작업 폴더에 \`docs/impact-analysis.md\` 파일을 만들어 파일 쓰기 도구로 저장하세요.
 - 분석서에는 다음을 포함하세요: 영향 파일 표(경로/변경 유형/영향 내용/위험도) / 호출 경로·데이터
   흐름의 전파 범위 / 코드 밖 영향(DB·API·설정) / 회귀 위험 영역 / mermaid 의존 다이어그램.
@@ -293,18 +285,12 @@ export const DEFAULT_FOUNDATION_STEPS: StepDef[] = [
  * plan's foundation trio is listed explicitly so the editor shows it; other
  * categories opt in via the Flows toggle (their stored workflow then carries
  * the trio — presence IS the flag). The old `confluence` search step was
- * superseded by the `rag` foundation step (user-saved workflows keep theirs). */
+ * superseded by the `rag` foundation step, and the old `source-analysis`
+ * document step was folded into the codebase step (D94) — user-saved
+ * workflows keep theirs. */
 export const DEFAULT_WORKFLOWS: Record<Category, StepDef[]> = {
   plan: [
     ...DEFAULT_FOUNDATION_STEPS,
-    {
-      id: "source-analysis",
-      name: "소스코드 분석",
-      kind: "document",
-      instruction: SOURCE_ANALYSIS_STEP,
-      file: "docs/source-analysis.md",
-      skillIds: ["source-analysis"],
-    },
     {
       id: "plan",
       name: "계획 생성",

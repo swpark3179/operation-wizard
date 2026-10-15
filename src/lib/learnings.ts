@@ -70,6 +70,12 @@ export interface ProducedDoc {
   path: string;
   /** Extracted Learnings (code-analysis steps only; null = none found). */
   learnings: string | null;
+  /** Index label instead of the step name (the app-made repository map — D94). */
+  label?: string;
+}
+
+function docLabel(d: ProducedDoc): string {
+  return d.label ?? (d.step.name?.trim() || d.step.id);
 }
 
 /** The hand-off context for a later generative step: the absolute-path index of
@@ -81,7 +87,7 @@ export function formatHandoffContext(docs: ProducedDoc[]): string {
   parts.push(
     [
       "[앞 단계 산출물 — 절대경로]",
-      ...docs.map((d) => `- ${d.step.name?.trim() || d.step.id}: ${d.path}`),
+      ...docs.map((d) => `- ${docLabel(d)}: ${d.path}`),
       "이번 단계에 필요한 근거는 먼저 위 문서에서 찾으세요. 코드베이스를 처음부터 다시 탐색하지 말고,",
       "문서에 없는 사실이 필요할 때만 해당 파일·심볼을 선택적으로 읽으세요.",
     ].join("\n"),
@@ -89,7 +95,7 @@ export function formatHandoffContext(docs: ProducedDoc[]): string {
   for (const d of docs) {
     if (!d.learnings) continue;
     parts.push(
-      `[앞 단계 코드 분석 Learnings — ${d.step.name?.trim() || d.step.id} (${d.path})]\n${d.learnings}`,
+      `[앞 단계 코드 분석 Learnings — ${docLabel(d)} (${d.path})]\n${d.learnings}`,
     );
   }
   return parts.join("\n\n");
