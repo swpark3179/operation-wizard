@@ -63,6 +63,10 @@ pub enum RunEvent {
     Stdout { chunk: String },
     /// A failure message (spawn error, non-zero exit, etc.).
     Error { message: String },
+    /// An informational line for the chat timeline that is neither assistant
+    /// text nor a failure — e.g. FabriX waiting for its per-minute call quota
+    /// (D91). CLI parsers never emit it.
+    Notice { message: String },
     /// Terminal event: the child exited (or was canceled).
     End {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -773,6 +777,12 @@ mod tests {
     fn text_delta_serializes_camel_case() {
         let json = serde_json::to_string(&RunEvent::TextDelta { delta: "x".into() }).unwrap();
         assert_eq!(json, r#"{"type":"textDelta","delta":"x"}"#);
+    }
+
+    #[test]
+    fn notice_serializes_for_the_frontend_mirror() {
+        let json = serde_json::to_string(&RunEvent::Notice { message: "대기".into() }).unwrap();
+        assert_eq!(json, r#"{"type":"notice","message":"대기"}"#);
     }
 
     #[test]

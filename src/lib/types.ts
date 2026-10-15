@@ -120,6 +120,10 @@ export interface FabrixConfig {
    * shown at app start without a network call; save/refresh/연결 테스트 refresh
    * it, D66). The frontend never sends this field. */
   models?: ModelOption[];
+  /** Licence quota: FabriX API calls per minute — every tool-loop round is one
+   * call, and the backend paces all FabriX runs to stay under it (D91).
+   * Absent → 10; 0 = no pacing. */
+  callsPerMinute?: number | null;
 }
 
 export interface Settings {
@@ -149,6 +153,8 @@ export type RunEvent =
   | { type: "usage"; inputTokens?: number; outputTokens?: number }
   | { type: "stdout"; chunk: string }
   | { type: "error"; message: string }
+  /** Informational timeline line (e.g. FabriX waiting for its call quota — D91). */
+  | { type: "notice"; message: string }
   | { type: "end"; code: number | null; status: string };
 
 /** Arguments for one agent run (one turn). */

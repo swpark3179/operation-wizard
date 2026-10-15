@@ -5,6 +5,7 @@ import {
   Brain,
   Check,
   ChevronRight,
+  Clock,
   Copy,
   FilePlus2,
   Loader2,
@@ -68,6 +69,13 @@ function Timeline({ events }: { events: TimelineEvent[] }) {
               }
             >
               <span className="line-clamp-4 whitespace-pre-wrap">{ev.content || "(no output)"}</span>
+            </div>
+          );
+        if (ev.kind === "notice")
+          return (
+            <div key={i} className="flex items-start gap-1.5 text-[11.5px] leading-[1.5] text-ink-soft">
+              <Clock size={12} className="mt-[2px] shrink-0" />
+              <span>{ev.text}</span>
             </div>
           );
         return (

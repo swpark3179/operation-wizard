@@ -5,6 +5,7 @@ mod confluence;
 mod detect;
 mod exec;
 mod fabrix;
+mod fabrix_rate;
 mod fabrix_tools;
 mod files;
 mod knowledge;
@@ -343,6 +344,7 @@ fn set_fabrix_config(config: Option<FabrixConfig>) -> Result<Settings, String> {
             c.default_model_id =
                 c.default_model_id.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
             c.allow_invalid_certs = false;
+            c.calls_per_minute = c.calls_per_minute.map(|n| n.min(1000));
             // Carry over the cached model list only when the connection is
             // unchanged; save is followed by detectOne(force=true) which refills.
             c.models = match &prev {

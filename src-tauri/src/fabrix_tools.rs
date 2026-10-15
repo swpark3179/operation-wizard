@@ -9,6 +9,12 @@
 //! `read_file`. There is deliberately no write/exec tool — document artifacts
 //! are still persisted by the app (ChatPanel → `write_file`, D67).
 //!
+//! Every tool-loop round is one billable FabriX call against a per-minute
+//! licence quota (D91), so the lookup tools also take **batches** —
+//! `read_file.files`, `outline_file.paths`, `search_text.queries`,
+//! `find_references.symbols` — and `read_file(symbol)` reads a declaration's
+//! body directly (outline line range), letting one round do the work of many.
+//!
 //! Every path is confined to a sandbox: the run's `cwd` + `RunArgs.extra_dirs`
 //! (codebase / skill folders / knowledge artifacts root). Roots and targets are
 //! both `fs::canonicalize`d (Windows `\\?\` form, real casing, 8.3 short names
@@ -28,6 +34,17 @@ use crate::files::{is_binary, is_secret_name, walk_files, WalkStop, SKIP_DIRS};
 
 /// Max characters of one tool result handed back to the model.
 pub const RESULT_CHARS: usize = 15_000;
+/// Max characters of one batched tool result (shared by its items, each item
+/// at most `RESULT_CHARS` and at least `BATCH_ITEM_MIN`) — D91.
+pub const BATCH_RESULT_CHARS: usize = 36_000;
+const BATCH_ITEM_MIN: usize = 3_000;
+/// Items one batched call processes (the rest are reported as skipped).
+const READ_BATCH_MAX: usize = 8;
+const OUTLINE_BATCH_MAX: usize = 10;
+const SEARCH_BATCH_MAX: usize = 8;
+const REF_BATCH_MAX: usize = 5;
+/// Declarations one `read_file(symbol)` returns when the name is ambiguous.
+const SYMBOL_MAX: usize = 3;
 const LIST_MAX: usize = 500;
 const FIND_MAX: usize = 200;
 const SEARCH_MAX: usize = 200;
@@ -60,37 +77,52 @@ pub fn tool_specs() -> Value {
         }},
         { "type": "function", "function": {
             "name": "search_text",
-            "description": "파일 내용에서 문자열을 재귀 검색합니다(대소문자 무시, 정규식 아님). 결과 형식: '경로:줄번호: 내용'. Search file contents.",
+            "description": "파일 내용에서 문자열을 재귀 검색합니다(대소문자 무시, 정규식 아님). 결과 형식: '경로:줄번호: 내용'. 여러 검색어는 queries 배열로 한 번에 검색하세요(파일을 한 번만 훑음). Search file contents.",
             "parameters": { "type": "object", "properties": {
                 "query": { "type": "string", "description": "찾을 문자열" },
+                "queries": { "type": "array", "items": { "type": "string" }, "maxItems": SEARCH_BATCH_MAX,
+                    "description": "여러 검색어를 한 번에(결과는 검색어별로 묶임). query 대신 사용." },
                 "path": { "type": "string", "description": "검색할 폴더 또는 파일. 생략하면 작업 폴더." },
                 "file_pattern": { "type": "string", "description": "파일명 와일드카드 필터, 예: *.xml" }
-            }, "required": ["query"] }
+            }, "required": [] }
         }},
         { "type": "function", "function": {
             "name": "outline_file",
-            "description": "소스 파일의 스켈레톤(클래스·메서드·필드 선언부, 핵심 어노테이션, Javadoc 첫 문장, 줄 범위 — 본문 제외)을 보여줍니다. Java·MyBatis/iBATIS 매퍼 XML(문장 id·참조 테이블 CRUD)·web.xml·struts-config·Spring XML·SQL/PL-SQL(테이블 컬럼·패키지 멤버)·Markdown 지원, 그 외는 근사. 파일 본문을 읽기 전에 먼저 쓰고, 필요한 범위만 read_file(start_line, max_lines)로 읽으세요. Outline a source file (signatures without bodies).",
+            "description": "소스 파일의 스켈레톤(클래스·메서드·필드 선언부, 핵심 어노테이션, Javadoc 첫 문장, 줄 범위 — 본문 제외)을 보여줍니다. Java·MyBatis/iBATIS 매퍼 XML(문장 id·참조 테이블 CRUD)·web.xml·struts-config·Spring XML·SQL/PL-SQL(테이블 컬럼·패키지 멤버)·Markdown 지원, 그 외는 근사. 파일 본문을 읽기 전에 먼저 쓰고, 여러 파일은 paths 배열로 한 번에 보세요. 본문은 read_file의 symbol(이름) 또는 start_line/max_lines로 필요한 부분만 읽습니다. Outline source files (signatures without bodies).",
             "parameters": { "type": "object", "properties": {
-                "path": { "type": "string", "description": "파일 경로(절대경로 또는 허용 폴더 기준 상대경로)" }
-            }, "required": ["path"] }
+                "path": { "type": "string", "description": "파일 경로(절대경로 또는 허용 폴더 기준 상대경로)" },
+                "paths": { "type": "array", "items": { "type": "string" }, "maxItems": OUTLINE_BATCH_MAX,
+                    "description": "여러 파일을 한 번에. path 대신 사용." }
+            }, "required": [] }
         }},
         { "type": "function", "function": {
             "name": "find_references",
-            "description": "심볼(클래스·메서드·필드·테이블명·매퍼 문장 id)을 참조하는 위치를 파일별로 찾고, 각 위치를 감싸는 메서드/SQL 문장과 정의 여부를 표시합니다(호출자·영향 범위 파악). 주석 속 일치는 제외, 문자열 속 일치는 '(문자열)'로 표시. 'Class.method' 형식이면 Class를 언급하는 파일로 좁힙니다. 대문자 심볼(테이블명)은 대소문자 무시. Find references / callers of a symbol.",
+            "description": "심볼(클래스·메서드·필드·테이블명·매퍼 문장 id)을 참조하는 위치를 파일별로 찾고, 각 위치를 감싸는 메서드/SQL 문장과 정의 여부를 표시합니다(호출자·영향 범위 파악). 주석 속 일치는 제외, 문자열 속 일치는 '(문자열)'로 표시. 'Class.method' 형식이면 Class를 언급하는 파일로 좁힙니다. 대문자 심볼(테이블명)은 대소문자 무시. 여러 심볼은 symbols 배열로 한 번에. Find references / callers of symbols.",
             "parameters": { "type": "object", "properties": {
                 "symbol": { "type": "string", "description": "찾을 심볼, 예: OrderService.findOrder, selectOrders, TB_ORDER" },
+                "symbols": { "type": "array", "items": { "type": "string" }, "maxItems": REF_BATCH_MAX,
+                    "description": "여러 심볼을 한 번에. symbol 대신 사용." },
                 "path": { "type": "string", "description": "검색할 폴더 또는 파일. 생략하면 모든 허용 폴더." },
                 "file_pattern": { "type": "string", "description": "파일명 와일드카드 필터, 예: *.java" }
-            }, "required": ["symbol"] }
+            }, "required": [] }
         }},
         { "type": "function", "function": {
             "name": "read_file",
-            "description": "텍스트 파일을 줄번호와 함께 읽습니다. 큰 파일은 start_line/max_lines로 나눠 읽으세요. Read a text file.",
+            "description": "텍스트 파일을 줄번호와 함께 읽습니다. symbol을 주면 그 메서드·생성자·클래스·매퍼 문장 id·SQL 프로시저/테이블·Markdown 헤딩의 본문만 읽고, 아니면 start_line/max_lines 범위를 읽습니다. 여러 파일·범위·심볼은 files 배열로 한 번에 읽으세요(호출 횟수 절약). Read text files, whole declarations by name, or line ranges.",
             "parameters": { "type": "object", "properties": {
                 "path": { "type": "string", "description": "파일 경로(절대경로 또는 작업 폴더 기준 상대경로)" },
+                "symbol": { "type": "string", "description": "본문을 읽을 선언 이름, 예: findOrder, OrderService.findOrder, selectOrders, P_CLEAN" },
                 "start_line": { "type": "integer", "description": "시작 줄(1부터). 기본 1." },
-                "max_lines": { "type": "integer", "description": "읽을 최대 줄 수. 기본·최대 2000." }
-            }, "required": ["path"] }
+                "max_lines": { "type": "integer", "description": "읽을 최대 줄 수. 기본·최대 2000." },
+                "files": { "type": "array", "maxItems": READ_BATCH_MAX,
+                    "description": "여러 파일/범위/심볼을 한 번에 읽기. 각 항목은 {path, symbol?, start_line?, max_lines?}. path 대신 사용.",
+                    "items": { "type": "object", "properties": {
+                        "path": { "type": "string" },
+                        "symbol": { "type": "string" },
+                        "start_line": { "type": "integer" },
+                        "max_lines": { "type": "integer" }
+                    }, "required": ["path"] } }
+            }, "required": [] }
         }}
     ])
 }
@@ -295,21 +327,101 @@ fn int_arg(args: &Value, key: &str) -> Option<usize> {
 /// Run one tool call. Never panics; every failure becomes an error outcome the
 /// model can read and react to (the run itself keeps going).
 pub fn run_tool(name: &str, args: &Value, sb: &Sandbox, cancel: &AtomicBool) -> ToolOutcome {
+    // `read_file` also accepts `paths` (an alias models reach for).
+    let batch_keys: &[&str] = match name {
+        "search_text" => &["queries"],
+        "outline_file" => &["paths"],
+        "find_references" => &["symbols"],
+        "read_file" => &["files", "paths"],
+        _ => &[],
+    };
+    let batched = batch_keys.iter().any(|k| list_arg(args, k).is_some_and(|items| items.len() > 1));
+    let cap = if batched { BATCH_RESULT_CHARS } else { RESULT_CHARS };
     let res = match name {
         "list_dir" => list_dir(sb, args),
         "find_files" => find_files(sb, args, cancel),
         "search_text" => search_text(sb, args, cancel),
-        "outline_file" => outline_file(sb, args),
+        "outline_file" => outline_file(sb, args, cancel),
         "find_references" => find_references(sb, args, cancel),
-        "read_file" => read_file(sb, args),
+        "read_file" => read_file(sb, args, cancel),
         other => Err(format!(
             "'{other}' 도구는 없습니다. 사용할 수 있는 도구는 list_dir, find_files, search_text, outline_file, find_references, read_file(모두 읽기 전용)뿐입니다. \
              파일 저장은 앱이 처리하므로, 문서를 작성하는 단계라면 최종 답변에 문서 본문만 출력하세요."
         )),
     };
     match res {
-        Ok(text) => ToolOutcome::ok(clip_chars(&text, RESULT_CHARS)),
-        Err(e) => ToolOutcome::err(e),
+        Ok(text) => ToolOutcome::ok(clip_chars(&text, cap)),
+        Err(e) => ToolOutcome::err(clip_chars(&e, cap)),
+    }
+}
+
+/// A batch argument (`files`/`paths`/`queries`/`symbols`) as a non-empty
+/// array. Tolerates a JSON-encoded array string, which models sometimes send.
+fn list_arg(args: &Value, key: &str) -> Option<Vec<Value>> {
+    let v = args.get(key)?;
+    let arr = match v {
+        Value::Array(a) => a.clone(),
+        Value::String(s) if s.trim_start().starts_with('[') => serde_json::from_str::<Vec<Value>>(s).ok()?,
+        _ => return None,
+    };
+    Some(arr).filter(|a| !a.is_empty())
+}
+
+/// The non-blank strings of a batch argument.
+fn str_items(items: &[Value]) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Per-item character cap of a batch of `n`.
+fn batch_item_cap(n: usize) -> usize {
+    (BATCH_RESULT_CHARS / n.max(1)).clamp(BATCH_ITEM_MIN, RESULT_CHARS)
+}
+
+/// Run `one` for each item (at most `max`), sharing the batch cap. One failing
+/// item never fails the batch (its error is shown in place); the call is an
+/// error only when every item failed.
+fn run_batch<T>(
+    items: &[T],
+    max: usize,
+    label: impl Fn(&T) -> String,
+    one: impl Fn(&T, usize) -> Result<String, String>,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    let shown = &items[..items.len().min(max)];
+    let cap = batch_item_cap(shown.len());
+    let mut out = String::new();
+    let mut failed = 0usize;
+    for (i, it) in shown.iter().enumerate() {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("취소되었습니다.".to_string());
+        }
+        out.push_str(&format!("### [{}/{}] {}\n", i + 1, shown.len(), label(it)));
+        match one(it, cap) {
+            Ok(t) => out.push_str(&clip_chars(t.trim_end(), cap)),
+            Err(e) => {
+                failed += 1;
+                out.push_str(&format!("오류: {e}"));
+            }
+        }
+        out.push_str("\n\n");
+    }
+    if items.len() > shown.len() {
+        out.push_str(&format!(
+            "…(요청 {}개 중 앞의 {}개만 처리했습니다 — 나머지는 다음 호출에서 요청하세요)\n",
+            items.len(),
+            shown.len()
+        ));
+    }
+    if failed == shown.len() {
+        Err(out)
+    } else {
+        Ok(out)
     }
 }
 
@@ -403,12 +515,22 @@ fn find_files(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String,
 }
 
 fn search_text(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String, String> {
-    let query = str_arg(args, "query").ok_or("query 인자가 필요합니다.")?;
-    let needle = query.to_lowercase();
+    let mut queries: Vec<String> = list_arg(args, "queries").map(|a| str_items(&a)).unwrap_or_default();
+    if queries.is_empty() {
+        queries.extend(str_arg(args, "query").map(str::to_string));
+    }
+    if queries.is_empty() {
+        return Err("query 인자가 필요합니다 (여러 검색어는 queries 배열).".to_string());
+    }
+    let requested = queries.len();
+    queries.truncate(SEARCH_BATCH_MAX);
+    let needles: Vec<String> = queries.iter().map(|q| q.to_lowercase()).collect();
     let target = sb.resolve(str_arg(args, "path"))?;
     let file_pattern = str_arg(args, "file_pattern");
+    // One walk for every query; each query keeps its own hit list and cap.
+    let per_query = if needles.len() == 1 { SEARCH_MAX } else { (SEARCH_MAX / needles.len()).max(25) };
 
-    let mut hits: Vec<String> = Vec::new();
+    let mut hits: Vec<Vec<String>> = vec![Vec::new(); needles.len()];
     let mut scanned = 0usize;
     let mut scan = |p: &Path, size: u64| -> bool {
         if size > SEARCH_FILE_MAX || sb.denied(p) {
@@ -427,12 +549,15 @@ fn search_text(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String
         scanned += 1;
         let text = String::from_utf8_lossy(&bytes);
         for (i, line) in text.lines().enumerate() {
-            if line.to_lowercase().contains(&needle) {
-                let shown: String = line.trim().chars().take(LINE_PREVIEW).collect();
-                hits.push(format!("{}:{}: {}", display_path(p), i + 1, shown));
-                if hits.len() >= SEARCH_MAX {
-                    return false;
+            let lower = line.to_lowercase();
+            for (q, needle) in needles.iter().enumerate() {
+                if hits[q].len() < per_query && lower.contains(needle.as_str()) {
+                    let shown: String = line.trim().chars().take(LINE_PREVIEW).collect();
+                    hits[q].push(format!("{}:{}: {}", display_path(p), i + 1, shown));
                 }
+            }
+            if hits.iter().all(|h| h.len() >= per_query) {
+                return false;
             }
         }
         true
@@ -448,28 +573,59 @@ fn search_text(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String
     } else {
         walk_files(&target, cancel, &mut scan)
     };
-    let note = walk_note(&stop, SEARCH_MAX)?;
-    if hits.is_empty() {
-        return Ok(format!(
-            "'{query}' 검색 결과가 없습니다 (파일 {scanned}개 확인, {}).\n{note}",
-            display_path(&target)
-        ));
+    let where_ = display_path(&target);
+
+    if needles.len() == 1 {
+        let query = &queries[0];
+        let note = walk_note(&stop, SEARCH_MAX)?;
+        let hits = &hits[0];
+        if hits.is_empty() {
+            return Ok(format!("'{query}' 검색 결과가 없습니다 (파일 {scanned}개 확인, {where_}).\n{note}"));
+        }
+        let mut out = format!("'{query}' 내용 검색 — {}건 (파일 {scanned}개 확인, {where_})\n", hits.len());
+        for h in hits {
+            out.push_str(h);
+            out.push('\n');
+        }
+        out.push_str(note);
+        return Ok(out);
     }
-    let mut out = format!(
-        "'{query}' 내용 검색 — {}건 (파일 {scanned}개 확인, {})\n",
-        hits.len(),
-        display_path(&target)
-    );
-    for h in &hits {
-        out.push_str(h);
-        out.push('\n');
+
+    let note = match stop {
+        WalkStop::Canceled => return Err("취소되었습니다.".to_string()),
+        WalkStop::Limit => "…(탐색 항목 상한 도달 — 하위 폴더를 지정해 다시 검색하세요)\n",
+        _ => "",
+    };
+    let mut out = format!("검색어 {}개 내용 검색 (파일 {scanned}개 확인, {where_}, 검색어별 최대 {per_query}건)\n", queries.len());
+    for (q, query) in queries.iter().enumerate() {
+        let h = &hits[q];
+        out.push_str(&format!("\n### '{query}' — {}건{}\n", h.len(), if h.len() >= per_query { " (상한 — 검색어·경로를 좁히세요)" } else { "" }));
+        for line in h {
+            out.push_str(line);
+            out.push('\n');
+        }
     }
     out.push_str(note);
+    if requested > queries.len() {
+        out.push_str(&format!("…(검색어 {requested}개 중 앞의 {}개만 검색했습니다)\n", queries.len()));
+    }
     Ok(out)
 }
 
-fn outline_file(sb: &Sandbox, args: &Value) -> Result<String, String> {
-    let path = sb.resolve(Some(str_arg(args, "path").ok_or("path 인자가 필요합니다.")?))?;
+fn outline_file(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String, String> {
+    if let Some(items) = list_arg(args, "paths") {
+        let paths = str_items(&items);
+        if paths.is_empty() {
+            return Err("paths에는 파일 경로 문자열 배열을 넣으세요.".to_string());
+        }
+        return run_batch(&paths, OUTLINE_BATCH_MAX, |p| p.clone(), |p, cap| outline_one(sb, p, cap), cancel);
+    }
+    let path = str_arg(args, "path").ok_or("path 인자가 필요합니다 (여러 파일은 paths 배열).")?;
+    outline_one(sb, path, RESULT_CHARS)
+}
+
+fn outline_one(sb: &Sandbox, raw: &str, cap: usize) -> Result<String, String> {
+    let path = sb.resolve(Some(raw))?;
     if !path.is_file() {
         return Err(format!(
             "파일이 아닙니다: {} — 폴더 구조는 list_dir·find_files로 보세요.",
@@ -488,28 +644,104 @@ fn outline_file(sb: &Sandbox, args: &Value) -> Result<String, String> {
         return Err(format!("바이너리 파일은 아웃라인을 만들 수 없습니다: {}", display_path(&path)));
     }
     let o = codemap::outline(codemap::lang_for(&path), &bytes);
-    Ok(codemap::render_outline(&o, &display_path(&path), RESULT_CHARS.saturating_sub(200)))
+    Ok(codemap::render_outline(&o, &display_path(&path), cap.saturating_sub(200)))
 }
 
 fn find_references(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String, String> {
-    let symbol = str_arg(args, "symbol").ok_or("symbol 인자가 필요합니다 (예: OrderService.findOrder, selectOrders, TB_ORDER).")?;
     let roots: Vec<PathBuf> = match str_arg(args, "path") {
         Some(p) => vec![sb.resolve(Some(p))?],
         None => sb.roots().to_vec(),
     };
     let pattern = str_arg(args, "file_pattern");
-    codemap::find_references(
-        &roots,
-        symbol,
-        &|name: &str| pattern.map(|fp| wildcard_match(fp, name)).unwrap_or(true),
-        &|p: &Path| sb.denied(p),
-        &|p: &Path| display_path(p),
-        cancel,
-    )
+    let one = |symbol: &str| {
+        codemap::find_references(
+            &roots,
+            symbol,
+            &|name: &str| pattern.map(|fp| wildcard_match(fp, name)).unwrap_or(true),
+            &|p: &Path| sb.denied(p),
+            &|p: &Path| display_path(p),
+            cancel,
+        )
+    };
+    if let Some(items) = list_arg(args, "symbols") {
+        let symbols = str_items(&items);
+        if symbols.is_empty() {
+            return Err("symbols에는 심볼 문자열 배열을 넣으세요.".to_string());
+        }
+        return run_batch(&symbols, REF_BATCH_MAX, |s| format!("'{s}' 참조"), |s, _| one(s), cancel);
+    }
+    let symbol = str_arg(args, "symbol")
+        .ok_or("symbol 인자가 필요합니다 (예: OrderService.findOrder, selectOrders, TB_ORDER; 여러 개는 symbols 배열).")?;
+    one(symbol)
 }
 
-fn read_file(sb: &Sandbox, args: &Value) -> Result<String, String> {
-    let path = sb.resolve(Some(str_arg(args, "path").ok_or("path 인자가 필요합니다.")?))?;
+/// One `read_file` request: a path plus either a declaration name or a range.
+struct ReadSpec {
+    path: String,
+    symbol: Option<String>,
+    start: Option<usize>,
+    max: Option<usize>,
+}
+
+impl ReadSpec {
+    /// From the call's own arguments, or a `files` item (an object, or a bare
+    /// path string).
+    fn from_value(v: &Value) -> Option<Self> {
+        if let Some(p) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(Self { path: p.to_string(), symbol: None, start: None, max: None });
+        }
+        Some(Self {
+            path: str_arg(v, "path")?.to_string(),
+            symbol: str_arg(v, "symbol").map(str::to_string),
+            start: int_arg(v, "start_line"),
+            max: int_arg(v, "max_lines"),
+        })
+    }
+
+    fn label(&self) -> String {
+        match &self.symbol {
+            Some(sym) => format!("{} · {sym}", self.path),
+            None => match self.start {
+                Some(st) => format!("{} · {st}줄부터", self.path),
+                None => self.path.clone(),
+            },
+        }
+    }
+}
+
+fn read_file(sb: &Sandbox, args: &Value, cancel: &AtomicBool) -> Result<String, String> {
+    if let Some(items) = list_arg(args, "files").or_else(|| list_arg(args, "paths")) {
+        let specs: Vec<ReadSpec> = items.iter().filter_map(ReadSpec::from_value).collect();
+        if specs.is_empty() {
+            return Err("files의 각 항목에는 path가 필요합니다 (예: {\"path\": \"…\", \"symbol\": \"findOrder\"}).".to_string());
+        }
+        return run_batch(&specs, READ_BATCH_MAX, ReadSpec::label, |sp, cap| read_one(sb, sp, cap), cancel);
+    }
+    let spec = ReadSpec::from_value(args).ok_or("path 인자가 필요합니다 (여러 파일은 files 배열).")?;
+    read_one(sb, &spec, RESULT_CHARS)
+}
+
+/// Numbered lines `from..=to` (1-based) within `budget` characters; returns the
+/// text and the last line included (at least one line is always included).
+fn numbered(lines: &[&str], from: usize, to: usize, budget: usize) -> (String, usize) {
+    let mut body = String::new();
+    let mut used = 0usize;
+    let mut last = from - 1;
+    for (i, line) in lines.iter().enumerate().take(to).skip(from - 1) {
+        let row = format!("{:>5}\t{}\n", i + 1, line);
+        let n = row.chars().count();
+        if used + n > budget && last >= from {
+            break;
+        }
+        body.push_str(&row);
+        used += n;
+        last = i + 1;
+    }
+    (body, last)
+}
+
+fn read_one(sb: &Sandbox, spec: &ReadSpec, cap: usize) -> Result<String, String> {
+    let path = sb.resolve(Some(&spec.path))?;
     if !path.is_file() {
         return Err(format!("파일이 아닙니다: {} — 폴더는 list_dir로 보세요.", display_path(&path)));
     }
@@ -524,30 +756,21 @@ fn read_file(sb: &Sandbox, args: &Value) -> Result<String, String> {
     let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.lines().collect();
     let total = lines.len();
-    let start = int_arg(args, "start_line").unwrap_or(1).max(1);
-    let max = int_arg(args, "max_lines").unwrap_or(READ_LINES).clamp(1, READ_LINES);
     if total == 0 {
         return Ok(format!("{} — 빈 파일입니다.", display_path(&path)));
     }
+    // Leave room for the header/footer inside the cap.
+    let budget = cap.saturating_sub(400);
+    if let Some(symbol) = &spec.symbol {
+        return read_symbol(&path, &bytes, &lines, symbol, budget);
+    }
+
+    let start = spec.start.unwrap_or(1).max(1);
+    let max = spec.max.unwrap_or(READ_LINES).clamp(1, READ_LINES);
     if start > total {
         return Err(format!("start_line {start}이(가) 파일 줄 수({total})보다 큽니다: {}", display_path(&path)));
     }
-
-    // Leave room for the header/footer inside the per-result cap.
-    let budget = RESULT_CHARS.saturating_sub(400);
-    let mut body = String::new();
-    let mut used = 0usize;
-    let mut last = start - 1; // last 1-based line included
-    for (i, line) in lines.iter().enumerate().skip(start - 1).take(max) {
-        let row = format!("{:>5}\t{}\n", i + 1, line);
-        let n = row.chars().count();
-        if used + n > budget && last >= start {
-            break;
-        }
-        body.push_str(&row);
-        used += n;
-        last = i + 1;
-    }
+    let (body, last) = numbered(&lines, start, (start - 1 + max).min(total), budget);
     let mut out = format!("{} — 전체 {total}줄, {start}–{last}줄\n", display_path(&path));
     out.push_str(&body);
     if last < total {
@@ -555,6 +778,47 @@ fn read_file(sb: &Sandbox, args: &Value) -> Result<String, String> {
             "…(계속 읽으려면 read_file(path, start_line={}))\n",
             last + 1
         ));
+    }
+    Ok(out)
+}
+
+/// `read_file(symbol)`: the body of the declaration(s) named `symbol`, located
+/// with the outline's line ranges (`codemap::symbol_items` / `item_span`).
+fn read_symbol(path: &Path, bytes: &[u8], lines: &[&str], symbol: &str, budget: usize) -> Result<String, String> {
+    let label = display_path(path);
+    if bytes.len() as u64 > codemap::OUTLINE_FILE_MAX {
+        return Err(format!(
+            "파일이 너무 커서 심볼 위치를 찾지 않습니다: {label} — search_text로 위치를 찾고 start_line/max_lines로 읽으세요."
+        ));
+    }
+    let o = codemap::outline(codemap::lang_for(path), bytes);
+    let found = codemap::symbol_items(&o, symbol, SYMBOL_MAX);
+    if found.is_empty() {
+        let names: Vec<String> = o
+            .items
+            .iter()
+            .filter(|it| it.kind != "more" && it.kind != "field" && it.kind != "column")
+            .take(15)
+            .map(|it| format!("L{} {}", it.line, it.signature.chars().take(80).collect::<String>()))
+            .collect();
+        let mut e = format!("'{symbol}' 선언을 찾지 못했습니다: {label}");
+        if !names.is_empty() {
+            e.push_str(&format!("\n선언 목록(일부):\n{}", names.join("\n")));
+        }
+        e.push_str("\n이름을 고쳐 다시 요청하거나 start_line/max_lines로 읽으세요.");
+        return Err(e);
+    }
+    let total = lines.len();
+    let mut out = format!("{label} — '{symbol}' 선언 {}곳 (전체 {total}줄)\n", found.len());
+    let per = budget / found.len();
+    for idx in found {
+        let (from, to) = codemap::item_span(&o, idx, lines);
+        let (body, last) = numbered(lines, from, to, per.max(400));
+        out.push_str(&format!("[L{from}-{to}] {}\n", o.items[idx].signature));
+        out.push_str(&body);
+        if last < to {
+            out.push_str(&format!("…(이 선언의 나머지는 read_file(path, start_line={}, max_lines={}))\n", last + 1, to - last));
+        }
     }
     Ok(out)
 }
@@ -808,6 +1072,92 @@ mod tests {
         assert!(s.resolve(Some("..")).unwrap_err().contains("허용된 폴더 밖"));
         let _ = fs::remove_dir_all(&work);
         let _ = fs::remove_dir_all(&code);
+    }
+
+    #[test]
+    fn read_file_batches_files_and_reads_symbols() {
+        let root = tree("batch-read");
+        fs::write(
+            root.join("src").join("OrderService.java"),
+            "public class OrderService {\n  /** 주문 조회 */\n  public Order findOrder(Long id) {\n    return dao.get(id);\n  }\n\n  public void cancel(Long id) {\n    dao.cancel(id);\n  }\n}\n",
+        )
+        .unwrap();
+        let s = sb(&root);
+
+        // One declaration by name — the body plus the Javadoc above it, nothing else.
+        let one = run_tool("read_file", &json!({ "path": "src/OrderService.java", "symbol": "findOrder" }), &s, &no_cancel());
+        assert!(!one.is_error, "{}", one.content);
+        assert!(one.content.contains("[L2-5] public Order findOrder(Long id)"), "{}", one.content);
+        assert!(one.content.contains("return dao.get(id);") && !one.content.contains("dao.cancel"), "{}", one.content);
+        // Unknown names list the declarations instead of failing silently.
+        let miss = run_tool("read_file", &json!({ "path": "src/OrderService.java", "symbol": "nope" }), &s, &no_cancel());
+        assert!(miss.is_error && miss.content.contains("cancel(Long id)"), "{}", miss.content);
+
+        // A batch mixes symbols, ranges and bare paths; one bad item doesn't fail the call.
+        let batch = run_tool(
+            "read_file",
+            &json!({ "files": [
+                { "path": "src/OrderService.java", "symbol": "OrderService.cancel" },
+                { "path": "README.md", "start_line": 2 },
+                "src/util/Helper.java",
+                { "path": "missing.txt" }
+            ] }),
+            &s,
+            &no_cancel(),
+        );
+        assert!(!batch.is_error, "{}", batch.content);
+        assert!(batch.content.contains("### [1/4] src/OrderService.java · OrderService.cancel"), "{}", batch.content);
+        assert!(batch.content.contains("dao.cancel(id);") && !batch.content.contains("dao.get(id)"));
+        assert!(batch.content.contains("    2\tORDER_TABLE 설명") && batch.content.contains("class Helper {}"));
+        assert!(batch.content.contains("### [4/4] missing.txt\n오류:"), "{}", batch.content);
+        // A JSON-encoded array string is accepted too; all-failed → error.
+        let all_bad = run_tool("read_file", &json!({ "files": "[\"nope1\", \"nope2\"]" }), &s, &no_cancel());
+        assert!(all_bad.is_error && all_bad.content.contains("[2/2] nope2"), "{}", all_bad.content);
+        // Over the item limit → the rest is reported, not dropped silently.
+        let many: Vec<Value> = (0..10).map(|_| json!("README.md")).collect();
+        let capped = run_tool("read_file", &json!({ "files": many }), &s, &no_cancel());
+        assert!(capped.content.contains("요청 10개 중 앞의 8개만"), "{}", capped.content);
+        // The `paths` alias is a batch too (shares the batch cap, all items shown).
+        let alias = run_tool("read_file", &json!({ "paths": ["README.md", "Order.java"] }), &s, &no_cancel());
+        assert!(alias.content.contains("### [2/2] Order.java") && alias.content.contains("class Order {"), "{}", alias.content);
+        assert!(run_tool("read_file", &json!({}), &s, &no_cancel()).is_error);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn outline_search_and_references_take_batches() {
+        let root = tree("batch-misc");
+        let s = sb(&root);
+        let out = run_tool("outline_file", &json!({ "paths": ["Order.java", "src/OrderMapper.xml", "nope.java"] }), &s, &no_cancel());
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("### [1/3] Order.java") && out.content.contains("class Order"), "{}", out.content);
+        assert!(out.content.contains("ORDER_TABLE(R)") && out.content.contains("### [3/3] nope.java\n오류:"));
+
+        // Several queries in one walk, grouped per query.
+        let multi = run_tool("search_text", &json!({ "queries": ["order_table", "class Helper", "zzz_none"] }), &s, &no_cancel());
+        assert!(!multi.is_error, "{}", multi.content);
+        assert!(multi.content.contains("검색어 3개 내용 검색"), "{}", multi.content);
+        assert!(multi.content.contains("### 'order_table' — 3건"), "{}", multi.content);
+        assert!(multi.content.contains("### 'class Helper' — 1건") && multi.content.contains("Helper.java:1:"));
+        assert!(multi.content.contains("### 'zzz_none' — 0건"));
+        assert!(!multi.content.contains(".env"), "secrets stay excluded");
+        // A one-element array keeps the single-query format.
+        let single = run_tool("search_text", &json!({ "queries": ["class Helper"] }), &s, &no_cancel());
+        assert!(single.content.starts_with("'class Helper' 내용 검색 — 1건"), "{}", single.content);
+        assert!(run_tool("search_text", &json!({}), &s, &no_cancel()).is_error);
+
+        let refs = run_tool("find_references", &json!({ "symbols": ["Order", "Helper"] }), &s, &no_cancel());
+        assert!(!refs.is_error, "{}", refs.content);
+        assert!(refs.content.contains("### [1/2] 'Order' 참조") && refs.content.contains("### [2/2] 'Helper' 참조"), "{}", refs.content);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn batch_caps_share_the_result_budget() {
+        assert_eq!(batch_item_cap(1), RESULT_CHARS);
+        assert_eq!(batch_item_cap(2), RESULT_CHARS, "two items still get the single cap each");
+        assert_eq!(batch_item_cap(8), BATCH_RESULT_CHARS / 8);
+        assert_eq!(batch_item_cap(100), BATCH_ITEM_MIN);
     }
 
     #[test]

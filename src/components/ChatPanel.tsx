@@ -580,6 +580,14 @@ export function ChatPanel({
       case "error":
         updateLastAssistant((m) => ({ ...m, error: ev.message }));
         break;
+      case "notice":
+        // e.g. FabriX pacing to its per-minute call quota (D91). Not part of the
+        // reply text (the remote document body is unaffected).
+        updateLastAssistant((m) => ({
+          ...m,
+          events: [...m.events, { kind: "notice", text: ev.message }],
+        }));
+        break;
       case "end": {
         setStreaming(false);
         runIdRef.current = null;
@@ -893,8 +901,10 @@ export function ChatPanel({
       const cb = codebasePathRef.current;
       if (step.kind === "codebase" && cb) {
         const terms = focusTermsFrom(`${seedPromptRef.current}\n${lastAnswersWireRef.current}`);
+        // FabriX pays one quota-limited call per lookup round (D91): give it the
+        // larger map (more key outlines + the request's SQL bodies).
         const [map, cached] = await Promise.all([
-          codebaseMap(cb, terms).catch(() => null),
+          codebaseMap(cb, terms, isRemote ? "extended" : undefined).catch(() => null),
           getCodebaseLearnings(cb, category).catch(() => null),
         ]);
         if (preflightAbortRef.current) return {};
@@ -910,6 +920,19 @@ export function ChatPanel({
         if (cached) {
           parts.unshift(formatCachedLearnings(cached));
           cacheNote = cachedLearningsNote(cached);
+        }
+      }
+      // FabriX source analysis (D91): its sessionless transcript skips the
+      // codebase step's wire, so the map is gone — re-attach the request-specific
+      // part (hits, chains, SQL bodies, key outlines) instead of re-exploring.
+      if (isRemote && cb && codeAnalysisMode(step) === "focus") {
+        const terms = focusTermsFrom(`${seedPromptRef.current}\n${lastAnswersWireRef.current}`);
+        const focusMap = await codebaseMap(cb, terms, "focus").catch(() => null);
+        if (preflightAbortRef.current) return {};
+        if (focusMap) {
+          parts.unshift(
+            `[사전 계산된 변경 대상 지도 — 앱의 비AI 정적 분석 결과(근사치). 여기 있는 구조·SQL 본문은 다시 조회하지 말고, 필요한 심볼만 도구로 확인하세요]\n${focusMap}`,
+          );
         }
       }
       const context = parts.filter(Boolean).join("\n\n");
@@ -1102,7 +1125,9 @@ export function ChatPanel({
     let preflightContext = "";
     if (!isPrefill && stepInject && step) {
       const stepIdx = stepIndexRef.current;
-      const mapsCodebase = step.kind === "codebase" && !!codebasePathRef.current;
+      const mapsCodebase =
+        !!codebasePathRef.current &&
+        (step.kind === "codebase" || (isRemote && codeAnalysisMode(step) === "focus"));
       const fetches = step.kind === "rag" || step.kind === "knowledge" || mapsCodebase;
       const fetchNote =
         step.kind === "rag"
@@ -1180,9 +1205,16 @@ export function ChatPanel({
     // what they need with the tools, then emit only the clean document body
     // (no tool talk / greetings) so the saved file is the document itself.
     // Only for remote document steps; CLI wire unchanged.
+    // Tool calls are billed per round against a per-minute quota (D91): ask for
+    // batched lookups, and — once earlier steps produced documents, whose
+    // bodies the sessionless transcript already carries — not to re-read them.
+    const priorDocs = [...producedDocsRef.current.keys()].some((i) => i < stepIndexRef.current);
     const remoteDocCtx =
       !isPrefill && isRemote && stepInject && step && isGenerative(step.kind) && step.file
-        ? "이 단계의 최종 답변 전체가 그대로 문서 파일로 저장됩니다(저장은 앱이 처리). 필요하면 먼저 읽기 전용 파일 도구(list_dir·find_files·search_text·outline_file·find_references·read_file)로 근거 파일을 읽은 뒤, 최종 답변에는 파일 저장 도구 사용·저장 여부 언급·인사말·메타설명 없이 문서 본문(마크다운/HTML)만 출력하세요."
+        ? "이 단계의 최종 답변 전체가 그대로 문서 파일로 저장됩니다(저장은 앱이 처리). 필요하면 먼저 읽기 전용 파일 도구(list_dir·find_files·search_text·outline_file·find_references·read_file)로 근거 파일을 읽은 뒤, 최종 답변에는 파일 저장 도구 사용·저장 여부 언급·인사말·메타설명 없이 문서 본문(마크다운/HTML)만 출력하세요. 도구 호출은 분당 한도가 있으니 필요한 조회는 한 응답에 묶어(files·paths·queries·symbols 배열) 요청하세요." +
+          (priorDocs
+            ? " 앞 단계 산출 문서의 본문은 위 대화에 이미 포함되어 있으므로 read_file로 다시 읽지 말고, 필요한 소스코드만 확인하세요."
+            : "")
         : "";
 
     const wire = isPrefill

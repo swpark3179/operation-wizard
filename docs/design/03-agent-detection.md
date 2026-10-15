@@ -152,9 +152,10 @@ resolve  →  version probe  →  models probe(있으면)  →  DetectedAgent
 
 - `Settings { agents: { [agentId]: { customBin } }, skills?, workflows?, confluence?, rag?, fabrix? }` —
   에이전트별 경로 맵 + **워크플로우 단계/스킬 override**(탐지와 무관, [07](07-workspace-and-runs.md)·
-  [05](05-decisions.md) D39) + **`fabrix: FabrixConfig?`**(endpointUrl/client/openapiToken/**defaultModelId**
+  [05](05-decisions.md) D39) + **`fabrix: FabrixConfig?`**(endpointUrl/client/openapiToken/**defaultModelId**/
+  **callsPerMinute**(라이선스 분당 호출 한도 — 없으면 10, 0 = 페이싱 없음, D91)
   (+레거시 allowInvalidCerts — 항상 false) — FabriX 원격 에이전트 연결, D64/D84. `set_fabrix_config`로 저장/해제 —
-  저장 시 endpoint 정규화). 구 settings.json의 `aipro` 섹션은 로드 시 무시되고 다음 저장에서 사라진다(D83).
+  저장 시 endpoint 정규화·callsPerMinute ≤1000 상한). 구 settings.json의 `aipro` 섹션은 로드 시 무시되고 다음 저장에서 사라진다(D83).
 - **모델 목록 캐시(D66)**: `FabrixConfig`/`RagConfig`에 `models: Vec<ModelOption>`
   (`#[serde(default, skip_serializing_if=Vec::is_empty)]`)를 둔다. 저장/새로고침/연결 테스트에서 라이브로
   조회한 목록을 여기에 저장하고, 이후 탐지는 **캐시 우선**(`detect_fabrix(cfg, force, persist)` —
@@ -179,8 +180,12 @@ resolve  →  version probe  →  models probe(있으면)  →  DetectedAgent
   `[Context]`/`[Tools]`·nbsp), endpoint 정규화·`Bearer` 자동 부착, `resolve_model`/기본 모델 정렬/구 UUID 캐시 무효,
   `error_message`(WSO2/OIDC/litellm 오류 3종 + 429/405 힌트), `StreamAccumulator`(captured 도구 호출 스트림의
   조각 병합·usage 청크·reasoning), `chat_body`(헤더 모델·`/mnt/models`·`max_tokens` 없음·`tool_choice`),
-  도구 예산. `fabrix_tools`: 와일드카드·샌드박스(`..`/외부 경로/`.env` 거부, 상대경로 다중 루트 해석)·5종 도구
-  (`outline_file`·`find_references` 포함 — D87/D89)·취소. `codemap`: Java(Spring 컨트롤러·렉싱 토처·enum/익명 클래스/람다·record/제네릭·
+  도구 예산, 시스템 프롬프트의 호출 비용·묶음 원칙·라운드 꼬리표(D91). `fabrix_rate`(D91): 슬라이딩 창 `next_slot`
+  (한도 미만 통과·한도 도달 시 대기·429 차단·0 = 무제한)·429 대기 계산(`Retry-After`·창 기준 추정·60초·90초 초과 포기)·
+  취소 가능 sleep. `fabrix_tools`: 와일드카드·샌드박스(`..`/외부 경로/`.env` 거부, 상대경로 다중 루트 해석)·6종 도구
+  (`outline_file`·`find_references` 포함 — D87/D89)·**묶음 인자**(`read_file.files`·`symbol`, `outline_file.paths`,
+  `search_text.queries`, `find_references.symbols`, 항목별 오류·상한 — D91)·취소. `codemap`: `symbol_items`/`item_span`(선언 우선·Javadoc 포함 범위·매퍼 문장·SQL·헤딩 — D91), repo_map 상세 수준
+  (Extended의 SQL 문장 본문·아웃라인 수, Focus의 섹션 생략 — D91), Java(Spring 컨트롤러·렉싱 토처·enum/익명 클래스/람다·record/제네릭·
   eGov/Struts·CRLF·깨진 UTF-8·불균형)·MyBatis/iBATIS/web.xml/struts/beans/매퍼 조각·SQL(DDL+COMMENT ON·패키지
   spec/body·트리거/뷰·문자열/주석 렉싱·`sql_tables` 패턴)·Markdown·근사 폴백·렌더 예산 fixture.
   `#[ignore]` **E2E `fabrix_e2e_mock`**: 샘플 목업 서버 상대로 모델 목록·도구 루프·no-tools 스트림·404/401 힌트.
@@ -191,7 +196,7 @@ resolve  →  version probe  →  models probe(있으면)  →  DetectedAgent
 - **E2E(Windows)**: 임시 `opencode.cmd` 스텁을 만들고 `detect_agent_blocking(find("opencode"))`로
   탐지 → resolve + cmd.exe 래핑 + version/models 파싱까지 통과하는지 확인.
 - 잘못된 custom-path가 검색으로 fall-through 하는지 확인.
-- **settings 단위 테스트**: skills/workflows 라운드트립(+`FabrixConfig`(defaultModelId·context/tools 메타)/
+- **settings 단위 테스트**: skills/workflows 라운드트립(+`FabrixConfig`(defaultModelId·callsPerMinute·context/tools 메타)/
   `RagConfig`의 `models` 캐시 영속 — D66/D84), 구파일 하위호환(+레거시 마이그레이션 유지·`models` 없는 구 JSON→빈
   벡터·**구 `aipro` 섹션 무시 + 다음 저장에서 소멸** — D83), `validate_steps`/`validate_skills` 규칙, reset(`None`) 의미론.
 

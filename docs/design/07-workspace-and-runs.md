@@ -69,7 +69,10 @@ Open Design의 `RuntimeAgentDef.buildArgs`/`streamFormat`/`promptViaStdin`에 �
   샌드박스 = `cwd` + extraDirs; `outline_file`은 `codemap`의 스켈레톤 — 선언부·줄 범위만, 본문 제외 — D87;
   `find_references`는 심볼의 참조를 감싸는 메서드/문장과 함께 파일별로 묶은 호출자 목록 — D89) → `toolResult`(UI엔 2k자 미리보기) → assistant(tool_calls)+`role:"tool"`
   메시지를 덧붙여 다음 라운드. 상한 12라운드·`[Context]` 기반 도구 출력 예산, 소진 시 `tool_choice:"none"`으로
-  답 강제. `RunArgs.tools=false`(텍스트 전용 격리 턴)나 도구 미지원 모델이면 도구 없이 1라운드. 세션리스
+  답 강제. 도구는 **묶음 인자**(`read_file.files`·`read_file(symbol)`·`outline_file.paths`·`search_text.queries`·
+  `find_references.symbols`)를 받아 한 라운드가 여러 조회를 처리하고, 라운드마다 남은 라운드 꼬리표가 붙는다 — 라운드 1회 =
+  과금 호출 1회이기 때문(D91). 모든 호출은 전역 게이트(`fabrix_rate`)가 **분당 호출 한도**(`callsPerMinute`, 기본 10)에
+  맞춰 페이싱한다. `RunArgs.tools=false`(텍스트 전용 격리 턴)나 도구 미지원 모델이면 도구 없이 1라운드. 세션리스
   (매 턴 transcript 재전송). 파일을 **쓰지는** 못하므로 **문서 단계 산출물은 클라이언트가 `write_file`로 저장**
   한다(`ChatPanel` end 분기 — D67; 본문 = 마지막 도구 호출 이후 텍스트).
 
@@ -96,7 +99,9 @@ Open Design의 `RuntimeAgentDef.buildArgs`/`streamFormat`/`promptViaStdin`에 �
    `Option`이라 **원격(fabrix) 런은 플래그만 set**하고 taskkill을 건너뛴다(SSE 루프·도구 루프가 플래그를 관측해 종료).
 5. **원격 경로(fabrix — D64/D84)**: `run_fabrix`가 config 로드 + 모델 결정 → `RunRegistry`에서 id
    민팅(`next_id`) + 자식 없는 취소 플래그 등록(`register_remote`) → 워커 스레드에서 라운드 루프:
-   `POST .../chat/completions`(429 + 짧은 `Retry-After`면 1회 대기, 1라운드 도구 관련 400이면 도구 없이 재시도)
+   `POST .../chat/completions`(직전에 `fabrix_rate::acquire`로 분당 호출 한도 대기 — 대기 시 `notice` 이벤트; 429는
+   `Retry-After`/창 기준 추정/60초만큼 기다린 뒤 **같은 요청을 재전송**(최대 2회, 대화 messages는 메모리에 유지되어 진행 손실
+   없음, 90초 초과 대기는 실패) — D91; 1라운드 도구 관련 400이면 도구 없이 재시도)
    → 응답을 `BufReader`로 읽어 `data:` 라인을 lossy 디코드(`run::stream_lines`와 동일 방식) →
    `StreamAccumulator::feed`로 `RunEvent` 방출 → tool_calls가 있으면 도구 실행 후 다음 라운드
    (라인·라운드·도구 실행·디렉터리 순회 사이 취소 플래그 확인) → 종료 후 합산 `usage` 1회 + `unregister` +
@@ -120,6 +125,7 @@ Open Design `DaemonAgentPayload`의 부분집합. 프론트 미러는 `lib/types
 | `usage` | `inputTokens?`, `outputTokens?` | 토큰 사용량 |
 | `stdout` | `chunk` | 원시 stdout(plain 폴백) |
 | `error` | `message` | 실패 메시지 |
+| `notice` | `message` | 정보성 타임라인 행(FabriX 분당 호출 한도 대기·429 재전송 대기 — D91). 답변 본문·문서 파일에는 섞이지 않음 |
 | `end` | `code?`, `status` | 종료(`succeeded`/`failed`/`canceled`) |
 
 ### 스트림 파서 (`run.rs`, 모두 `fn(&str)->Vec<RunEvent>` · 단위 테스트)
@@ -235,7 +241,7 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 | `list_dir` | `path: string` | `FileEntry[]` | 캔버스 파일 트리 |
 | `read_file` | `path: string` | `string` | 파일 내용(상한 2 MiB) |
 | `write_file` | `path: string`, `contents: string` | — | 파일 쓰기(부모 dir 생성, 상한 5 MiB). 원격 에이전트(FabriX) 문서 산출물(최종 답변)을 `<workdir>/<step.file>`로 저장 — D67/D84 |
-| `codebase_map` | `root: string`, `focusTerms?: string[]` | `string` | 비AI 저장소 지도(기술 스택·트리·라우트·의존 체인⇢테이블·허브·핵심 아웃라인) — codebase 단계 preflight 주입(D88) |
+| `codebase_map` | `root: string`, `focusTerms?: string[]`, `detail?: "extended" \| "focus"` | `string` | 비AI 저장소 지도(기술 스택·트리·라우트·의존 체인⇢테이블·허브·핵심 아웃라인) — codebase 단계 preflight 주입(D88). FabriX는 `extended`(아웃라인 6개 + 요청 SQL 문장 본문)·소스 분석 단계 `focus`(요청 발췌) — D91 |
 | `get_codebase_learnings` / `save_codebase_learnings` | `codebasePath`, `category` / + `text`, `projectId?` | `CodebaseLearnings \| null` / — | 코드베이스별 Learnings 캐시(`~/.operation-wizard/codebases/` — D90) |
 | `ensure_project` | `projectId: string`, `workdir: string`(빈값 허용), `title: string`, `category: string`, `codebasePath?: string` | `Project` | 프로젝트 폴더+매니페스트 생성(idempotent). workdir 빈값→`workspace/` 하위폴더 resolve해 반환. 홈에서 지정한 폴더면 그 경로 |
 | `set_project_codebase` | `projectId: string`, `codebasePath: string \| null` | `Project` | 기존 매니페스트의 코드베이스 경로 갱신/해제(D45) |
@@ -249,7 +255,7 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
 | `list_knowledge` / `save_knowledge` / `delete_knowledge` | — / `entry` / `id` | `KnowledgeEntry[]` / `KnowledgeEntry` / — | 지식 베이스 CRUD(`~/.operation-wizard/knowledge/<id>.json`; knowledge 단계 주입용. 삭제는 artifact 폴더 동반 제거 — D59) |
 | `save_knowledge_files` / `get_knowledge_root` | `entry`, `sources: string[]` / — | `KnowledgeEntry` / `string` | 산출물 지식 저장(D59): 산출물 파일을 `knowledge/artifacts/<id>/`로 staged-swap 복사 + artifact 엔트리 upsert / 지식 루트 절대경로(주입 인덱스·extraDirs용) |
 | `set_confluence_config` / `set_rag_config` | `config \| null` | `Settings` | 지식 뷰의 수집/검색 설정 저장·해제 |
-| `set_fabrix_config` / `probe_fabrix` | `config \| null` / — | `Settings` / `string` | Agents 뷰 FabriX 카드: 연결 설정 저장·해제(빈 endpointUrl=해제; endpoint 정규화·`defaultModelId`; `models` 캐시 이월/무효화) / 연결 테스트(`GET /openapi/llm/v1/models`, 프록시 우회 → `fabrix.models` 캐시 저장 + "연결됨 — N개 모델 (기본: …)", 실패는 한글 힌트) — D64/D66/D84 |
+| `set_fabrix_config` / `probe_fabrix` | `config \| null` / — | `Settings` / `string` | Agents 뷰 FabriX 카드: 연결 설정 저장·해제(빈 endpointUrl=해제; endpoint 정규화·`defaultModelId`·`callsPerMinute`(분당 호출 한도, D91); `models` 캐시 이월/무효화) / 연결 테스트(`GET /openapi/llm/v1/models`, 프록시 우회 → `fabrix.models` 캐시 저장 + "연결됨 — N개 모델 (기본: …)", 실패는 한글 힌트) — D64/D66/D84 |
 | `start_confluence_ingest` | `target: ConfluenceTarget`, `onEvent: Channel<IngestEvent>` | `ingestId: string` | Confluence **MCP** BFS 크롤(워커 스레드) → 페이지들을 지식 베이스 artifact 1개로 저장(`IngestEvent` 스트리밍: `started`/`pageFetched`/`pageIngested`/`pageFailed`/`error`/`end`; D82) |
 | `cancel_ingest` / `probe_confluence` | `ingestId` / — | — / `string` | 수집 취소(`IngestRegistry` 플래그) / MCP 연결 테스트(initialize+tools/list → 도구 요약, D82) |
 
@@ -385,7 +391,9 @@ md 미리보기 파일바의 **목차 버튼**(D58)은 렌더된 DOM에서 h1~h3
   `--include-directories` — D52; 원격 FabriX는 같은 폴더를 읽기 전용 파일 도구 샌드박스로 받음, D84) + 절대경로
   컨텍스트(`pathContext`)가 "이 폴더에서 탐색 시작"을 지시 + **preflight가 `codebase_map`으로 비AI 저장소 지도를
   계산해 wire에 첨부**("코드베이스 구조 사전 분석 중…" 노트·Stop 가능, 실패 시 지도 없이 진행; plain 에이전트는
-  argv 길이 한계로 2k자로 축약 — D88) + **같은 코드베이스의 이전 프로젝트가 남긴 Learnings 캐시**(`get_codebase_learnings` —
+  argv 길이 한계로 2k자로 축약 — D88; **FabriX는 `extended` 지도**(핵심 아웃라인 6개 + 요청 키워드와 일치하는 SQL 문장 본문) —
+  탐색 라운드(=과금 호출)를 줄이기 위해, 그리고 세션리스 transcript가 이 wire를 이후 단계에 넘기지 않으므로 **소스 분석(focus)
+  단계에는 `focus` 지도**(요청 관련·의존 체인·문장 본문·아웃라인)를 다시 첨부 — D91) + **같은 코드베이스의 이전 프로젝트가 남긴 Learnings 캐시**(`get_codebase_learnings` —
   저장 이후 변경 파일 수·샘플과 함께 "출발점으로 삼고 변경분만 확인·갱신" 지시 + 채팅 안내 노트; orient 단계가 끝나면
   추출한 Learnings를 `save_codebase_learnings`로 갱신 — D90) + 내장 코드 분석 방법론(orient — D86)) →
   `rag`(preflight가 `rag_search`로 사내 문서 발췌를 조회한 뒤 **관련성 판단 턴**(D70)이 이번 작업과의

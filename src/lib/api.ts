@@ -183,8 +183,12 @@ export function writeFile(path: string, contents: string): Promise<void> {
  * dependency chains down to SQL tables, hubs, key outlines) — injected by the
  * codebase-step preflight. `focusTerms` (identifier-like words from the
  * request) are listed first when they hit statements/types/routes. */
-export function codebaseMap(root: string, focusTerms: string[]): Promise<string> {
-  return invoke<string>("codebase_map", { root, focusTerms });
+export function codebaseMap(
+  root: string,
+  focusTerms: string[],
+  detail?: "extended" | "focus",
+): Promise<string> {
+  return invoke<string>("codebase_map", { root, focusTerms, detail: detail ?? null });
 }
 
 /** Learnings an earlier project saved for this codebase + category, with the
