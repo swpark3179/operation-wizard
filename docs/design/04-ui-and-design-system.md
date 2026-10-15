@@ -113,8 +113,12 @@
   - `AgentsView`는 `settings`(경로 맵) + `onSave`(→ `set_agent_bin` 후 재탐지)를 각 카드에 전달한다.
 - **`FabrixCard`**(`id=="fabrix"` — 원격 HTTP API, D64/D84): 상태·Refresh + 모델 목록(접이식, `live`/`cached`
   배지, 모델별 context·"도구 지원"·"기본" 배지) + 연결 설정(ENDPOINT_URL — 발급 URL만, `/openapi/llm`·`Bearer`는
-  앱이 부착 / x-fabrix-client / x-openapi-token / **기본 모델 select**(목록 미로드 시 id 입력, 기본 70)) + 연결 테스트 +
-  저장. 인증서 검증 건너뛰기 옵션은 없다(TLS 상시 검증).
+  앱이 부착 / x-fabrix-client / x-openapi-token / **기본 모델 select**(목록 미로드 시 id 입력, 기본 70) /
+  **분당 호출 한도(라이선스)** 숫자 입력(비우면 10, 0 = 제한 없음 — D91)) + 연결 테스트 + 저장. 인증서 검증 건너뛰기
+  옵션은 없다(TLS 상시 검증).
+- 채팅 타임라인의 **대기 행**(D91): FabriX가 분당 호출 한도에 맞춰 기다리거나 429 후 재전송을 기다리면
+  `RunEvent::Notice`가 시계 아이콘의 muted 한 줄("FabriX 분당 호출 한도(10회)에 맞춰 23초 대기 후 이어서 진행합니다")로
+  표시된다(도구 행·사용량 행과 같은 `Timeline`; 이벤트로 기록되어 라이브니스 90초 경고가 오발하지 않음).
 
 ## 디자인 토큰 (`styles/tokens.css`)
 

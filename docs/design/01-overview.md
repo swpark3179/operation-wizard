@@ -29,7 +29,8 @@
     API**(OpenAI 호환 — 바탕화면 `FabrixSample` 레퍼런스 기반, D84). 설정(endpoint + `x-fabrix-client`·
     `x-openapi-token`) 유무 + `GET {endpoint}/openapi/llm/v1/models` 도달성으로 탐지하고, 모델 목록은 숫자
     modelId + 한글 이름 + context/도구 지원 메타로 매핑·캐시(D66). 모델은 요청마다 **`x-llm-model-id` 헤더**로
-    고르며, 카드에서 정한 **기본 모델**(기본 70 = Glm 5.2)이 목록 맨 앞에 온다.
+    고르며, 카드에서 정한 **기본 모델**(기본 70 = Glm 5.2)이 목록 맨 앞에 온다. 라이선스의 **분당 호출 한도**(카드 설정, 기본
+    10회)에 맞춰 앱이 모든 FabriX 호출을 페이싱하고, 도구 묶음 조회·사전 저장소 지도로 호출 수 자체를 줄인다(D91).
   - 결과를 에이전트별 카드 UI로 표시(로컬=상태/경로/버전/모델; FabriX=상태/모델(context·도구 배지) + endpoint·
     client·token·기본 모델 입력 폼 + 연결 테스트). 로컬은 사용자 지정 경로, FabriX는 연결 정보를 영구 저장
     (settings.json).
